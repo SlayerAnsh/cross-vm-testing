@@ -1,3 +1,15 @@
 /target
 .env
 .env.*
+
+# Solidity (Foundry)
+examples/solidity-contracts/out/
+examples/solidity-contracts/cache/
+examples/solidity-contracts/lib/
+
+# Solana (Anchor)
+examples/solana-contracts/target/
+examples/solana-contracts/.anchor/
+
+# CosmWasm
+examples/cosmwasm-contracts/counter/target/

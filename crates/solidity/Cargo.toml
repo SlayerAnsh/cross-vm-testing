@@ -1,0 +1,16 @@
+[package]
+name = "cross-vm-solidity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "EVM/Solidity chain provider (revm) for the cross-vm testing suite"
+
+[dependencies]
+cross-vm-core.workspace = true
+revm.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+alloy = { workspace = true }
+hex = "0.4"

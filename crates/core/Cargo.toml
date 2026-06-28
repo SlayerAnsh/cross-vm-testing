@@ -1,0 +1,10 @@
+[package]
+name = "cross-vm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared chain-provider abstractions for the cross-vm testing suite"
+
+[dependencies]
+thiserror.workspace = true

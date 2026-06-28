@@ -1,0 +1,17 @@
+[package]
+name = "cross-vm-cosmwasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CosmWasm chain provider (cw-multi-test) for the cross-vm testing suite"
+
+[dependencies]
+cross-vm-core.workspace = true
+cw-multi-test.workspace = true
+cosmwasm-std.workspace = true
+thiserror.workspace = true
+serde_json = "1"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }

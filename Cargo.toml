@@ -1,6 +1,36 @@
-[package]
-name = "cross-vm-testing"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/cosmwasm",
+    "crates/solidity",
+    "crates/solana",
+]
 
-[dependencies]
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Anshudhar/cross-vm-testing"
+
+[workspace.dependencies]
+# Internal
+cross-vm-core = { path = "crates/core" }
+
+# Shared
+thiserror = "2"
+
+# CosmWasm
+cw-multi-test = "3"
+cosmwasm-std = "3"
+
+# EVM / Solidity
+revm = "41"
+alloy = { version = "1", features = ["full", "sol-types"] }
+alloy-primitives = "1"
+alloy-chains = "0.2"
+
+# Solana
+litesvm = "0.13"
+solana-sdk = "4"
+solana-program = "4"
