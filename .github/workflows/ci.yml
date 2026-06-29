@@ -12,71 +12,178 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Incremental compilation bloats the cache without helping a cold CI runner.
+  CARGO_INCREMENTAL: 0
 
 jobs:
-  ci:
-    name: CI
+  # ---------------------------------------------------------------------------
+  # Lint: fmt + clippy + doc. Shares the main rust-cache with `test` so the
+  # dependency graph compiles once and restores everywhere. No contract
+  # artifacts are needed: clippy stays artifact-free (no --all-targets, so it
+  # never compiles the test binaries that embed the .so/.json). No standalone
+  # `cargo build --workspace` here: `test` compiles the whole workspace anyway,
+  # and clippy already surfaces build errors, so a build step would just be a
+  # duplicate compile burning runner-minutes.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint (fmt / clippy / doc)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # rustflags: "" so the global default of -D warnings is not applied to every cargo
-      # invocation. We enforce -D warnings explicitly on clippy below; the third-party Solana
-      # program build (cargo build-sbf) emits deprecation warnings we do not control.
+      # rustflags: "" so the action's default -D warnings is not applied to every
+      # cargo invocation; -D warnings is enforced explicitly on clippy below.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
-
-      # ----- Cheap, artifact-free checks first, so a trivial failure does not pay for the
-      #       Foundry / Solana toolchain installs below. -----
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-vm-main   # SHARED with the test job
+          cache-on-failure: true
       - name: cargo fmt
         run: cargo fmt --all --check
-      # No --all-targets: the test targets embed gitignored contract artifacts that only exist
-      # after the compile steps below. Lib/bin clippy stays artifact-free.
       - name: cargo clippy
         run: cargo clippy --workspace -- -D warnings
       - name: cargo doc
         run: cargo doc --workspace --no-deps
-      - name: cargo build
-        run: cargo build --workspace
 
-      # ----- Toolchains for the contract artifacts the integration tests embed. -----
-      - uses: foundry-rs/foundry-toolchain@v1
-      - name: forge fmt
-        working-directory: examples/solidity-contracts
-        run: forge fmt --check
-      # Solana (Agave) platform tools from Anza; the legacy release.solana.com host is flaky.
-      # This provides cargo-build-sbf, which builds the program .so directly (no Anchor CLI: it
-      # added an anchor-cli/anchor-lang version handshake that silently produced no .so).
-      # Pin v4.0.0: its platform-tools Cargo understands edition2024, which a transitive dep in
-      # the committed solana-contracts/Cargo.lock (toml_parser) requires. Older lines (v2.1.0
-      # ships Cargo 1.79) fail to parse that manifest. Keep this in step with the lock.
+  # ---------------------------------------------------------------------------
+  # Solana artifacts: install+cache pinned Agave v4.0.0, cargo build-sbf in the
+  # ISOLATED solana-contracts workspace, upload the 3 .so. This is light: the
+  # root workspace excludes examples/ and solana-contracts is its own workspace
+  # (members = ["programs/*"]), so build-sbf compiles ONLY the 3 SBF programs
+  # under platform-tools, never the main target. Do NOT add solana-contracts to
+  # the root workspace or this job balloons.
+  # ---------------------------------------------------------------------------
+  solana-artifacts:
+    name: Solana artifacts (build-sbf)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      # Cache the Agave platform-tools install, keyed on the pinned version.
+      - name: Cache Solana toolchain
+        id: solana-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/solana
+          key: solana-v4.0.0-${{ runner.os }}
+      # Pin v4.0.0: its platform-tools Cargo understands edition2024, required by
+      # a transitive dep (toml_parser) in the committed solana-contracts/Cargo.lock.
+      # Older lines (v2.1.0 ships Cargo 1.79) fail to parse it. Keep in step with
+      # the lock. cargo-build-sbf builds the .so directly (no Anchor CLI: its
+      # version handshake silently produced no .so).
       - name: Install Solana
+        if: steps.solana-cache.outputs.cache-hit != 'true'
+        run: sh -c "$(curl -sSfL https://release.anza.xyz/v4.0.0/install)"
+      - name: Solana on PATH
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v4.0.0/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
           "$HOME/.local/share/solana/install/active_release/bin/solana" --version
-
-      # ----- Build the embedded artifacts once, then reuse across the test steps below. -----
-      # EVM: out/*.json consumed by sol! (test contracts skipped, they need forge-std).
-      # Solana: target/deploy/*.so consumed by include_bytes!.
-      # CosmWasm needs no artifact here: the cross-VM tests wrap the example contracts in-process
-      # via cw-multi-test ContractWrapper (native rlib), not compiled wasm.
-      - name: Compile Solidity artifacts
-        run: make compile-solidity
-      - name: Compile Solana artifacts
+      # Cache the isolated SBF workspace target + registry, keyed on its own lock.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/solana-contracts
+          shared-key: solana-sbf-v4.0.0
+          cache-on-failure: true
+      - name: cargo build-sbf
+        run: make compile-solana
+      - name: Verify .so exist
         run: |
-          make compile-solana
-          # Fail loudly if the .so are missing (a build that no-ops would otherwise pass here
-          # and only fail later at the include_bytes! in the test compile).
           for so in counter ping_pong vault; do
             test -f "examples/solana-contracts/target/deploy/$so.so" \
               || { echo "missing $so.so after compile-solana"; exit 1; }
           done
+      - name: Upload Solana artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: solana-so
+          path: examples/solana-contracts/target/deploy/*.so
+          if-no-files-found: error
+          retention-days: 1
 
-      # ----- Tests. One target dir, reused; the artifacts above are already built. -----
-      # Everything except cross-vm-cosmwasm, whose tests/onchain.rs embeds a compiled
-      # counter.wasm built only by the Docker CosmWasm optimizer (not available in CI). That is
-      # a live #[ignore] test; the cross-VM cosmwasm path is still covered via ContractWrapper.
+  # ---------------------------------------------------------------------------
+  # Solidity artifacts: Foundry, forge fmt --check, forge build, upload the 3
+  # .json. Very light (<1s build). --skip "*.t.sol" (in the Makefile) drops the
+  # test contracts that need forge-std. No Foundry cache: prebuilt binaries fetch
+  # in seconds and the build is sub-second.
+  # ---------------------------------------------------------------------------
+  solidity-artifacts:
+    name: Solidity artifacts (forge build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: forge fmt
+        working-directory: examples/solidity-contracts
+        run: forge fmt --check
+      - name: forge build
+        run: make compile-solidity
+      - name: Verify JSON exist
+        run: |
+          for c in Counter PingPong Vault; do
+            test -f "examples/solidity-contracts/out/$c.sol/$c.json" \
+              || { echo "missing $c.json after compile-solidity"; exit 1; }
+          done
+      # Upload the whole out/ dir so the Name.sol/Name.json nesting that sol!
+      # expects is preserved verbatim.
+      - name: Upload Solidity artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: solidity-out
+          path: examples/solidity-contracts/out
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Test: download both contract artifacts into their EXACT embed paths, then run
+  # the full test suite. The only job that compiles the full workspace for tests;
+  # rust-cache (shared-key with lint) warms the dependency graph. Artifacts are
+  # embedded at COMPILE time (include_bytes! for .so, sol! for .json), so a wrong
+  # path fails the compile, not a test: the verify step catches that early.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: [solana-artifacts, solidity-artifacts]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-vm-main   # SHARED with the lint job
+          cache-on-failure: true
+      # Solana .so -> examples/solana-contracts/target/deploy/  (include_bytes!)
+      - name: Download Solana artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: solana-so
+          path: examples/solana-contracts/target/deploy
+      # Solidity .json -> examples/solidity-contracts/out/  (sol!, consumed by
+      # both crates/solidity/tests and the integration-tests support files).
+      - name: Download Solidity artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: solidity-out
+          path: examples/solidity-contracts/out
+      - name: Verify embedded artifacts are in place
+        run: |
+          for so in counter ping_pong vault; do
+            test -f "examples/solana-contracts/target/deploy/$so.so" \
+              || { echo "missing $so.so"; exit 1; }
+          done
+          for c in Counter PingPong Vault; do
+            test -f "examples/solidity-contracts/out/$c.sol/$c.json" \
+              || { echo "missing $c.json"; exit 1; }
+          done
+      # Everything except cross-vm-cosmwasm, whose tests/onchain.rs embeds a
+      # compiled counter.wasm built only by the Docker CosmWasm optimizer (not in
+      # CI). That is a live #[ignore] test; the cross-VM cosmwasm path is still
+      # covered via in-process ContractWrapper.
       - name: Test (workspace except cosmwasm)
         run: cargo test --workspace --exclude cross-vm-cosmwasm
       # cross-vm-cosmwasm minus the wasm-embedding onchain.rs target.
