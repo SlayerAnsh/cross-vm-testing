@@ -12,6 +12,11 @@
 //! Design and protocol-fact citations live in
 //! `docs/superpowers/specs/2026-06-29-tron-chain-support-design.md`.
 
+pub mod chains;
 mod error;
+pub mod provider;
+pub mod tvm;
 
+pub use chains::TronChainInfo;
 pub use error::TronError;
+pub use provider::{address_from_pubkey, TronAddress};
