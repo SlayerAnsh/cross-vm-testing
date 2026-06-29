@@ -2339,6 +2339,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cross-vm-tron"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "alloy-primitives",
+ "alloy-signer-local",
+ "bs58",
+ "cross-vm-core",
+ "cross-vm-macros",
+ "k256",
+ "revm",
+ "sha2 0.10.9",
+ "sha3 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "crossbeam-deque"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
