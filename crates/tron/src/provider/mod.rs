@@ -7,3 +7,5 @@ pub mod rpc;
 
 pub use address::{address_from_pubkey, TronAddress};
 pub use execution::TronExecution;
+pub use mock::{TronMockProvider, TronInner, DEFAULT_FUNDING_SUN};
+pub use rpc::TronRpcProvider;

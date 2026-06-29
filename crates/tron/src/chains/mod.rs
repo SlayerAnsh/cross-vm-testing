@@ -2,6 +2,7 @@
 
 mod info;
 pub mod presets;
+mod sugar;
 
 pub use info::TronChainInfo;
 pub use presets::{LOCAL, MAINNET, NILE, SHASTA};
