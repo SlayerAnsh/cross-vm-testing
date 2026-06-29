@@ -321,7 +321,7 @@ impl Bridge {
 pub fn parse_packets(kind: ChainKind, raw: &RawResponse) -> Vec<PacketEvent> {
     match kind {
         ChainKind::CosmWasm => parse_cosmwasm(raw),
-        ChainKind::Evm => parse_evm(raw),
+        ChainKind::Evm | ChainKind::Tron => parse_evm(raw),
         ChainKind::Svm => parse_solana(raw),
     }
 }
@@ -365,7 +365,8 @@ fn parse_cosmwasm(raw: &RawResponse) -> Vec<PacketEvent> {
 fn parse_evm(raw: &RawResponse) -> Vec<PacketEvent> {
     use alloy::sol_types::SolEvent;
 
-    let Ok(logs) = raw.evm_logs() else {
+    // Tron logs are EVM-shaped and carried on the Tron response variant; accept either.
+    let Ok(logs) = raw.evm_logs().or_else(|_| raw.tron_logs()) else {
         return Vec::new();
     };
     let mut out = Vec::new();
