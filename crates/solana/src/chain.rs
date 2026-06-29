@@ -9,13 +9,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use cross_vm_core::{ChainProvider, FundError, WalletDeriver, WalletFactory, WalletLabel};
+use cross_vm_core::{
+    wallet_lock, ChainProvider, ChainSpec, FundError, WalletDeriver, WalletFactory, WalletLabel,
+};
 use litesvm::types::TransactionMetadata;
 use solana_account::Account;
 use solana_address::Address;
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
-use tokio::sync::OwnedMutexGuard;
 
 use crate::asset::SvmAsset;
 use crate::chains::SolanaChainInfo;
@@ -64,25 +65,35 @@ impl SvmChain {
         }
     }
 
-    /// Resolve a wallet label to its signer and acquire its broadcast lock. The guard must be
-    /// held for the whole broadcast so the same wallet never sends two txs at once. Signers are
-    /// derived once and cached.
-    async fn acquire<'a>(
-        &self,
-        label: WalletLabel<'a>,
-    ) -> Result<(SvmSigner, OwnedMutexGuard<()>), SvmError> {
-        let factory = self.wallets().clone();
-        let def = factory.def(label)?.clone();
-        let guard = factory.lock(label).await?;
+    /// Resolve a wallet label to its signer (derived once and cached). Broadcast serialization is
+    /// handled separately on the RPC path via [`cross_vm_core::wallet_lock`] keyed by the live
+    /// account; the in-process mock backend needs no lock.
+    async fn acquire<'a>(&self, label: WalletLabel<'a>) -> Result<SvmSigner, SvmError> {
         let key = label.as_str();
         if let Some(signer) = self.signers().borrow().get(key).cloned() {
-            return Ok((signer, guard));
+            return Ok(signer);
         }
+        let def = self.wallets().resolve(label)?;
         let signer = self.signer_for(&def)?;
         self.signers()
             .borrow_mut()
             .insert(key.to_string(), signer.clone());
-        Ok((signer, guard))
+        Ok(signer)
+    }
+
+    /// Acquire the global broadcast lock for `addr` on this RPC cluster, keyed by `(chain, address)`
+    /// so the same live account serializes process-wide. Held across the whole send -> confirm.
+    async fn broadcast_guard(
+        p: &SvmRpcProvider,
+        addr: &Address,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let info = p.chain_info();
+        wallet_lock::lock_broadcast(&wallet_lock::lock_key(
+            info.kind(),
+            info.chain_id(),
+            &addr.to_string(),
+        ))
+        .await
     }
 
     /// Derive (and cache) a wallet's pubkey without acquiring the broadcast lock. Useful for
@@ -92,7 +103,7 @@ impl SvmChain {
         if let Some(signer) = self.signers().borrow().get(key).cloned() {
             return Ok(signer.pubkey());
         }
-        let def = self.wallets().def(label)?.clone();
+        let def = self.wallets().resolve(label)?;
         let signer = self.signer_for(&def)?;
         let pubkey = signer.pubkey();
         self.signers().borrow_mut().insert(key.to_string(), signer);
@@ -125,10 +136,13 @@ impl SvmChain {
         instructions: impl AsRef<[Instruction]>,
         wallet: WalletLabel<'_>,
     ) -> Result<TransactionMetadata, SvmError> {
-        let (signer, _guard) = self.acquire(wallet).await?;
+        let signer = self.acquire(wallet).await?;
         match self {
             SvmChain::Mock(p) => p.send_transaction(instructions, signer.keypair()).await,
-            SvmChain::Rpc(p) => p.send_transaction(instructions, &signer).await,
+            SvmChain::Rpc(p) => {
+                let _g = Self::broadcast_guard(p, &signer.pubkey()).await;
+                p.send_transaction(instructions, &signer).await
+            }
         }
     }
 

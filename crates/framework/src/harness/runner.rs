@@ -61,7 +61,10 @@ impl Sequential for Invariant {}
 pub struct EnduranceConfig {
     /// Wall-clock duration to run for.
     pub duration: Duration,
-    /// Maximum random delay inserted between operations.
+    /// Minimum delay applied between every operation, before jitter. Guarantees a floor on
+    /// inter-op spacing (the total delay is `base_delay + rand(0..=max_delay)`).
+    pub base_delay: Duration,
+    /// Maximum random jitter added on top of `base_delay` between operations.
     pub max_delay: Duration,
     /// Check invariants every N applied operations (`1` = after each, `0` = never mid-run).
     pub check_every: usize,
@@ -77,6 +80,7 @@ impl EnduranceConfig {
     pub fn new(duration: Duration) -> Self {
         Self {
             duration,
+            base_delay: Duration::ZERO,
             max_delay: Duration::ZERO,
             check_every: 1,
             advance_blocks: None,
@@ -84,7 +88,13 @@ impl EnduranceConfig {
         }
     }
 
-    /// Set the maximum random inter-op delay.
+    /// Set the minimum inter-op delay applied before jitter.
+    pub fn base_delay(mut self, d: Duration) -> Self {
+        self.base_delay = d;
+        self
+    }
+
+    /// Set the maximum random inter-op jitter (added on top of `base_delay`).
     pub fn max_delay(mut self, d: Duration) -> Self {
         self.max_delay = d;
         self
@@ -284,6 +294,7 @@ impl<H: Harness> Runner<H, Endurance> {
     pub async fn run(&mut self, cfg: EnduranceConfig) -> RunReport<H::Operation> {
         let EnduranceConfig {
             duration,
+            base_delay,
             max_delay,
             check_every,
             advance_blocks,
@@ -348,11 +359,14 @@ impl<H: Harness> Runner<H, Endurance> {
                     }
                 }
 
-                if !max_delay.is_zero() {
-                    let ms = rng.below(max_delay.as_millis() + 1) as u64;
-                    if ms > 0 {
-                        sleep(Duration::from_millis(ms)).await;
-                    }
+                let jitter = if max_delay.is_zero() {
+                    0
+                } else {
+                    rng.below(max_delay.as_millis() + 1) as u64
+                };
+                let ms = base_delay.as_millis() as u64 + jitter;
+                if ms > 0 {
+                    sleep(Duration::from_millis(ms)).await;
                 }
             }
 

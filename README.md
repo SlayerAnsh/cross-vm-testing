@@ -64,7 +64,7 @@ Use the **`Harness` runner** when you want a property checked across *many* sequ
 | --- | --- | --- |
 | `FuzzRunner::run(ops, kinds, check_every)` | One short random sequence over the loaded world, drawing from all kinds (`None`) or a restricted subset | The input space is large and you want random exploration of operation interleavings |
 | `InvariantRunner::run(ops, None, check_every)` | One long persisted sequence, invariants checked along the way | A stateful sequence must keep a property true (model matches chain, no bad debt) |
-| `EnduranceRunner::run(EnduranceConfig)` | Random ops at random wall clock delays with block progression, then a final sweep | Soak testing for drift, time, or block height dependent bugs |
+| `EnduranceRunner::run(EnduranceConfig)` | Random ops at random wall clock delays (`base_delay + rand(0..=max_delay)`) with block progression, then a final sweep | Soak testing for drift, time, or block height dependent bugs (and live RPC, paced by `base_delay`) |
 | `ScenarioRunner::run_case` / `run_scenario` (rstest) | One concrete op or sequence | Exhaustive coverage of a small grid (for example chain x chain) via `#[rstest] #[values(..)]` |
 | `ScenarioRunner::replay(history)` | Re runs a recorded failing sequence deterministically | Turning a fuzz failure into a regression test |
 
@@ -117,8 +117,12 @@ wallet roster (labels, account indices, how each wallet sources its key), is a c
 built with `define_wallet_roster!`, resolved by a single shared `WalletFactory`. Each roster row
 picks one source: `env_mnemonic("VAR")` (read a BIP-39 phrase from an env var), `auto` (generate a
 fresh random mnemonic at build time, for mock chains), or `env_private_key("VAR")` (read a raw
-VM-native key). The factory reads named variables straight from the process environment, so load
-the `.env` first (e.g. `dotenvy::from_path(".env")`); a missing variable is a hard error.
+VM-native key). The factory keeps each row's source and resolves it on demand: `auto` rows generate
+their mnemonic once at construction, while `env_mnemonic` / `env_private_key` rows read their
+variable lazily, only when that wallet first signs. So load the `.env` before signing (e.g.
+`dotenvy::from_path(".env")`); a missing variable errors at the signing call, not at construction,
+which lets a roster carry a funded on-chain wallet whose secret is absent for runs that never use
+it (e.g. the `on_chain` row used only by the live `rpc-endurance` test).
 
 Copy `.env.example` to `.env` and fill in your mnemonics. An all-`auto` roster (or the empty
 `&[]` roster used in the quickstarts) needs no `.env` at all. See
@@ -154,6 +158,8 @@ The integration tests embed compiled contract artifacts, so build those first wi
 `make test`. The heavier harness modes are feature-gated to keep the default `cargo test` fast:
 enable them with `make test-fuzz` / `test-invariant` / `test-endurance` / `test-harness-all` (or
 `cargo test -p cross-vm-integration-tests --test harness --features "fuzz invariant endurance"`).
+`make test-rpc-endurance` runs the endurance harness against a live Base Sepolia chain over RPC
+(needs network and a funded `ON_CHAIN_WALLET` mnemonic in `.env`; it signs the `on_chain` wallet).
 
 A worked cross-VM flow, a CosmWasm/EVM ping-pong relayer driven through one `MultiChainEnv`, lives
 at `examples/integration-tests/tests/cross_vm/ping_pong.rs`.
@@ -167,7 +173,7 @@ See `SPEC.md` for the architecture, `DEVELOPER.md` for per crate details, and `C
 | Mock provider (in-process VM) | Supported | Supported | Supported | `cw-multi-test` / `revm` / `litesvm` |
 | Live RPC reads | Supported | Supported | Supported | validated on `osmo-test-5`, Ethereum Sepolia, Solana Devnet |
 | Live RPC writes (deploy + call) | Planned | Supported | Planned | Cosmos/Solana return `Unimplemented`; signer already plumbed through |
-| Wallet derivation (mnemonic to signer) | Supported | Supported | Supported | coin types 118 / 60 / 501, per-wallet async broadcast lock |
+| Wallet derivation (mnemonic to signer) | Supported | Supported | Supported | coin types 118 / 60 / 501, global (chain, address) broadcast lock on the RPC path |
 | Property `Harness` (fuzz / invariant / endurance / matrix) | Supported (VM-agnostic, runs over any injected chain) ||||
 | Broader cross-VM orchestration layer | Planned ||||
 
@@ -176,9 +182,12 @@ block number, native balance, and `eth_call`; Solana reads slot, lamport balance
 `getAccountInfo`.
 
 **Wallets.** Mnemonics load from a `.env` (the only secret); the roster is a compile-time const
-and a per-ecosystem `WalletDeriver` turns a mnemonic plus HD path into that VM's signer. Every
-broadcast goes through the `WalletFactory` by label under a per-wallet async lock, so one wallet
-never sends two transactions at once and cannot collide on its nonce or account sequence.
+and a per-ecosystem `WalletDeriver` turns a mnemonic plus HD path into that VM's signer. Serializing
+concurrent broadcasts of one live account (which would collide on its nonce or account sequence) is
+a process-global locker (`core::wallet_lock`) keyed by `(chain, address)`, acquired only on the RPC
+path and held across send→confirm; mock backends take no lock, and different accounts and chains run
+in parallel. A global (not per-factory) lock is what makes two separate tests on the same on-chain
+account serialize.
 
 **Planned.** Cosmos and Solana live-RPC writes (their mock-coupled return types are being
 decoupled) and the broader cross-VM orchestration layer above `MultiChainEnv`.

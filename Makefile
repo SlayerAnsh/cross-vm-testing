@@ -1,6 +1,6 @@
 .PHONY: compile compile-solidity compile-solana compile-cosmwasm setup-solidity fmt \
 	test test-cosmwasm test-solidity test-solana test-examples test-harness test-cross-vm \
-	test-fuzz test-invariant test-endurance test-harness-all
+	test-fuzz test-invariant test-endurance test-rpc-endurance test-harness-all
 
 compile: compile-solidity compile-solana compile-cosmwasm
 
@@ -60,6 +60,12 @@ test-invariant:
 
 test-endurance:
 	cargo test -p cross-vm-integration-tests --test harness --features endurance $(ARGS)
+
+# Endurance with a live Base Sepolia chain added over RPC (needs network + a funded ON_CHAIN_WALLET
+# mnemonic in .env). `rpc-endurance` injects the `"base"` chain into the shared counter setup, so
+# the whole counter suite runs live; filter to the endurance test to avoid live matrix/fuzz runs.
+test-rpc-endurance:
+	cargo test -p cross-vm-integration-tests --test harness --features "endurance rpc-endurance" $(ARGS) -- counter_endurance_mode --nocapture
 
 # Harness suite with every mode enabled.
 test-harness-all:

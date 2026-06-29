@@ -23,10 +23,28 @@ use cross_vm_macros::endurance_runner;
 use cross_vm_macros::fuzz_runner;
 #[cfg(feature = "invariant")]
 use cross_vm_macros::invariant_runner;
+#[cfg(feature = "rpc-endurance")]
+use cross_vm_solidity::chains::BASE_SEPOLIA;
 
 use crate::support::{fund_alice, test_wallets, Counter, CounterSpec};
 
+/// The chains every test deploys on. Two variants gated by `rpc-endurance`: without it, the three
+/// mocks; with it, a live Base Sepolia chain (`"base"`) is appended. Injection in [`counter_setup`]
+/// is driven by this list, so `"base"` is built only when its label is present.
+#[cfg(not(feature = "rpc-endurance"))]
 const LABELS: [&str; 3] = ["osmosis", "eth", "solana"];
+#[cfg(feature = "rpc-endurance")]
+const LABELS: [&str; 4] = ["osmosis", "eth", "solana", "base"];
+
+/// Wallet label used to sign on `chain`: the live `"base"` chain signs with the funded `on_chain`
+/// wallet (`ON_CHAIN_WALLET`), every mock chain with the in-memory `alice`.
+fn signer(chain: &str) -> &'static str {
+    if chain == "base" {
+        "on_chain"
+    } else {
+        "alice"
+    }
+}
 
 /// One complete action. Chains are selected by string label, matching how the `MultiChainEnv`
 /// keys its chains. Plain public fields, so an rstest test can fan them out.
@@ -165,7 +183,7 @@ impl Harness for CounterHarness {
 async fn inc(ctx: &mut Ctx, w: &mut CounterWorld, label: &str) -> Result<(), HarnessError> {
     let counter = CounterHarness::counter(ctx, w, label)?;
     counter
-        .increment("alice")
+        .increment(signer(label))
         .await
         .map_err(HarnessError::Infra)?;
     *w.model.get_mut(label).ok_or_else(|| {
@@ -180,11 +198,25 @@ async fn inc(ctx: &mut Ctx, w: &mut CounterWorld, label: &str) -> Result<(), Har
 /// the per-case `seed` is unused; a test needing seed-varied initial state would read it.
 async fn counter_setup(_seed: u64) -> Result<(Ctx, CounterWorld), HarnessError> {
     crate::support::init_tracing();
+    // Load the workspace `.env` so the `on_chain` wallet's `ON_CHAIN_WALLET` is in the process env
+    // when the live `"base"` chain signs. Harmless (and ignored) when absent for mock-only runs.
+    let _ = dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env"));
+
     let wallets = test_wallets();
     let mut env = MultiChainEnv::new("counter-harness", wallets.clone());
-    env.inject("osmosis", OSMOSIS.mock(wallets.clone()));
-    env.inject("eth", ETHEREUM.mock(wallets.clone()));
-    env.inject("solana", SOLANA_DEVNET.mock(wallets));
+    // Inject a chain per label. The live `"base"` chain is in `LABELS` only under `rpc-endurance`,
+    // so it is built only then; the others are always in-process mocks.
+    for label in LABELS {
+        let chain: AnyChain = match label {
+            "osmosis" => OSMOSIS.mock(wallets.clone()).into(),
+            "eth" => ETHEREUM.mock(wallets.clone()).into(),
+            "solana" => SOLANA_DEVNET.mock(wallets.clone()).into(),
+            #[cfg(feature = "rpc-endurance")]
+            "base" => BASE_SEPOLIA.rpc(wallets.clone()).into(),
+            other => panic!("counter_setup: unknown chain label {other:?}"),
+        };
+        env.inject(label, chain);
+    }
     let ctx = Ctx::new(env.start().await?);
 
     let mut addrs = HashMap::new();
@@ -192,9 +224,15 @@ async fn counter_setup(_seed: u64) -> Result<(Ctx, CounterWorld), HarnessError> 
     for label in LABELS {
         // Cloned handle shares the live chain's state, so funding and deploy land on it.
         let mut chain = ctx.chain(label)?;
-        fund_alice(&mut chain).await;
+        // A live RPC chain cannot be minted into; its key (`on_chain`) must already be funded.
+        if label != "base" {
+            fund_alice(&mut chain).await;
+        }
         let counter = Counter::new(chain);
-        counter.setup("alice").await.map_err(HarnessError::Infra)?;
+        counter
+            .setup(signer(label))
+            .await
+            .map_err(HarnessError::Infra)?;
         let addr = counter.address().ok_or_else(|| {
             HarnessError::Infra(CrossVmError::wallet(format!(
                 "{label}: setup recorded no address"

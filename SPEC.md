@@ -26,7 +26,7 @@ pub trait ChainSpec {
 }
 ```
 
-`ChainProvider` is the uniform **chain-level** provider surface. Associated types (`Address`, `Account`, `Balance`, `Error`) let each VM specialize while sharing account, balance, and block operations. Methods: `chain_info`, `new_account`, `balance`, `set_balance`, `block_height`, `advance_blocks`.
+`ChainProvider` is the uniform **chain-level** provider surface. Associated types (`Address`, `Account`, `Balance`, `Error`) let each VM specialize while sharing account, balance, and block operations. Methods: `chain_info`, `new_account`, `balance`, `set_balance`, `block_height`, `advance_blocks`. `advance_blocks` forces blocks on mock backends and is a no-op on RPC backends (a live chain advances on its own).
 
 Contract and program operations are **not** on `ChainProvider`. Each VM crate exposes idiomatic methods on its mock/RPC providers and chain enums:
 
@@ -40,7 +40,7 @@ Contract and program operations are **not** on `ChainProvider`. Each VM crate ex
 
 ### Wallets and signing (`cross-vm-core`)
 
-Mnemonics are the only secret. A `.env` holds nothing but BIP-39 phrases (one or more, each under its own variable). The wallet roster is the compile-time `WALLETS` const: each `WalletSpec` row names a label, a `WalletSource` (`Generate` for a fresh random mnemonic, or `Env(var)` to read a named `.env` variable), an account index, and an optional explicit HD path. `WalletFactory` loads the secrets (`from_env_file`, or `from_secrets` for tests) and resolves every row into a `WalletDef`. Adding a wallet means adding a const row, not calling a runtime registration API.
+Mnemonics are the only secret. A `.env` holds nothing but BIP-39 phrases (one or more, each under its own variable). The wallet roster is the compile-time `WALLETS` const: each `WalletSpec` row names a label, a `WalletSource` (`Generate` for a fresh random mnemonic, or `Env(var)` to read a named `.env` variable), an account index, and an optional explicit HD path. `WalletFactory` keeps each row's `WalletSource` and resolves it to a `WalletDef` on demand (`resolve(label)`). Env-sourced rows read their var lazily, when the wallet first signs (so an unused on-chain wallet's secret may be absent); `auto` rows generate their mnemonic eagerly at construction (their derived address must stay stable within a run). Adding a wallet means adding a const row, not calling a runtime registration API.
 
 Key derivation is per ecosystem, behind the `WalletDeriver` trait (a sibling of `ChainProvider`, so providers that need no crypto are unaffected). Each VM crate implements it on its chain handle:
 
@@ -50,9 +50,9 @@ Key derivation is per ecosystem, behind the `WalletDeriver` trait (a sibling of 
 | Cosmos | 118 | `bip39` seed + cosmrs `bip32`, bech32 prefix from `chain_info` | `CosmosSigner` (`Rc<SigningKey>` + `Addr`) |
 | Solana | 501 | `bip39` seed + SLIP-10 ed25519 | `SvmSigner` (`Rc<Keypair>`) |
 
-The factory is VM-agnostic (it stores resolved defs plus per-label locks, no signer types), which lets it live in `core` while the chains that hold an `Rc<WalletFactory>` live in the VM crates that depend on `core`, with no dependency cycle. Each chain derives and caches its own signer type.
+The factory is VM-agnostic (it stores roster `WalletSource` rows, resolved to signing material on demand, no signer types), which lets it live in `core` while the chains that hold an `Rc<WalletFactory>` live in the VM crates that depend on `core`, with no dependency cycle. Each chain derives and caches its own signer type.
 
-Broadcasts take a wallet label, not an address. `EvmChain::deploy_create`/`call`, `CwChain::instantiate`/`execute_contract`, and `SvmChain::send_transaction` resolve the label through the factory and acquire that wallet's lock for the whole build, sign, broadcast sequence. The lock is a `tokio::sync::Mutex` owned guard: an async mutex is mandatory because a `std` mutex held across an `.await` would deadlock the single thread runtime. Same-wallet broadcasts serialize (no nonce or account-sequence collision); different wallets proceed in parallel. The framework's `MultiChainEnv` builds the factory at setup (`with_env_file` / `with_wallets`) and distributes it to every chain at `start`.
+Broadcasts take a wallet label, not an address. `EvmChain::deploy_create`/`call`, `CwChain::instantiate`/`execute_contract`, and `SvmChain::send_transaction` resolve the label through the factory to a signer. Serializing concurrent broadcasts of one live account (which would collide on the EVM nonce / Cosmos account sequence) is handled by a **process-global** locker (`core::wallet_lock`) keyed by `(chain kind, chain id, address)`, acquired only on the RPC path and held for the whole build, sign, broadcast, confirm sequence. It uses a `tokio::sync::Mutex` owned guard (an async mutex is mandatory: a `std` mutex held across an `.await` would deadlock the single-thread runtime) and lives in a global registry, so the same account serializes across the separate per-test runtimes where a per-factory lock could not. Mock backends take no lock (each test has an isolated in-process chain, no shared nonce); different accounts and different chains proceed in parallel. The framework's `MultiChainEnv` builds the factory at setup (`with_env_file` / `with_wallets`) and distributes it to every chain at `start`.
 
 ### Per VM mapping
 
@@ -102,8 +102,8 @@ let chain = OSMOSIS.mock();             // sugar
 let chain = CwMockProvider::new(OSMOSIS);
 ```
 
-All three RPC providers serve live read paths with no signer. The CosmWasm provider (`OSMOSIS_TESTNET.rpc()`) goes over Tendermint RPC via `cosmrs`: block height, native balance, and `query_wasm_smart` (ABCI queries). The EVM provider (`SEPOLIA.rpc()`) goes over JSON-RPC via the alloy HTTP provider: block number, native balance, and `static_call` (`eth_call`). The Solana provider (`SOLANA_DEVNET.rpc()`) goes over JSON-RPC via a thin `reqwest` client: slot, lamport balance, and `get_account` (`getAccountInfo`). EVM RPC write paths now sign with the wallet signer and broadcast (`deploy_create`, `call`); Cosmos and Solana RPC writes remain compiling stubs that return `Unimplemented` (signer plumbed through, return types decoupled in a follow-up).
+All three RPC providers serve live read paths with no signer. The CosmWasm provider (`OSMOSIS_TESTNET.rpc()`) goes over Tendermint RPC via `cosmrs`: block height, native balance, and `query_wasm_smart` (ABCI queries). The EVM provider (`SEPOLIA.rpc()`) goes over JSON-RPC via the alloy HTTP provider: block number, native balance, and `static_call` (`eth_call`). The Solana provider (`SOLANA_DEVNET.rpc()`) goes over JSON-RPC via a thin `reqwest` client: slot, lamport balance, and `get_account` (`getAccountInfo`). EVM and Cosmos RPC write paths now sign with the wallet signer and broadcast (EVM `deploy_create` / `call`; Cosmos `store_code_wasm` / `instantiate` / `execute_contract`), each acquiring the global `(chain, address)` broadcast lock first; Solana RPC writes remain compiling stubs that return `Unimplemented` (signer plumbed through, return types decoupled in a follow-up).
 
 ## Out of scope (later phases)
 
-The Cosmos and Solana RPC write paths (signed `store_code`/`instantiate`/`execute` and `add_program`/`send_transaction`, blocked on decoupling their mock-backend return types); the cross VM orchestration layer that runs one script across all three; fuzz and invariant harnesses; gas/compute reporting; fork from live.
+The Solana RPC write paths (signed `add_program`/`send_transaction`, blocked on decoupling their mock-backend return types); the cross VM orchestration layer that runs one script across all three; fuzz and invariant harnesses; gas/compute reporting; fork from live.
