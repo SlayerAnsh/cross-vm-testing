@@ -4,8 +4,9 @@ use cross_vm_core::{ChainKind, ChainSpec};
 
 /// Metadata describing a CosmWasm chain.
 ///
-/// All fields are `&'static str` so the constants are usable in `const` context
-/// and the bech32 prefix satisfies `cw-multi-test`'s `&'static str` requirement.
+/// The string fields are `&'static str` so the constants are usable in `const` context and the
+/// bech32 prefix satisfies `cw-multi-test`'s `&'static str` requirement (`gas_price` is `f64`,
+/// `rpc_url` is `Option<&'static str>`).
 #[derive(Debug, Clone, Copy)]
 pub struct CosmosChainInfo {
     /// Canonical chain id, e.g. `"osmosis-1"`.

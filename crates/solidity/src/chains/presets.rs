@@ -1,6 +1,7 @@
 //! Predefined EVM chains.
 //!
-//! Use them as `EvmMockProvider::new(ETHEREUM)` or `ETHEREUM.mock()`.
+//! Use them as `EvmMockProvider::new(ETHEREUM, wallets)` or `ETHEREUM.mock(wallets)`, where
+//! `wallets` is the shared `Rc<WalletFactory>`.
 
 use super::info::EvmChainInfo;
 use revm::primitives::hardfork::SpecId;

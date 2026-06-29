@@ -109,7 +109,8 @@ impl CwContract {
     }
 
     /// Execute a state-mutating message against the bound contract, signed by wallet `wallet`,
-    /// sending no funds. For a funded call use [`CwChain::execute_contract`] directly.
+    /// sending no funds. For a funded call use [`execute_with_funds`](Self::execute_with_funds)
+    /// (the path the `CwExecuteFns` derive's `#[payable]` variants take).
     pub async fn execute<E: CwSerde>(
         &self,
         msg: E,
