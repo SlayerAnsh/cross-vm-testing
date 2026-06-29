@@ -14,91 +14,65 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ----- Fast tier: artifact-free, gates every push/PR -----
-
-  fmt:
-    name: Format (rust + solidity)
+  ci:
+    name: CI
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: cargo fmt --all --check
+
+      # ----- Cheap, artifact-free checks first, so a trivial failure does not pay for the
+      #       Foundry / Solana / Anchor toolchain installs below. -----
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      # No --all-targets: the test targets embed gitignored contract artifacts that only exist
+      # after the compile steps below. Lib/bin clippy stays artifact-free.
+      - name: cargo clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: cargo doc
+        run: cargo doc --workspace --no-deps
+      - name: cargo build
+        run: cargo build --workspace
+
+      # ----- Toolchains for the contract artifacts the integration tests embed. -----
       - uses: foundry-rs/foundry-toolchain@v1
-      - name: forge fmt --check
+      - name: forge fmt
         working-directory: examples/solidity-contracts
         run: forge fmt --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      # No --all-targets: the test targets embed gitignored contract artifacts that only exist
-      # after `make compile`. Lib/bin clippy stays artifact-free.
-      - run: cargo clippy --workspace -- -D warnings
-
-  doc:
-    name: Doc lint (rustdoc)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      # `cargo doc` builds the public API docs and fails on hard doc errors (e.g. doc code that
-      # references missing items). Artifact-free: it compiles lib targets only, never doctests.
-      - run: cargo doc --workspace --no-deps
-
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: cargo build --workspace
-
-  unit-tests:
-    name: Unit tests (library crates)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      # Artifact-free tier. Most crates test fully here (their live-RPC tests are #[ignore]).
-      # Two crates embed a compiled contract at build time in some test targets, which this
-      # tier does not produce, so those targets are excluded (they fail at compile time when
-      # the artifact is absent, even the #[ignore] ones):
-      #   - cross-vm-cosmwasm/tests/onchain.rs            include_bytes!(counter.wasm)  [#[ignore], live]
-      #   - cross-vm-solidity/tests/{counter,onchain}.rs  sol!(out/Counter.sol/Counter.json)
-      # The cross-VM flows that exercise these contracts run in the integration-tests job below
-      # (over the artifacts it builds); the per-crate onchain.rs files are live #[ignore] tests.
-      - run: >
-          cargo test
-          -p cross-vm-core
-          -p cross-vm-solana
-          -p cross-vm-framework
-          -p cross-vm-macros
-      - run: >
-          cargo test -p cross-vm-cosmwasm
-          --lib --test counter --test vault --test typed_handle
-      - run: cargo test -p cross-vm-solidity --lib
-
-  # ----- Heavy tier: isolated so its slowness/flakiness does not block the fast signal -----
-
-  integration-tests:
-    name: Integration tests (cross-VM)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: foundry-rs/foundry-toolchain@v1
-      # Solana platform-tools + Anchor (via avm). Versions pinned here; bump if `anchor build`
-      # fails on a platform-tools mismatch. The repo itself pins no Anchor/Solana version.
-      - uses: metadaoproject/setup-anchor@v2
+      - uses: actions/setup-node@v4
         with:
-          anchor-version: 0.31.1
-          solana-cli-version: 2.1.0
           node-version: 20
-      # EVM artifacts: out/*.json consumed by `sol!`. Solana artifacts: target/deploy/*.so consumed
-      # by include_bytes!. CosmWasm contracts are native path deps, so no wasm/Docker build needed.
-      - run: make compile-solidity
-      - run: make compile-solana
-      - run: cargo test -p cross-vm-integration-tests
+      # Solana (Agave) platform tools from Anza; the legacy release.solana.com host is flaky.
+      - name: Install Solana
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.0/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      # Anchor from the prebuilt npm package. npm leaves the shipped binary non-executable, so
+      # chmod it before use (the setup-anchor action tripped over this with an EACCES). Pinned;
+      # bump alongside the Solana version if `anchor build` hits a platform-tools mismatch.
+      - name: Install Anchor
+        run: |
+          npm install -g @coral-xyz/anchor-cli@0.31.1
+          chmod +x "$(npm root -g)/@coral-xyz/anchor-cli/anchor"
+          anchor --version
+          solana --version
+
+      # ----- Build the embedded artifacts once, then reuse across the test steps below. -----
+      # EVM: out/*.json consumed by sol! (test contracts skipped, they need forge-std).
+      # Solana: target/deploy/*.so consumed by include_bytes!.
+      # CosmWasm needs no artifact here: the cross-VM tests wrap the example contracts in-process
+      # via cw-multi-test ContractWrapper (native rlib), not compiled wasm.
+      - name: Compile Solidity artifacts
+        run: make compile-solidity
+      - name: Compile Solana artifacts
+        run: make compile-solana
+
+      # ----- Tests. One target dir, reused; the artifacts above are already built. -----
+      # Everything except cross-vm-cosmwasm, whose tests/onchain.rs embeds a compiled
+      # counter.wasm built only by the Docker CosmWasm optimizer (not available in CI). That is
+      # a live #[ignore] test; the cross-VM cosmwasm path is still covered via ContractWrapper.
+      - name: Test (workspace except cosmwasm)
+        run: cargo test --workspace --exclude cross-vm-cosmwasm
+      # cross-vm-cosmwasm minus the wasm-embedding onchain.rs target.
+      - name: Test (cosmwasm, artifact-free targets)
+        run: cargo test -p cross-vm-cosmwasm --lib --test counter --test vault --test typed_handle
