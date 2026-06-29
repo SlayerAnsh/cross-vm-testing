@@ -6,7 +6,9 @@ pub struct InstantiateMsg {}
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
-    Ping { destination_port: String },
+    Ping {
+        destination_port: String,
+    },
     ReceivePacket {
         source_port: String,
         destination_port: String,

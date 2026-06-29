@@ -1,0 +1,33 @@
+[package]
+name = "cross-vm-framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cross-VM testing framework: hold and drive CosmWasm, EVM, and Solana chains in one simulation"
+
+[dependencies]
+cross-vm-core.workspace = true
+cross-vm-macros.workspace = true
+cross-vm-cosmwasm = { path = "../cosmwasm" }
+cross-vm-solidity = { path = "../solidity" }
+cross-vm-solana = { path = "../solana" }
+thiserror.workspace = true
+tokio.workspace = true
+# Emit per-operation / per-invariant debug logs through the tracing facade.
+tracing.workspace = true
+# Property testing: portable, seedable RNG (ChaCha) for deterministic, replayable runs.
+rand = "0.8"
+rand_chacha = "0.3"
+# Optional zero-boilerplate stateless operation generation.
+arbitrary = { version = "1", features = ["derive"], optional = true }
+
+[features]
+# Enables `sample_arbitrary` + the `arbitrary` derive path for stateless op generation.
+fuzz = ["dep:arbitrary"]
+
+[dev-dependencies]
+# `#[tokio::test]` in src/tests.rs; `#[tokio::main]` in examples/.
+tokio.workspace = true
+# Solana system-program transfer used by examples/wallet_quickstart.rs.
+solana-system-interface = { version = "2", features = ["bincode"] }

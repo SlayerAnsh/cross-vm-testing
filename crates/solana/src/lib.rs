@@ -3,73 +3,36 @@
 //! Wraps `litesvm` behind the shared [`cross_vm_core::ChainProvider`] trait.
 //!
 //! ```no_run
+//! use std::rc::Rc;
 //! use cross_vm_solana::chains::SOLANA_DEVNET;
-//! use cross_vm_core::ChainProvider;
+//! use cross_vm_core::{ChainProvider, WalletFactory};
 //!
-//! let mut chain = SOLANA_DEVNET.mock();   // or: SvmMockProvider::new(SOLANA_DEVNET)
-//! let alice = chain.new_account("alice");
-//! assert!(chain.balance(&alice).unwrap() > 0);
+//! # async fn demo() {
+//! let wallets = Rc::new(WalletFactory::from_roster(&[]).unwrap());
+//! let mut chain = SOLANA_DEVNET.mock(wallets);
+//! let alice = chain.new_account("alice").await;
+//! assert!(chain.balance(&alice).await.unwrap() > 0);
+//! # }
 //! ```
 
+mod asset;
+mod chain;
 pub mod chains;
-pub mod provider;
-
-pub use chains::{Commitment, SolanaChainInfo};
-pub use provider::{SvmError, SvmMockProvider, SvmRpcProvider, DEFAULT_FUNDING_LAMPORTS};
-
-impl SolanaChainInfo {
-    /// Sugar for [`SvmMockProvider::new`].
-    pub fn mock(self) -> SvmMockProvider {
-        SvmMockProvider::new(self)
-    }
-
-    /// Sugar for [`SvmRpcProvider::new`].
-    pub fn rpc(self) -> SvmRpcProvider {
-        SvmRpcProvider::new(self)
-    }
-}
+mod error;
+mod provider;
+mod wallet;
 
 #[cfg(test)]
-mod tests {
-    use super::chains::{SOLANA_DEVNET, SOLANA_LOCALNET};
-    use cross_vm_core::{ChainProvider, ChainSpec};
+mod tests;
 
-    #[test]
-    fn predefined_chain_metadata() {
-        assert_eq!(SOLANA_DEVNET.chain_id(), "devnet");
-        assert_eq!(SOLANA_DEVNET.native_symbol(), "SOL");
-    }
+pub use asset::SvmAsset;
+pub use chain::SvmChain;
+pub use chains::{Commitment, SolanaChainInfo};
+pub use error::SvmError;
+pub use provider::{SvmMockProvider, SvmRpcProvider, DEFAULT_FUNDING_LAMPORTS};
+pub use solana_address::Address;
+pub use wallet::SvmSigner;
 
-    #[test]
-    fn new_account_is_funded() {
-        let mut chain = SOLANA_LOCALNET.mock();
-        let alice = chain.new_account("alice");
-        assert_eq!(
-            chain.balance(&alice).unwrap(),
-            super::DEFAULT_FUNDING_LAMPORTS
-        );
-    }
-
-    #[test]
-    fn set_and_read_balance() {
-        let mut chain = SOLANA_LOCALNET.mock();
-        let bob = chain.new_account("bob");
-        chain.set_balance(&bob, 12_345).unwrap();
-        assert_eq!(chain.balance(&bob).unwrap(), 12_345);
-    }
-
-    #[test]
-    fn blocks_advance() {
-        let mut chain = SOLANA_LOCALNET.mock();
-        assert_eq!(chain.block_height(), 0);
-        chain.advance_blocks(4);
-        assert_eq!(chain.block_height(), 4);
-    }
-
-    #[test]
-    fn rpc_stub_is_unimplemented() {
-        let chain = SOLANA_DEVNET.rpc();
-        let addr = solana_address::Address::new_unique();
-        assert!(chain.balance(&addr).is_err());
-    }
-}
+/// The `litesvm` transaction result, re-exported so downstream crates can name the raw
+/// result of a Solana execution without depending on `litesvm` directly.
+pub use litesvm::types::TransactionMetadata;

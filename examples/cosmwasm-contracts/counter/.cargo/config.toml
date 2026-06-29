@@ -1,2 +1,4 @@
 [target.wasm32-unknown-unknown]
+# cosmwasm host functions (db_read, etc.) are wasm imports, not link errors. (MVP wasm features
+# are handled by the optimizer Docker image, not host cargo; see the Makefile.)
 rustflags = ["-C", "link-arg=--allow-undefined"]

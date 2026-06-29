@@ -1,0 +1,29 @@
+[package]
+name = "scripts"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# One binary per subdir; add more scripts as sibling `[[bin]]` entries.
+[[bin]]
+name = "deploy_counter"
+path = "deploy_counter/main.rs"
+
+# Standalone crate (examples/ is excluded from the workspace), so deps use explicit versions
+# instead of `.workspace = true` and reach the framework crates via path.
+[dependencies]
+# Chain-agnostic layer: the `cross_vm_contract` macro, `AnyChain`, `ContractBase`, `Account`,
+# `AppResponse`, and the prelude. Lets one logical flow dispatch across VMs.
+cross-vm-framework = { path = "../../crates/framework" }
+# Needed directly because `define_wallet_roster!` expands to `cross_vm_core::*` paths.
+cross-vm-core = { path = "../../crates/core" }
+# Testnet chain presets + `Bytes` (the prelude only re-exports mainnet-ish presets).
+cross-vm-solidity = { path = "../../crates/solidity" }
+cross-vm-cosmwasm = { path = "../../crates/cosmwasm" }
+# CosmWasm counter message types + generated typed handles (CwExecuteFns/CwQueryFns under the
+# `cross-vm` feature: `contract.increment(wallet)` / `.get_count()`).
+counter = { path = "../cosmwasm-contracts/counter", features = ["cross-vm"] }
+alloy = { version = "1", features = ["full", "sol-types"] }
+tokio = { version = "1", features = ["macros", "rt"] }
+# Load `.env` into the process environment before resolving the wallet roster.
+dotenvy = "0.15"

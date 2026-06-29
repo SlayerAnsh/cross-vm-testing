@@ -1,0 +1,108 @@
+//! The cross-VM environment and its VM-typed accessors.
+
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::rc::Rc;
+
+use cross_vm_core::WalletFactory;
+use cross_vm_cosmwasm::CwChain;
+use cross_vm_solana::SvmChain;
+use cross_vm_solidity::EvmChain;
+
+use crate::any_chain::AnyChain;
+use crate::env::phase::Setup;
+use crate::error::EnvError;
+use crate::fund::Pending;
+
+/// A cross-VM simulation. Starts in [`Setup`]; [`crate::MultiChainEnv::start`] transitions
+/// to [`crate::Running`], after which funding and injection are no longer reachable.
+pub struct MultiChainEnv<S = Setup> {
+    pub(crate) label: String,
+    pub(crate) chains: HashMap<String, AnyChain>,
+    pub(crate) pending: Vec<Pending>,
+    /// Shared wallet roster, distributed to every chain at [`crate::MultiChainEnv::start`].
+    pub(crate) wallets: Rc<WalletFactory>,
+    pub(crate) _marker: PhantomData<S>,
+}
+
+impl<S> MultiChainEnv<S> {
+    /// The environment's label.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Number of chains injected.
+    pub fn len(&self) -> usize {
+        self.chains.len()
+    }
+
+    /// Whether no chains are injected.
+    pub fn is_empty(&self) -> bool {
+        self.chains.is_empty()
+    }
+
+    /// Borrow the shared wallet factory.
+    pub fn wallets(&self) -> &Rc<WalletFactory> {
+        &self.wallets
+    }
+
+    /// A cloned, VM-agnostic handle to the chain under `label`.
+    ///
+    /// The mock backends are `Rc<RefCell<_>>`-backed, so the clone shares the live chain's
+    /// state: funding, deploying, or querying through it acts on the one underlying chain. This
+    /// is how the property-test harness rebuilds a contract wrapper (`Counter::instance(..)`) on
+    /// demand from an address without holding the wrapper in its persisted world.
+    pub fn chain(&self, label: &str) -> Result<AnyChain, EnvError> {
+        self.chains
+            .get(label)
+            .cloned()
+            .ok_or_else(|| EnvError::UnknownChain(label.to_string()))
+    }
+
+    /// Advance every injected chain by `n` blocks/slots. The uniform time-warp the endurance
+    /// runner calls between operations so block height progresses across the whole world.
+    pub async fn advance_all(&mut self, n: u64) {
+        for chain in self.chains.values_mut() {
+            chain.advance_blocks(n).await;
+        }
+    }
+
+    /// Borrow a CosmWasm chain by label.
+    pub fn cosmwasm(&mut self, label: &str) -> Result<&mut CwChain, EnvError> {
+        match self.chains.get_mut(label) {
+            Some(AnyChain::CosmWasm(c)) => Ok(c),
+            Some(other) => Err(EnvError::WrongVm {
+                label: label.to_string(),
+                expected: cross_vm_core::ChainKind::CosmWasm,
+                found: other.kind(),
+            }),
+            None => Err(EnvError::UnknownChain(label.to_string())),
+        }
+    }
+
+    /// Borrow an EVM chain by label.
+    pub fn evm(&mut self, label: &str) -> Result<&mut EvmChain, EnvError> {
+        match self.chains.get_mut(label) {
+            Some(AnyChain::Evm(c)) => Ok(c),
+            Some(other) => Err(EnvError::WrongVm {
+                label: label.to_string(),
+                expected: cross_vm_core::ChainKind::Evm,
+                found: other.kind(),
+            }),
+            None => Err(EnvError::UnknownChain(label.to_string())),
+        }
+    }
+
+    /// Borrow a Solana chain by label.
+    pub fn solana(&mut self, label: &str) -> Result<&mut SvmChain, EnvError> {
+        match self.chains.get_mut(label) {
+            Some(AnyChain::Svm(c)) => Ok(c),
+            Some(other) => Err(EnvError::WrongVm {
+                label: label.to_string(),
+                expected: cross_vm_core::ChainKind::Svm,
+                found: other.kind(),
+            }),
+            None => Err(EnvError::UnknownChain(label.to_string())),
+        }
+    }
+}

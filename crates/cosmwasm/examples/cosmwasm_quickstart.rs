@@ -2,22 +2,36 @@
 //!
 //! Run with: `cargo run -p cross-vm-cosmwasm --example cosmwasm_quickstart`
 
-use cross_vm_core::{ChainProvider, ChainSpec};
+use std::rc::Rc;
+
+use cross_vm_core::{ChainProvider, ChainSpec, WalletFactory};
 use cross_vm_cosmwasm::chains::OSMOSIS;
 
-fn main() {
-    // Two equivalent ways to construct: `OSMOSIS.mock()` or `CwMockProvider::new(OSMOSIS)`.
-    let mut chain = OSMOSIS.mock();
-    println!("chain: {} ({})", chain.chain_info().name(), chain.chain_info().chain_id());
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let wallets = Rc::new(WalletFactory::from_roster(&[]).expect("empty roster"));
+    let mut chain = OSMOSIS.mock(wallets);
+    println!(
+        "chain: {} ({})",
+        chain.chain_info().name(),
+        chain.chain_info().chain_id()
+    );
 
-    let alice = chain.new_account("alice");
+    let alice = chain.new_account("alice").await;
     println!("alice: {alice}");
-    println!("balance: {} {}", chain.balance(&alice).unwrap(), OSMOSIS.native_denom);
+    println!(
+        "balance: {} {}",
+        chain.balance(&alice).await.unwrap(),
+        OSMOSIS.native_denom
+    );
 
-    chain.set_balance(&alice, 5_000_000).unwrap();
-    println!("after set_balance: {}", chain.balance(&alice).unwrap());
+    chain.set_balance(&alice, 5_000_000).await.unwrap();
+    println!(
+        "after set_balance: {}",
+        chain.balance(&alice).await.unwrap()
+    );
 
-    let h = chain.block_height();
-    chain.advance_blocks(10);
-    println!("block height: {h} -> {}", chain.block_height());
+    let h = chain.block_height().await;
+    chain.advance_blocks(10).await;
+    println!("block height: {h} -> {}", chain.block_height().await);
 }

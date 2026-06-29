@@ -5,6 +5,16 @@ members = [
     "crates/cosmwasm",
     "crates/solidity",
     "crates/solana",
+    "crates/framework",
+    "crates/macros",
+    # Multi-chain integration & example tests, co-located with the contract artifacts they embed.
+    "examples/integration-tests",
+]
+# Example contracts are standalone crates (their own workspaces / build toolchains); they are
+# consumed by tests via path dependencies but must not be workspace members. The explicit
+# `integration-tests` member above overrides this exclude for that one subdirectory.
+exclude = [
+    "examples",
 ]
 
 [workspace.package]
@@ -16,13 +26,33 @@ repository = "https://github.com/Anshudhar/cross-vm-testing"
 [workspace.dependencies]
 # Internal
 cross-vm-core = { path = "crates/core" }
+cross-vm-macros = { path = "crates/macros" }
+
+# Proc-macro toolkit
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
 
 # Shared
 thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+# Structured leveled logging: facade in the libs, subscriber wired by the test binary.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Wallets: .env secret loading (no process-env mutation) + BIP-39 mnemonic gen/parse.
+dotenvy = "0.15"
+bip39 = { version = "2", features = ["rand"] }
+# Raw private-key decoding for the EnvPrivateKey wallet source (hex on EVM/Cosmos; Solana decodes base58 natively).
+hex = "0.4"
 
 # CosmWasm
-cw-multi-test = "3"
-cosmwasm-std = "3"
+cw-multi-test = "2"
+cosmwasm-std = "2"
+# Live RPC (cosmos): tendermint-rpc transport + cosmos/cosmwasm protobuf query types.
+cosmrs = { version = "0.21", features = ["rpc", "cosmwasm", "bip32"] }
+prost = "0.13"
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # EVM / Solidity
 revm = "41"

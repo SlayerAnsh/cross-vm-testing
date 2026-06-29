@@ -9,8 +9,20 @@ description = "EVM/Solidity chain provider (revm) for the cross-vm testing suite
 [dependencies]
 cross-vm-core.workspace = true
 revm.workspace = true
+# Ethereum value types (Address/Bytes/U256/keccak256). alloy-primitives is the crate revm
+# itself re-exports, so the single shared version unifies and types match at the revm boundary.
+alloy-primitives.workspace = true
+# Full alloy for the live-RPC provider (HTTP transport, JSON-RPC, eth rpc types).
+alloy.workspace = true
+# Local signer with BIP-39 mnemonic derivation (MnemonicBuilder/PrivateKeySigner). The
+# `mnemonic` feature pulls in coins-bip39, which alloy's `full` does not enable.
+alloy-signer-local = { version = "1", features = ["mnemonic"] }
 thiserror.workspace = true
+# Async mutex for the per-wallet broadcast lock (held across await on a current-thread rt).
+tokio.workspace = true
 
 [dev-dependencies]
-alloy = { workspace = true }
-hex = "0.4"
+tokio.workspace = true
+cross-vm-macros.workspace = true
+# Load `.env` into the process environment for the live onchain test.
+dotenvy.workspace = true

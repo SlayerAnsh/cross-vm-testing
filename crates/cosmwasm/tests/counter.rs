@@ -1,110 +1,69 @@
-//! Integration test: full deploy -> execute -> query path through the CosmWasm
-//! provider, using an in-test counter contract (no external wasm needed).
+//! Integration test: full store_code -> instantiate -> execute -> query path through the
+//! CosmWasm provider, driving the canonical counter contract from
+//! `examples/cosmwasm-contracts/counter`. The example crate is consumed as an rlib and wrapped
+//! in-process via `ContractWrapper`, so no external wasm artifact is required.
 
-use cosmwasm_std::{
-    to_json_binary, Binary, Deps, DepsMut, Empty, Env, MessageInfo, Response, StdError, StdResult,
-};
-use cross_vm_core::ChainProvider;
+use std::rc::Rc;
+
+use cosmwasm_std::Empty;
+use counter::{CountResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
+use cross_vm_core::{ChainProvider, WalletFactory};
 use cross_vm_cosmwasm::chains::OSMOSIS;
+use cross_vm_cosmwasm::CwMockProvider;
 use cw_multi_test::{Contract, ContractWrapper};
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-
-const COUNT_KEY: &[u8] = b"count";
-
-#[derive(Serialize, Deserialize)]
-struct InstantiateMsg {
-    count: i32,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ExecuteMsg {
-    Increment {},
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum QueryMsg {
-    Count {},
-}
-
-#[derive(Serialize, Deserialize)]
-struct CountResponse {
-    count: i32,
-}
-
-fn instantiate(
-    deps: DepsMut,
-    _env: Env,
-    _info: MessageInfo,
-    msg: InstantiateMsg,
-) -> StdResult<Response> {
-    deps.storage.set(COUNT_KEY, &msg.count.to_be_bytes());
-    Ok(Response::new())
-}
-
-fn execute(
-    deps: DepsMut,
-    _env: Env,
-    _info: MessageInfo,
-    msg: ExecuteMsg,
-) -> StdResult<Response> {
-    match msg {
-        ExecuteMsg::Increment {} => {
-            let cur = read_count(deps.storage)?;
-            deps.storage.set(COUNT_KEY, &(cur + 1).to_be_bytes());
-            Ok(Response::new().add_attribute("action", "increment"))
-        }
-    }
-}
-
-fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
-    match msg {
-        QueryMsg::Count {} => to_json_binary(&CountResponse {
-            count: read_count(deps.storage)?,
-        }),
-    }
-}
-
-fn read_count(storage: &dyn cosmwasm_std::Storage) -> StdResult<i32> {
-    let bytes = storage
-        .get(COUNT_KEY)
-        .ok_or_else(|| StdError::msg("count not set"))?;
-    let arr: [u8; 4] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| StdError::msg("bad count encoding"))?;
-    Ok(i32::from_be_bytes(arr))
-}
 
 fn counter_contract() -> Box<dyn Contract<Empty, Empty>> {
-    Box::new(ContractWrapper::new(execute, instantiate, query))
+    Box::new(ContractWrapper::new(
+        counter::execute,
+        counter::instantiate,
+        counter::query,
+    ))
 }
 
-#[test]
-fn deploy_increment_query() {
-    let mut chain = OSMOSIS.mock();
-    let deployer = chain.new_account("deployer");
+fn empty_wallets() -> Rc<WalletFactory> {
+    Rc::new(WalletFactory::from_roster(&[]).unwrap())
+}
 
-    // Deploy with initial count = 5.
+#[tokio::test]
+async fn deploy_increment_query() {
+    let mut chain: CwMockProvider = OSMOSIS.mock(empty_wallets());
+    let deployer = chain.new_account("deployer").await;
+
+    let code_id = chain.store_code(counter_contract()).await;
     let contract = chain
-        .deploy(counter_contract(), json!({ "count": 5 }), &deployer)
-        .expect("deploy");
+        .instantiate(code_id, InstantiateMsg {}, &deployer, &[], "counter")
+        .await
+        .expect("instantiate");
 
-    // Initial query.
-    let res = chain.query(&contract, json!({ "count": {} })).expect("query");
-    assert_eq!(res["count"], 5);
+    let res: CountResponse = chain
+        .query_wasm_smart(&contract, QueryMsg::GetCount {})
+        .await
+        .expect("query");
+    assert_eq!(res.count, 0);
 
-    // Increment twice.
     chain
-        .execute(&contract, json!({ "increment": {} }), &deployer)
+        .execute_contract(&contract, ExecuteMsg::Increment {}, &deployer, &[])
+        .await
         .expect("execute 1");
     chain
-        .execute(&contract, json!({ "increment": {} }), &deployer)
+        .execute_contract(&contract, ExecuteMsg::Increment {}, &deployer, &[])
+        .await
         .expect("execute 2");
 
-    // Final query.
-    let res = chain.query(&contract, json!({ "count": {} })).expect("query");
-    assert_eq!(res["count"], 7);
+    let res: CountResponse = chain
+        .query_wasm_smart(&contract, QueryMsg::GetCount {})
+        .await
+        .expect("query");
+    assert_eq!(res.count, 2);
+
+    chain
+        .execute_contract(&contract, ExecuteMsg::Reset {}, &deployer, &[])
+        .await
+        .expect("reset");
+
+    let res: CountResponse = chain
+        .query_wasm_smart(&contract, QueryMsg::GetCount {})
+        .await
+        .expect("query");
+    assert_eq!(res.count, 0);
 }

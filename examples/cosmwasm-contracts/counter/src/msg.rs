@@ -5,6 +5,7 @@ pub struct InstantiateMsg {}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "cross-vm", derive(cross_vm_macros::CwExecuteFns))]
 pub enum ExecuteMsg {
     Increment {},
     Reset {},
@@ -12,7 +13,9 @@ pub enum ExecuteMsg {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "cross-vm", derive(cross_vm_macros::CwQueryFns))]
 pub enum QueryMsg {
+    #[cfg_attr(feature = "cross-vm", returns(CountResponse))]
     GetCount {},
 }
 

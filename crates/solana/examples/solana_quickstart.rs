@@ -1,27 +1,54 @@
-//! Quickstart: spin up a Solana mock chain, fund accounts, and transfer SOL.
+//! Quickstart: spin up a Solana mock chain, derive wallets, fund, and transfer SOL.
 //!
 //! Run with: `cargo run -p cross-vm-solana --example solana_quickstart`
 
-use cross_vm_core::{ChainProvider, ChainSpec};
+use std::rc::Rc;
+
+use cross_vm_core::{ChainProvider, ChainSpec, WalletFactory};
+use cross_vm_macros::define_wallet_roster;
 use cross_vm_solana::chains::SOLANA_DEVNET;
+use cross_vm_solana::SvmChain;
 use solana_system_interface::instruction::transfer;
 
-fn main() {
-    // Two equivalent ways to construct: `SOLANA_DEVNET.mock()` or `SvmMockProvider::new(..)`.
-    let mut chain = SOLANA_DEVNET.mock();
-    println!("cluster: {} ({})", chain.chain_info().name(), chain.chain_info().chain_id());
+define_wallet_roster! {
+    pub const DEMO_WALLETS: DemoWallets = {
+        alice: auto @ 0,
+        bob: auto @ 1,
+    };
+}
 
-    let alice = chain.new_account("alice");
-    let bob = chain.new_account("bob");
-    println!("alice: {alice}  balance: {}", chain.balance(&alice).unwrap());
-    println!("bob:   {bob}  balance: {}", chain.balance(&bob).unwrap());
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    // `auto` wallets generate fresh mnemonics so the example is self-contained; on a real cluster
+    // use `env_mnemonic("VAR")` and load secrets from `.env` first.
+    let wallets = Rc::new(WalletFactory::from_roster(DemoWallets::SPECS).unwrap());
+
+    let mut chain: SvmChain = SOLANA_DEVNET.mock(wallets).into();
+    println!(
+        "cluster: {} ({})",
+        chain.chain_info().name(),
+        chain.chain_info().chain_id()
+    );
+
+    let alice = chain.wallet_address(DEMO_WALLETS.alice).await.unwrap();
+    let bob = chain.wallet_address(DEMO_WALLETS.bob).await.unwrap();
+    chain.set_balance(&alice, 100_000_000_000).await.unwrap(); // 100 SOL
+    println!(
+        "alice: {alice}  balance: {}",
+        chain.balance(&alice).await.unwrap()
+    );
+    println!(
+        "bob:   {bob}  balance: {}",
+        chain.balance(&bob).await.unwrap()
+    );
 
     let ix = transfer(&alice, &bob, 1_000_000_000); // 1 SOL
     chain
-        .execute(&solana_system_interface::program::ID, vec![ix], &alice)
+        .send_transaction(vec![ix], DEMO_WALLETS.alice)
+        .await
         .expect("transfer");
 
     println!("after transfer:");
-    println!("alice balance: {}", chain.balance(&alice).unwrap());
-    println!("bob balance:   {}", chain.balance(&bob).unwrap());
+    println!("alice balance: {}", chain.balance(&alice).await.unwrap());
+    println!("bob balance:   {}", chain.balance(&bob).await.unwrap());
 }

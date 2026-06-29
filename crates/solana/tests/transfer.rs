@@ -1,29 +1,45 @@
-//! Integration test: airdrop -> transfer -> balance through the Solana provider,
-//! using a System Program transfer instruction (no custom program needed).
+//! Integration test: fund -> transfer -> balance through the Solana provider, using a System
+//! Program transfer instruction (no custom program needed) and a factory-derived wallet.
 
-use cross_vm_core::ChainProvider;
+use std::rc::Rc;
+
+use cross_vm_core::{ChainProvider, WalletFactory};
+use cross_vm_macros::define_wallet_roster;
 use cross_vm_solana::chains::SOLANA_LOCALNET;
+use cross_vm_solana::SvmChain;
 use solana_system_interface::instruction::transfer;
 
-#[test]
-fn airdrop_transfer_balance() {
-    let mut chain = SOLANA_LOCALNET.mock();
+define_wallet_roster! {
+    pub const TEST_WALLETS: TestWallets = {
+        alice: auto @ 0,
+        bob: auto @ 1,
+    };
+}
 
-    // new_account airdrops the default funding to each.
-    let alice = chain.new_account("alice");
-    let bob = chain.new_account("bob");
+fn test_wallets() -> Rc<WalletFactory> {
+    Rc::new(WalletFactory::from_roster(TestWallets::SPECS).expect("resolve roster"))
+}
 
-    let alice_start = chain.balance(&alice).unwrap();
-    let bob_start = chain.balance(&bob).unwrap();
+#[tokio::test]
+async fn fund_transfer_balance() {
+    let wallets = test_wallets();
+    let mut chain: SvmChain = SOLANA_LOCALNET.mock(wallets).into();
+
+    let alice = chain.wallet_address(TEST_WALLETS.alice).await.unwrap();
+    let bob = chain.wallet_address(TEST_WALLETS.bob).await.unwrap();
+    chain.set_balance(&alice, 100_000_000_000).await.unwrap(); // 100 SOL
+
+    let alice_start = chain.balance(&alice).await.unwrap();
+    let bob_start = chain.balance(&bob).await.unwrap();
     assert!(alice_start > 0);
 
     let amount = 1_000_000_000; // 1 SOL
     let ix = transfer(&alice, &bob, amount);
     chain
-        .execute(&solana_system_interface::program::ID, vec![ix], &alice)
+        .send_transaction(vec![ix], TEST_WALLETS.alice)
+        .await
         .expect("transfer");
 
-    // Bob gained exactly `amount`; Alice lost `amount` plus any fee.
-    assert_eq!(chain.balance(&bob).unwrap(), bob_start + amount);
-    assert!(chain.balance(&alice).unwrap() <= alice_start - amount);
+    assert_eq!(chain.balance(&bob).await.unwrap(), bob_start + amount);
+    assert!(chain.balance(&alice).await.unwrap() <= alice_start - amount);
 }

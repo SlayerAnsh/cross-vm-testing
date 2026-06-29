@@ -8,7 +8,9 @@ Provide a uniform way to drive three execution environments (CosmWasm, EVM, Sola
 
 The three VMs disagree on nearly every concrete type. CosmWasm uses `Addr` and JSON messages, EVM uses a 20 byte `Address` and ABI calldata, Solana uses a 32 byte `Address` (pubkey) and Borsh instructions. A single trait built from associated types is the way to share one method vocabulary while letting each VM keep its idiomatic types. This mirrors cw-orch's `CwEnv` and test-tube's `Runner`.
 
-The core trait is synchronous. All three mock VMs run synchronously, and the future live RPC path will wrap async internally rather than forcing `async` on every caller.
+The core trait is asynchronous. Every operation is an `async fn` so the one surface fits both the in-process mocks (whose bodies are synchronous and simply do not await) and the live RPC backends (which await network I/O). `chain_info` stays synchronous since it only returns local metadata. The mock backends (`revm`, `litesvm`, `cw-multi-test`) are not `Send`, so the returned futures are not `Send`; drive them on a current-thread runtime (`#[tokio::test]`, `#[tokio::main(flavor = "current_thread")]`).
+
+Chain handles are cheap to clone and share one underlying state. Each mock provider holds its backend behind `Rc<RefCell<_>>` (the EVM already did; CosmWasm and Solana were converted), so `CwChain`, `EvmChain`, `SvmChain`, and `AnyChain` are `Clone` and the contract operations run behind `&self`. This is what lets a contract wrapper own its own handle (`Contract::new(chain)`) while a test still drives the same chain. It mirrors how cw-orch shares an `Rc<RefCell<App>>` mock environment.
 
 ### Core traits (`cross-vm-core`)
 
@@ -24,9 +26,33 @@ pub trait ChainSpec {
 }
 ```
 
-`ChainProvider` is the uniform provider surface. Associated types (`Address`, `Code`, `InitMsg`, `ExecMsg`, `QueryMsg`, `ContractRef`, `Response`, `QueryResponse`, `Balance`, `Error`) let each VM specialize. Methods: `chain_info`, `new_account`, `balance`, `set_balance`, `block_height`, `advance_blocks`, `deploy`, `execute`, `query`.
+`ChainProvider` is the uniform **chain-level** provider surface. Associated types (`Address`, `Account`, `Balance`, `Error`) let each VM specialize while sharing account, balance, and block operations. Methods: `chain_info`, `new_account`, `balance`, `set_balance`, `block_height`, `advance_blocks`.
+
+Contract and program operations are **not** on `ChainProvider`. Each VM crate exposes idiomatic methods on its mock/RPC providers and chain enums:
+
+| VM | Contract/program API |
+| --- | --- |
+| CosmWasm | `store_code`, `instantiate`, `execute_contract`, `query_wasm_smart` |
+| EVM | `deploy_create`, `call`, `static_call` |
+| Solana | `add_program`, `send_transaction`, `get_account` |
 
 `CrossVmError` is a unified error enum. Each provider's own error converts into it (via the `Error: Into<CrossVmError>` bound), so cross VM scripts can use one `Result` type.
+
+### Wallets and signing (`cross-vm-core`)
+
+Mnemonics are the only secret. A `.env` holds nothing but BIP-39 phrases (one or more, each under its own variable). The wallet roster is the compile-time `WALLETS` const: each `WalletSpec` row names a label, a `WalletSource` (`Generate` for a fresh random mnemonic, or `Env(var)` to read a named `.env` variable), an account index, and an optional explicit HD path. `WalletFactory` loads the secrets (`from_env_file`, or `from_secrets` for tests) and resolves every row into a `WalletDef`. Adding a wallet means adding a const row, not calling a runtime registration API.
+
+Key derivation is per ecosystem, behind the `WalletDeriver` trait (a sibling of `ChainProvider`, so providers that need no crypto are unaffected). Each VM crate implements it on its chain handle:
+
+| VM | Coin type | Algorithm | Signer |
+| --- | --- | --- | --- |
+| EVM | 60 | alloy `MnemonicBuilder` | `PrivateKeySigner` |
+| Cosmos | 118 | `bip39` seed + cosmrs `bip32`, bech32 prefix from `chain_info` | `CosmosSigner` (`Rc<SigningKey>` + `Addr`) |
+| Solana | 501 | `bip39` seed + SLIP-10 ed25519 | `SvmSigner` (`Rc<Keypair>`) |
+
+The factory is VM-agnostic (it stores resolved defs plus per-label locks, no signer types), which lets it live in `core` while the chains that hold an `Rc<WalletFactory>` live in the VM crates that depend on `core`, with no dependency cycle. Each chain derives and caches its own signer type.
+
+Broadcasts take a wallet label, not an address. `EvmChain::deploy_create`/`call`, `CwChain::instantiate`/`execute_contract`, and `SvmChain::send_transaction` resolve the label through the factory and acquire that wallet's lock for the whole build, sign, broadcast sequence. The lock is a `tokio::sync::Mutex` owned guard: an async mutex is mandatory because a `std` mutex held across an `.await` would deadlock the single thread runtime. Same-wallet broadcasts serialize (no nonce or account-sequence collision); different wallets proceed in parallel. The framework's `MultiChainEnv` builds the factory at setup (`with_env_file` / `with_wallets`) and distributes it to every chain at `start`.
 
 ### Per VM mapping
 
@@ -34,17 +60,38 @@ pub trait ChainSpec {
 | --- | --- | --- | --- |
 | Backend | `App` with `MockApiBech32` | `MainnetEvm` over `InMemoryDB` | `LiteSVM` |
 | Address | `Addr` (bech32, chain prefix) | `Address` (20 bytes) | `Address` (pubkey) |
-| Deploy | `store_code` then `instantiate_contract` | create tx with bytecode | `add_program` |
-| Execute | `execute_contract` | `transact_commit` (call tx) | signed `Transaction` |
-| Query | `wrap().query_wasm_smart` | `transact` (static call) | `get_account` |
+| Upload/deploy | `store_code` | `deploy_create` (create tx) | `add_program` |
+| Mutate | `instantiate` / `execute_contract` | `call` (`transact_commit`) | `send_transaction` |
+| Read | `query_wasm_smart` | `static_call` (`transact`, no commit) | `get_account` |
 | Balance | bank `init_balance` / `query_balance` | `AccountInfo.balance` | `airdrop` / `get_balance` |
-| Code/Msg types | `serde_json::Value` | `Bytes` (calldata) | `Vec<Instruction>` |
+| Msg types | JSON serde (`CwSerde`) | `AsRef<[u8]>` calldata | `AsRef<[Instruction]>` |
 
 Notes on specific choices:
 
-* The EVM mock holds the `revm` instance in a `RefCell` so the read only `query` (which `revm` implements through a `&mut` static call) can run behind `&self`. Queries use `transact` (no commit) so they leave no state behind. Nonce checking is disabled and transactions are sent as legacy (no chain id) to keep a test harness free of nonce and EIP-155 bookkeeping.
-* The Solana mock keeps the `Keypair` generated for each account and looks it up by pubkey when signing, since Solana has no notion of an address that can send a transaction without its key. Block height is tracked alongside `warp_to_slot`.
+* The EVM mock holds the `revm` instance in a `RefCell` so read-only `static_call` (which `revm` implements through a `&mut` static call) can run behind `&self`. Static calls use `transact` (no commit) so they leave no state behind. Nonce checking is disabled and transactions are sent as legacy (no chain id) to keep a test harness free of nonce and EIP-155 bookkeeping.
+* The Solana mock signs with the wallet's keypair, supplied by the factory (the chain resolves a label to an `SvmSigner` and hands the mock the `Keypair`). `new_account` still mints a funded throwaway pubkey for balance and read scenarios, but it no longer retains keys, since sending now goes through wallet labels. Block height is tracked alongside `warp_to_slot`.
 * The CosmWasm mock configures `MockApiBech32` with the chain's bech32 prefix, so generated addresses are realistic (for example `osmo1...`).
+
+### Cross-VM contract layer (`cross-vm-framework`)
+
+The `contract` module lets a developer wrap a contract once and run one test across all three VMs (for example with rstest `#[values(OSMOSIS.mock(), ETHEREUM.mock(), SOLANA_DEVNET.mock())]`). The framework stays free of any message encoding; the developer owns the per-VM encoding in native typed code. Pieces:
+
+* `Account`: a VM-agnostic address (a signer, or a deployed contract address). Per-VM hooks recover the native type with `cw()` / `evm()` / `svm()`, which return `CrossVmError::WrongVm` on a mismatch. `AnyChain::new_account` returns one.
+* `ContractBase`: the shared chain handle plus the deployed address (behind a `RefCell`, so a `&self` `setup` can record it). Provides typed chain accessors (`cosmwasm()`, `evm()`, `solana()`) and address getters (`cw_addr()`, `evm_addr()`, `svm_addr()`).
+* `AppResponse<T>`: the uniform return envelope, carrying a typed payload `T` plus the raw per-VM result. Common accessors (`transaction_hash`, `gas_used`) are fallible. VM-specific accessors error on a VM mismatch: the raw result (`raw_cosmwasm`, `raw_evm`, `raw_solana`) and the emitted events, whose shapes do not unify (`raw_cosmwasm_events` returns typed `Event`s, `raw_evm_logs` returns ABI `Log`s, `raw_solana_logs` returns program log lines). The EVM raw result carries both the return data and the logs (`RawResponse::Evm { output, logs }`), since revm reports them together.
+* `Hooks`: per-contract before/after callbacks on `ContractBase`. A wrapper registers them (`on_before` / `on_after`) and fires them (`run_before` / `run_after`) around the per-VM execution. An after-hook observes the uniform `AppResponse` (and the per-VM event accessors above), so side-logic (indexer, bridge, listener) reacts to a transaction, matching on `kind()` only where the event shapes differ. Hooks are synchronous `FnMut`; both kinds can return `Err` to abort (before stops the tx, after fails the method).
+
+A contract wrapper holds a `ContractBase` and writes one dispatcher per logical method that matches `kind()` and calls the matching `cw_*` / `evm_*` / `svm_*` hook (see `examples/integration-tests/tests/support/counter.rs`). Design decisions behind this shape:
+
+1. Keep the `AnyChain` enum rather than a trait object: contract methods are generic and async, so they are not object safe; an enum is the only single, sized, runtime-selected type that can hold any backend and still expose generic methods.
+2. One wrapper with per-VM hooks, not three separate VM traits: the developer owns each VM's native encoding, and an unsupported VM falls through to a `CrossVmError::Unimplemented` arm rather than a missing impl.
+3. The contract owns its chain handle (`Contract::new(chain)` / `Contract::instance(chain, addr)`), so methods drop the chain parameter and the deployed address lives beside the chain.
+4. Owning the handle forces cheap-clone shared state (`Rc<RefCell<_>>`), which also makes the contract API `&self`.
+5. `AppResponse<T>` keeps two failure modes distinct: `WrongVm` (wrong accessor) versus `Unsupported` (right VM, the backend lacks the datum, for example a transaction hash on `cw-multi-test`).
+6. The scaffolding macro that would generate the hooks plus dispatcher is deferred until the hand-written pattern is proven. The macro would also emit the `run_before` / `run_after` transaction-hook calls that bracket the dispatch.
+7. Transaction hooks fire at the framework convergence point (`AppResponse`), not in the per-VM provider methods. Those have three incompatible signatures and no shared response; the dispatcher is the one seam where every VM collapses into a single envelope a hook can read.
+
+The example wrapper covers all three VMs: an in-process CosmWasm counter (`ContractWrapper`), a Solidity `Counter` (committed creation bytecode, `alloy::sol!`), and an Anchor counter loaded at its `declare_id!` (built by `make compile-solana`, instructions built from the 8-byte discriminators and the PDA seeds).
 
 ### Predefined chains
 
@@ -55,8 +102,8 @@ let chain = OSMOSIS.mock();             // sugar
 let chain = CwMockProvider::new(OSMOSIS);
 ```
 
-RPC providers exist as compiling stubs (`OSMOSIS.rpc()`, `EvmRpcProvider::new`, etc.); every operation returns `Unimplemented` until phase 2.
+All three RPC providers serve live read paths with no signer. The CosmWasm provider (`OSMOSIS_TESTNET.rpc()`) goes over Tendermint RPC via `cosmrs`: block height, native balance, and `query_wasm_smart` (ABCI queries). The EVM provider (`SEPOLIA.rpc()`) goes over JSON-RPC via the alloy HTTP provider: block number, native balance, and `static_call` (`eth_call`). The Solana provider (`SOLANA_DEVNET.rpc()`) goes over JSON-RPC via a thin `reqwest` client: slot, lamport balance, and `get_account` (`getAccountInfo`). EVM RPC write paths now sign with the wallet signer and broadcast (`deploy_create`, `call`); Cosmos and Solana RPC writes remain compiling stubs that return `Unimplemented` (signer plumbed through, return types decoupled in a follow-up).
 
-## Out of scope (phase 2 and later)
+## Out of scope (later phases)
 
-Live RPC implementations (cosmrs broadcast, alloy http provider, Solana RpcClient); the cross VM orchestration layer that runs one script across all three; fuzz and invariant harnesses; gas/compute reporting; fork from live.
+The Cosmos and Solana RPC write paths (signed `store_code`/`instantiate`/`execute` and `add_program`/`send_transaction`, blocked on decoupling their mock-backend return types); the cross VM orchestration layer that runs one script across all three; fuzz and invariant harnesses; gas/compute reporting; fork from live.

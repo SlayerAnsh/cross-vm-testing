@@ -11,7 +11,24 @@ cross-vm-core.workspace = true
 cw-multi-test.workspace = true
 cosmwasm-std.workspace = true
 thiserror.workspace = true
-serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+cosmrs.workspace = true
+prost.workspace = true
+serde_json.workspace = true
+# BIP-39 mnemonic -> seed (cosmrs' bundled bip32 has its own Mnemonic feature-gated off).
+bip39.workspace = true
+# Decode raw secp256k1 private keys (hex) for the EnvPrivateKey wallet source.
+hex.workspace = true
+# Async mutex for the per-wallet broadcast lock (held across await on a current-thread rt).
+tokio.workspace = true
 
 [dev-dependencies]
-serde = { version = "1", features = ["derive"] }
+tokio.workspace = true
+cross-vm-macros.workspace = true
+# Load `.env` into the process environment for the live onchain test.
+dotenvy.workspace = true
+# The canonical counter contract from `examples/`, consumed as an rlib and wrapped in-process.
+counter = { path = "../../examples/cosmwasm-contracts/counter" }
+# The vault contract, with the `cross-vm` feature on so its messages carry the typed-handle
+# derives (exercises CwExecuteFns `#[payable]` + CwQueryFns end to end).
+vault = { path = "../../examples/cosmwasm-contracts/vault", features = ["cross-vm"] }

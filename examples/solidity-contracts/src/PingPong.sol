@@ -10,29 +10,12 @@ contract PingPong {
     uint64 public pingsSent;
     uint64 public pongsReceived;
 
-    event SendPacket(
-        string source_port,
-        string destination_port,
-        uint64 packet_sequence,
-        bytes msg
-    );
-    event ReceivePacket(
-        string source_port,
-        string destination_port,
-        uint64 packet_sequence
-    );
+    event SendPacket(string source_port, string destination_port, uint64 packet_sequence, bytes msg);
+    event ReceivePacket(string source_port, string destination_port, uint64 packet_sequence);
     event WriteAcknowledgement(
-        string source_port,
-        string destination_port,
-        uint64 packet_sequence,
-        bytes msg,
-        bytes ack
+        string source_port, string destination_port, uint64 packet_sequence, bytes msg, bytes ack
     );
-    event AcknowledgePacket(
-        string source_port,
-        string destination_port,
-        uint64 packet_sequence
-    );
+    event AcknowledgePacket(string source_port, string destination_port, uint64 packet_sequence);
 
     constructor(string memory _chainId) {
         chainId = _chainId;
@@ -54,27 +37,14 @@ contract PingPong {
         uint64 sequence,
         bytes calldata packetMsg
     ) external {
-        require(
-            keccak256(bytes(destinationPort)) == keccak256(bytes(_sourcePort())),
-            "invalid destination port"
-        );
+        require(keccak256(bytes(destinationPort)) == keccak256(bytes(_sourcePort())), "invalid destination port");
         require(keccak256(packetMsg) == keccak256(PING_MSG), "invalid packet message");
 
         emit ReceivePacket(sourcePort, destinationPort, sequence);
-        emit WriteAcknowledgement(
-            sourcePort,
-            destinationPort,
-            sequence,
-            packetMsg,
-            PONG_ACK
-        );
+        emit WriteAcknowledgement(sourcePort, destinationPort, sequence, packetMsg, PONG_ACK);
     }
 
-    function acknowledgePacket(
-        string calldata sourcePort,
-        string calldata destinationPort,
-        uint64 sequence
-    ) external {
+    function acknowledgePacket(string calldata sourcePort, string calldata destinationPort, uint64 sequence) external {
         pongsReceived += 1;
         emit AcknowledgePacket(sourcePort, destinationPort, sequence);
     }

@@ -1,8 +1,8 @@
-use cosmwasm_std::{Deps, DepsMut, Env, Response, StdResult, ensure};
+use cosmwasm_std::{ensure, Deps, DepsMut, Env, Response, StdResult};
 
 use crate::events::{
-    PING_MSG, PONG_ACK, acknowledge_packet_event, receive_packet_event, send_packet_event,
-    write_acknowledgement_event,
+    acknowledge_packet_event, receive_packet_event, send_packet_event, write_acknowledgement_event,
+    PING_MSG, PONG_ACK,
 };
 use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg, StatsResponse};
 use crate::port::format_port;

@@ -1,6 +1,7 @@
 /target
 .env
 .env.*
+!.env.example
 
 # Solidity (Foundry)
 examples/solidity-contracts/out/
@@ -13,3 +14,15 @@ examples/solana-contracts/.anchor/
 
 # CosmWasm
 examples/cosmwasm-contracts/counter/target/
+examples/cosmwasm-contracts/vault/target/
+
+# Example scripts (Rust build output)
+examples/scripts/target/
+
+artifacts/
+
+#IDE
+.vscode/
+
+# AI
+.claude/

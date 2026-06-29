@@ -1,0 +1,311 @@
+//! Backend-agnostic CosmWasm chain handle and asset funding.
+//!
+//! [`CwChain`] wraps either a mock or an RPC provider and implements
+//! [`ChainProvider`] by delegating for chain-level operations. Contract operations
+//! use idiomatic methods (`store_code`, `instantiate`, `execute_contract`, `query_wasm_smart`).
+//! [`CwChain::ensure_asset`] backs the testing environment's funding phase.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use cosmwasm_std::{coins, Addr, Coin};
+use cross_vm_core::{ChainProvider, FundError, WalletDeriver, WalletFactory, WalletLabel};
+use serde::{Deserialize, Serialize};
+use tokio::sync::OwnedMutexGuard;
+
+use crate::asset::CwAsset;
+use crate::chains::CosmosChainInfo;
+use crate::error::CwError;
+use crate::msg::CwSerde;
+use crate::provider::{CwCode, CwMockProvider, CwRpcProvider};
+use crate::wallet::CosmosSigner;
+
+/// CW20 balance query message for [`CwChain::ensure_asset`].
+#[derive(Serialize, Deserialize)]
+struct Cw20BalanceQuery {
+    balance: Cw20BalanceAddress,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Cw20BalanceAddress {
+    address: Addr,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Cw20BalanceResponse {
+    balance: String,
+}
+
+/// A CosmWasm chain backed by either a mock or an RPC provider.
+// The mock holds full in-process chain state; the RPC stub is tiny. The size gap is
+// intentional and the value is not stored in bulk, so boxing would only add indirection.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
+pub enum CwChain {
+    /// In-process `cw-multi-test` backend.
+    Mock(CwMockProvider),
+    /// Live RPC backend (phase-1 stub).
+    Rpc(CwRpcProvider),
+}
+
+impl From<CwMockProvider> for CwChain {
+    fn from(p: CwMockProvider) -> Self {
+        CwChain::Mock(p)
+    }
+}
+
+impl From<CwRpcProvider> for CwChain {
+    fn from(p: CwRpcProvider) -> Self {
+        CwChain::Rpc(p)
+    }
+}
+
+impl CwChain {
+    /// Bind this chain to a deployed contract `addr`, returning a [`crate::CwContract`] handle
+    /// that carries the address for every `execute` / `query` call.
+    pub fn contract(&self, addr: Addr) -> crate::CwContract {
+        crate::CwContract::bound(self.clone(), addr)
+    }
+
+    fn wallets(&self) -> &Rc<WalletFactory> {
+        match self {
+            CwChain::Mock(p) => &p.wallets,
+            CwChain::Rpc(p) => &p.wallets,
+        }
+    }
+
+    fn signers(&self) -> &Rc<RefCell<HashMap<String, CosmosSigner>>> {
+        match self {
+            CwChain::Mock(p) => &p.signers,
+            CwChain::Rpc(p) => &p.signers,
+        }
+    }
+
+    /// Resolve a wallet label to its signer and acquire its broadcast lock. The guard must be
+    /// held for the whole broadcast so the same wallet never sends two txs at once (which would
+    /// collide on the account sequence). Signers are derived once and cached.
+    async fn acquire<'a>(
+        &self,
+        label: WalletLabel<'a>,
+    ) -> Result<(CosmosSigner, OwnedMutexGuard<()>), CwError> {
+        let factory = self.wallets().clone();
+        let def = factory.def(label)?.clone();
+        let guard = factory.lock(label).await?;
+        let key = label.as_str();
+        if let Some(signer) = self.signers().borrow().get(key).cloned() {
+            return Ok((signer, guard));
+        }
+        let signer = self.signer_for(&def)?;
+        self.signers()
+            .borrow_mut()
+            .insert(key.to_string(), signer.clone());
+        Ok((signer, guard))
+    }
+
+    /// Derive (and cache) a wallet's bech32 address without acquiring the broadcast lock.
+    /// Useful for funding the wallet in the setup phase or asserting on its address.
+    pub async fn wallet_address<'a>(&self, label: WalletLabel<'a>) -> Result<Addr, CwError> {
+        let key = label.as_str();
+        if let Some(signer) = self.signers().borrow().get(key).cloned() {
+            return Ok(signer.address);
+        }
+        let def = self.wallets().def(label)?.clone();
+        let signer = self.signer_for(&def)?;
+        let addr = signer.address.clone();
+        self.signers().borrow_mut().insert(key.to_string(), signer);
+        Ok(addr)
+    }
+
+    /// Upload a `cw-multi-test` contract object to the mock chain and return its code id. Code
+    /// upload needs no signer on the mock. For a live RPC chain use
+    /// [`store_code_wasm`](Self::store_code_wasm) with compiled wasm bytes instead.
+    pub async fn store_code(&self, code: CwCode) -> Result<u64, CwError> {
+        match self {
+            CwChain::Mock(p) => Ok(p.store_code(code).await),
+            CwChain::Rpc(p) => p.store_code(code).await,
+        }
+    }
+
+    /// Upload compiled wasm bytecode to the chain, signed by wallet `wallet`, and return its
+    /// code id. This is the live-RPC analogue of [`store_code`](Self::store_code); the mock
+    /// backend runs native contract objects, not wasm, so it reports an error.
+    pub async fn store_code_wasm(
+        &self,
+        wasm: Vec<u8>,
+        wallet: WalletLabel<'_>,
+    ) -> Result<u64, CwError> {
+        let (signer, _guard) = self.acquire(wallet).await?;
+        match self {
+            CwChain::Mock(_) => Err(CwError::Unimplemented(
+                "mock store_code_wasm (use store_code with a cw-multi-test Contract object)".into(),
+            )),
+            CwChain::Rpc(p) => p.store_code_wasm(wasm, &signer).await,
+        }
+    }
+
+    /// Instantiate a contract from an uploaded code id, signed by wallet `wallet`.
+    pub async fn instantiate<Init: CwSerde>(
+        &self,
+        code_id: u64,
+        init: Init,
+        wallet: WalletLabel<'_>,
+        funds: &[Coin],
+        label: &str,
+    ) -> Result<Addr, CwError> {
+        let (signer, _guard) = self.acquire(wallet).await?;
+        match self {
+            CwChain::Mock(p) => {
+                p.instantiate(code_id, init, &signer.address, funds, label)
+                    .await
+            }
+            CwChain::Rpc(p) => p.instantiate(code_id, init, &signer, funds, label).await,
+        }
+    }
+
+    /// Execute a state-mutating message against a contract instance, signed by wallet `wallet`.
+    pub async fn execute_contract<Exec: CwSerde>(
+        &self,
+        addr: &Addr,
+        msg: Exec,
+        wallet: WalletLabel<'_>,
+        funds: &[Coin],
+    ) -> Result<cw_multi_test::AppResponse, CwError> {
+        let (signer, _guard) = self.acquire(wallet).await?;
+        match self {
+            CwChain::Mock(p) => p.execute_contract(addr, msg, &signer.address, funds).await,
+            CwChain::Rpc(p) => p.execute_contract(addr, msg, &signer, funds).await,
+        }
+    }
+
+    /// Run a read-only smart query against a contract instance.
+    pub async fn query_wasm_smart<Query: CwSerde, Resp: CwSerde>(
+        &self,
+        addr: &Addr,
+        msg: Query,
+    ) -> Result<Resp, CwError> {
+        match self {
+            CwChain::Mock(p) => p.query_wasm_smart(addr, msg).await,
+            CwChain::Rpc(p) => p.query_wasm_smart(addr, msg).await,
+        }
+    }
+
+    /// Ensure `who` holds at least `amount` of `asset`.
+    ///
+    /// Mock native: mints the shortfall. Mock cw20: validates the real balance. RPC native:
+    /// validates the real balance (no minting on a live chain) and reports a
+    /// [`FundError::Shortfall`] if the account is underfunded. RPC cw20: still
+    /// [`FundError::Unimplemented`].
+    pub async fn ensure_asset(
+        &mut self,
+        who: &Addr,
+        asset: CwAsset,
+        amount: u128,
+    ) -> Result<(), FundError> {
+        let p = match self {
+            CwChain::Mock(p) => p,
+            CwChain::Rpc(p) => return p.ensure_asset(who, asset, amount).await,
+        };
+        match asset {
+            CwAsset::Native(denom) => {
+                let current = p
+                    .app()
+                    .wrap()
+                    .query_balance(who, &denom)
+                    .map_err(|e| FundError::Provider(e.to_string()))?
+                    .amount
+                    .to_string()
+                    .parse::<u128>()
+                    .map_err(|e| FundError::Provider(e.to_string()))?;
+                if current < amount {
+                    let who = who.clone();
+                    p.app_mut()
+                        .init_modules(|router, _api, storage| {
+                            router
+                                .bank
+                                .init_balance(storage, &who, coins(amount, &denom))
+                        })
+                        .map_err(|e| FundError::Provider(e.to_string()))?;
+                }
+                Ok(())
+            }
+            CwAsset::Cw20(contract) => {
+                let resp: Cw20BalanceResponse = p
+                    .app()
+                    .wrap()
+                    .query_wasm_smart(
+                        &contract,
+                        &Cw20BalanceQuery {
+                            balance: Cw20BalanceAddress {
+                                address: who.clone(),
+                            },
+                        },
+                    )
+                    .map_err(|e| FundError::Provider(e.to_string()))?;
+                let actual = resp
+                    .balance
+                    .parse::<u128>()
+                    .map_err(|e| FundError::Provider(e.to_string()))?;
+                if actual < amount {
+                    Err(FundError::Shortfall {
+                        asset: format!("cw20:{contract}"),
+                        required: amount.to_string(),
+                        actual: actual.to_string(),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+impl ChainProvider for CwChain {
+    type Spec = CosmosChainInfo;
+    type Address = Addr;
+    type Account = Addr;
+    type Balance = u128;
+    type Error = CwError;
+
+    fn chain_info(&self) -> &Self::Spec {
+        match self {
+            CwChain::Mock(p) => p.chain_info(),
+            CwChain::Rpc(p) => p.chain_info(),
+        }
+    }
+
+    async fn new_account(&mut self, label: &str) -> Addr {
+        match self {
+            CwChain::Mock(p) => p.new_account(label).await,
+            CwChain::Rpc(p) => p.new_account(label).await,
+        }
+    }
+
+    async fn balance(&self, addr: &Addr) -> Result<u128, CwError> {
+        match self {
+            CwChain::Mock(p) => p.balance(addr).await,
+            CwChain::Rpc(p) => p.balance(addr).await,
+        }
+    }
+
+    async fn set_balance(&mut self, addr: &Addr, amount: u128) -> Result<(), CwError> {
+        match self {
+            CwChain::Mock(p) => p.set_balance(addr, amount).await,
+            CwChain::Rpc(p) => p.set_balance(addr, amount).await,
+        }
+    }
+
+    async fn block_height(&self) -> u64 {
+        match self {
+            CwChain::Mock(p) => p.block_height().await,
+            CwChain::Rpc(p) => p.block_height().await,
+        }
+    }
+
+    async fn advance_blocks(&mut self, n: u64) {
+        match self {
+            CwChain::Mock(p) => p.advance_blocks(n).await,
+            CwChain::Rpc(p) => p.advance_blocks(n).await,
+        }
+    }
+}

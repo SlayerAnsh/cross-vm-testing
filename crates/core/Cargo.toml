@@ -8,3 +8,8 @@ description = "Shared chain-provider abstractions for the cross-vm testing suite
 
 [dependencies]
 thiserror.workspace = true
+# Wallet factory: load mnemonic secrets from .env, generate/parse BIP-39 phrases,
+# and guard per-wallet broadcasts with an async (current-thread-safe) mutex.
+dotenvy.workspace = true
+bip39.workspace = true
+tokio.workspace = true

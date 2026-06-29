@@ -1,0 +1,241 @@
+//! CosmWasm typed message-handle derives: `CwExecuteFns` and `CwQueryFns`.
+//!
+//! Both run on an `ExecuteMsg` / `QueryMsg` enum in the contract crate and generate a local
+//! `pub trait <Name>Fns` plus an `impl` of it for `::cross_vm_cosmwasm::CwContract`, one method
+//! per variant. Generated code uses absolute paths (`::cross_vm_cosmwasm::*`,
+//! `::cosmwasm_std::Coin`) so the contract crate needs no imports beyond the deps it gains under
+//! its `cross-vm` feature.
+
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote};
+use syn::{Data, DataEnum, DeriveInput, Fields, Ident, Type, Variant};
+
+/// Build the execute-side trait + impl from an `ExecuteMsg` enum.
+pub fn expand_execute_fns(input: DeriveInput) -> syn::Result<TokenStream> {
+    let enum_ident = &input.ident;
+    let trait_ident = format_ident!("{}Fns", enum_ident);
+
+    let mut sigs = Vec::new();
+    let mut methods = Vec::new();
+    for v in &enum_data(&input)?.variants {
+        let method = snake_ident(&v.ident);
+        let (arg_decls, field_idents) = variant_fields(v)?;
+        let ctor = variant_ctor(enum_ident, v, &field_idents);
+
+        if is_payable(v) {
+            sigs.push(quote! {
+                async fn #method(&self, wallet: &str #(, #arg_decls)*, funds: &[::cosmwasm_std::Coin])
+                    -> Result<::cross_vm_cosmwasm::CwAppResponse, ::cross_vm_cosmwasm::CwError>;
+            });
+            methods.push(quote! {
+                async fn #method(&self, wallet: &str #(, #arg_decls)*, funds: &[::cosmwasm_std::Coin])
+                    -> Result<::cross_vm_cosmwasm::CwAppResponse, ::cross_vm_cosmwasm::CwError> {
+                    self.execute_with_funds(#ctor, wallet, funds).await
+                }
+            });
+        } else {
+            sigs.push(quote! {
+                async fn #method(&self, wallet: &str #(, #arg_decls)*)
+                    -> Result<::cross_vm_cosmwasm::CwAppResponse, ::cross_vm_cosmwasm::CwError>;
+            });
+            methods.push(quote! {
+                async fn #method(&self, wallet: &str #(, #arg_decls)*)
+                    -> Result<::cross_vm_cosmwasm::CwAppResponse, ::cross_vm_cosmwasm::CwError> {
+                    self.execute(#ctor, wallet).await
+                }
+            });
+        }
+    }
+
+    Ok(quote! {
+        #[allow(async_fn_in_trait)]
+        pub trait #trait_ident {
+            #(#sigs)*
+        }
+        impl #trait_ident for ::cross_vm_cosmwasm::CwContract {
+            #(#methods)*
+        }
+    })
+}
+
+/// Build the query-side trait + impl from a `QueryMsg` enum (each variant needs `#[returns(T)]`).
+pub fn expand_query_fns(input: DeriveInput) -> syn::Result<TokenStream> {
+    let enum_ident = &input.ident;
+    let trait_ident = format_ident!("{}Fns", enum_ident);
+
+    let mut sigs = Vec::new();
+    let mut methods = Vec::new();
+    for v in &enum_data(&input)?.variants {
+        let method = snake_ident(&v.ident);
+        let ret = returns_type(v)?;
+        let (arg_decls, field_idents) = variant_fields(v)?;
+        let ctor = variant_ctor(enum_ident, v, &field_idents);
+
+        sigs.push(quote! {
+            async fn #method(&self #(, #arg_decls)*)
+                -> Result<#ret, ::cross_vm_cosmwasm::CwError>;
+        });
+        methods.push(quote! {
+            async fn #method(&self #(, #arg_decls)*)
+                -> Result<#ret, ::cross_vm_cosmwasm::CwError> {
+                self.query(#ctor).await
+            }
+        });
+    }
+
+    Ok(quote! {
+        #[allow(async_fn_in_trait)]
+        pub trait #trait_ident {
+            #(#sigs)*
+        }
+        impl #trait_ident for ::cross_vm_cosmwasm::CwContract {
+            #(#methods)*
+        }
+    })
+}
+
+fn enum_data(input: &DeriveInput) -> syn::Result<&DataEnum> {
+    match &input.data {
+        Data::Enum(e) => Ok(e),
+        _ => Err(syn::Error::new_spanned(
+            &input.ident,
+            "CwExecuteFns / CwQueryFns can only be derived on an enum",
+        )),
+    }
+}
+
+/// `(method-arg declarations, field idents)` for a variant. Named fields become args; a unit
+/// variant has none; a tuple variant is rejected.
+fn variant_fields(v: &Variant) -> syn::Result<(Vec<TokenStream>, Vec<&Ident>)> {
+    match &v.fields {
+        Fields::Named(named) => {
+            let mut decls = Vec::new();
+            let mut idents = Vec::new();
+            for f in &named.named {
+                let id = f.ident.as_ref().expect("named field has an ident");
+                let ty = &f.ty;
+                decls.push(quote! { #id: #ty });
+                idents.push(id);
+            }
+            Ok((decls, idents))
+        }
+        Fields::Unit => Ok((Vec::new(), Vec::new())),
+        Fields::Unnamed(_) => Err(syn::Error::new_spanned(
+            v,
+            "tuple variants are not supported; use named fields or a unit variant",
+        )),
+    }
+}
+
+/// The expression that constructs this variant, e.g. `ExecuteMsg::Deposit { amount }`.
+fn variant_ctor(enum_ident: &Ident, v: &Variant, field_idents: &[&Ident]) -> TokenStream {
+    let var = &v.ident;
+    match &v.fields {
+        Fields::Named(_) => quote! { #enum_ident::#var { #(#field_idents),* } },
+        _ => quote! { #enum_ident::#var },
+    }
+}
+
+fn is_payable(v: &Variant) -> bool {
+    v.attrs.iter().any(|a| a.path().is_ident("payable"))
+}
+
+/// The `T` from a variant's `#[returns(T)]`, or an error if it is missing.
+fn returns_type(v: &Variant) -> syn::Result<Type> {
+    for a in &v.attrs {
+        if a.path().is_ident("returns") {
+            return a.parse_args::<Type>();
+        }
+    }
+    Err(syn::Error::new_spanned(
+        v,
+        format!("query variant `{}` is missing #[returns(T)]", v.ident),
+    ))
+}
+
+fn snake_ident(id: &Ident) -> Ident {
+    format_ident!("{}", to_snake(&id.to_string()), span = id.span())
+}
+
+fn to_snake(s: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in s.char_indices() {
+        if ch.is_uppercase() {
+            if i != 0 {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exec(src: &str) -> syn::Result<String> {
+        expand_execute_fns(syn::parse_str(src)?).map(|t| t.to_string())
+    }
+    fn query(src: &str) -> syn::Result<String> {
+        expand_query_fns(syn::parse_str(src)?).map(|t| t.to_string())
+    }
+
+    #[test]
+    fn execute_one_method_per_variant_snake_cased() {
+        let out = exec("enum ExecuteMsg { Increment {}, Reset {} }").unwrap();
+        assert!(out.contains("trait ExecuteMsgFns"));
+        assert!(out.contains("for :: cross_vm_cosmwasm :: CwContract"));
+        assert!(out.contains("fn increment"));
+        assert!(out.contains("fn reset"));
+        // Non-payable: no funds and the plain execute path.
+        assert!(!out.contains("funds"));
+        assert!(!out.contains("execute_with_funds"));
+    }
+
+    #[test]
+    fn execute_named_fields_become_args() {
+        let out = exec("enum ExecuteMsg { Deposit { amount: Uint128 } }").unwrap();
+        assert!(out.contains("fn deposit"));
+        assert!(out.contains("amount"));
+        assert!(out.contains("Uint128"));
+    }
+
+    #[test]
+    fn payable_variant_takes_funds() {
+        let out = exec("enum ExecuteMsg { #[payable] Deposit { amount: Uint128 } }").unwrap();
+        assert!(out.contains("funds"));
+        assert!(out.contains("execute_with_funds"));
+        assert!(out.contains("Coin"));
+    }
+
+    #[test]
+    fn query_uses_returns_type_and_no_wallet() {
+        let out = query("enum QueryMsg { #[returns(CountResponse)] GetCount {} }").unwrap();
+        assert!(out.contains("trait QueryMsgFns"));
+        assert!(out.contains("fn get_count"));
+        assert!(out.contains("CountResponse"));
+        // Queries are unsigned: no wallet arg.
+        assert!(!out.contains("wallet"));
+    }
+
+    #[test]
+    fn query_missing_returns_is_an_error() {
+        let err = query("enum QueryMsg { GetCount {} }").unwrap_err();
+        assert!(err.to_string().contains("returns"), "{err}");
+    }
+
+    #[test]
+    fn tuple_variant_is_rejected() {
+        let err = exec("enum ExecuteMsg { Increment(u64) }").unwrap_err();
+        assert!(err.to_string().contains("tuple"), "{err}");
+    }
+
+    #[test]
+    fn non_enum_is_rejected() {
+        let err = exec("struct ExecuteMsg { x: u64 }").unwrap_err();
+        assert!(err.to_string().contains("enum"), "{err}");
+    }
+}

@@ -5,6 +5,7 @@ skip-lint = false
 [programs.localnet]
 counter = "7TSiNYMVrY4CtSzE4MjAWzhNGpYWs9m2kdaFPuR8ZhJK"
 ping_pong = "54ex8sgs6H3Y2NssU3CWdBhySk9q5Gqc4MMtPYTtJzC5"
+vault = "GFNizKSbcjBH7aTwPyyA3vnqfksjWEfci6fgWeCJ34GB"
 
 [registry]
 url = "https://api.apr.dev"
