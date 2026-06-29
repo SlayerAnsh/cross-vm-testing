@@ -65,7 +65,8 @@ fn recover_signer(prehash: &[u8; 32], sig: &[u8; 65]) -> Option<Address> {
     let recid_byte = if raw_v >= 27 { raw_v - 27 } else { raw_v };
     let recovery_id = RecoveryId::from_byte(recid_byte)?;
 
-    let verifying_key = VerifyingKey::recover_from_prehash(prehash, &signature, recovery_id).ok()?;
+    let verifying_key =
+        VerifyingKey::recover_from_prehash(prehash, &signature, recovery_id).ok()?;
     Some(address_from_verifying_key(&verifying_key))
 }
 
@@ -90,7 +91,12 @@ fn ripemd160_relocated(input: &[u8], gas_limit: u64, reservoir: u64) -> Precompi
 
 /// `blake2f` body, re-exposed at the TIP-272 TVM address.
 fn blake2f_relocated(input: &[u8], gas_limit: u64, reservoir: u64) -> PrecompileResult {
-    Ok(call_eth_precompile(blake2::run, input, gas_limit, reservoir))
+    Ok(call_eth_precompile(
+        blake2::run,
+        input,
+        gas_limit,
+        reservoir,
+    ))
 }
 
 /// `validatemultisign` precompile (address 0x0a).

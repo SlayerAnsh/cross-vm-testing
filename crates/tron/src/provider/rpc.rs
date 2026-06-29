@@ -231,8 +231,8 @@ impl TronRpcProvider {
         let txid_hex = tx["txID"]
             .as_str()
             .ok_or_else(|| TronError::Rpc("transaction has no txID".into()))?;
-        let txid = hex::decode(txid_hex)
-            .map_err(|e| TronError::Rpc(format!("bad txID hex: {e}")))?;
+        let txid =
+            hex::decode(txid_hex).map_err(|e| TronError::Rpc(format!("bad txID hex: {e}")))?;
         let sig = sign_txid(signer, &txid)?;
         tx["signature"] = json!([hex::encode(sig)]);
         let res = self.post("broadcasttransaction", tx).await?;
@@ -244,7 +244,9 @@ impl TronRpcProvider {
             .as_str()
             .map(decode_hex_message)
             .unwrap_or_default();
-        Err(TronError::Rpc(format!("broadcast rejected ({code}): {msg}")))
+        Err(TronError::Rpc(format!(
+            "broadcast rejected ({code}): {msg}"
+        )))
     }
 }
 
@@ -275,7 +277,9 @@ fn tron_address_from_hex(h: &str) -> Result<TronAddress, AddrErr> {
     if bytes.len() != 21 || bytes[0] != 0x41 {
         return Err(AddrErr(format!("not a 0x41 address: {h}")));
     }
-    Ok(TronAddress::from_evm(alloy_primitives::Address::from_slice(&bytes[1..])))
+    Ok(TronAddress::from_evm(
+        alloy_primitives::Address::from_slice(&bytes[1..]),
+    ))
 }
 
 /// java-tron encodes some error messages as hex; decode to UTF-8 when it parses, else pass through.
@@ -441,7 +445,9 @@ mod tests {
         // LOCAL has no rpc_url, so a network call fails fast without touching the network.
         let c = TronRpcProvider::new(LOCAL, Rc::new(WalletFactory::from_roster(&[]).unwrap()));
         let signer = PrivateKeySigner::random();
-        let res = c.deploy_create(Bytes::new(), Vec::<u8>::new(), &signer).await;
+        let res = c
+            .deploy_create(Bytes::new(), Vec::<u8>::new(), &signer)
+            .await;
         assert!(matches!(res, Err(TronError::Deploy(_) | TronError::Rpc(_))));
     }
 

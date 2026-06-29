@@ -304,7 +304,10 @@ mod tests {
             TronChain::from(LOCAL.mock(Rc::new(WalletFactory::from_roster(&[]).unwrap())));
         let a = chain.new_account("bob").await;
         let huge = crate::DEFAULT_FUNDING_SUN * 2;
-        chain.ensure_asset(&a, TronAsset::Native, huge).await.unwrap();
+        chain
+            .ensure_asset(&a, TronAsset::Native, huge)
+            .await
+            .unwrap();
         assert!(chain.balance(&a).await.unwrap() >= huge);
     }
 }

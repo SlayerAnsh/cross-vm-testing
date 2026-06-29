@@ -20,8 +20,7 @@ fn chain_for(kind: ChainKind, wallets: Rc<WalletFactory>) -> AnyChain {
 #[rstest::rstest]
 #[tokio::test]
 async fn counter_increments_across_vms(
-    #[values(ChainKind::CosmWasm, ChainKind::Evm, ChainKind::Svm, ChainKind::Tron)]
-    kind: ChainKind,
+    #[values(ChainKind::CosmWasm, ChainKind::Evm, ChainKind::Svm, ChainKind::Tron)] kind: ChainKind,
 ) {
     let wallets = test_wallets();
     let mut chain = chain_for(kind, wallets);

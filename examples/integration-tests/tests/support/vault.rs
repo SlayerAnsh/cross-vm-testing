@@ -316,7 +316,10 @@ impl Vault {
         let chain = self.base.tron()?;
         let addr = self.base.tron_addr()?;
         // The TVM mock runs EVM bytecode; the ABI call wants the inner 20-byte (EVM) address.
-        let who = chain.wallet_address(WalletLabel::wrap(wallet)).await?.as_evm();
+        let who = chain
+            .wallet_address(WalletLabel::wrap(wallet))
+            .await?
+            .as_evm();
         if collateral {
             let cd = Bytes::from(evm_vault::Vault::collateralOfCall { who }.abi_encode());
             let out = chain.static_call(&addr, cd).await?;
