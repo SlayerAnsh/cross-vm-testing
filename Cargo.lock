@@ -2258,6 +2258,7 @@ dependencies = [
  "cross-vm-macros",
  "cross-vm-solana",
  "cross-vm-solidity",
+ "cross-vm-tron",
  "rand 0.8.6",
  "rand_chacha 0.3.1",
  "solana-system-interface 2.0.0",

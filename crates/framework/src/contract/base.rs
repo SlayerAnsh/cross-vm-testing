@@ -12,6 +12,7 @@ use cross_vm_core::{ChainKind, CrossVmError};
 use cross_vm_cosmwasm::{Addr, CwChain};
 use cross_vm_solana::{Address as SvmAddress, SvmChain};
 use cross_vm_solidity::{Address as EvmAddress, EvmChain};
+use cross_vm_tron::{TronAddress, TronChain};
 
 use super::account::Account;
 use super::hooks::{BeforeContext, HookContext, Hooks};
@@ -97,6 +98,14 @@ impl ContractBase {
         }
     }
 
+    /// Borrow the Tron chain, or [`CrossVmError::WrongVm`] for another VM.
+    pub fn tron(&self) -> Result<&TronChain, CrossVmError> {
+        match &self.chain {
+            AnyChain::Tron(c) => Ok(c),
+            other => Err(CrossVmError::wrong_vm(ChainKind::Tron, other.kind())),
+        }
+    }
+
     /// The deployed CosmWasm contract address, or an error if undeployed / another VM.
     pub fn cw_addr(&self) -> Result<Addr, CrossVmError> {
         match self.require_address()? {
@@ -118,6 +127,14 @@ impl ContractBase {
         match self.require_address()? {
             Account::Svm(a) => Ok(a),
             other => Err(CrossVmError::wrong_vm(ChainKind::Svm, other.kind())),
+        }
+    }
+
+    /// The deployed Tron contract address, or an error if undeployed / another VM.
+    pub fn tron_addr(&self) -> Result<TronAddress, CrossVmError> {
+        match self.require_address()? {
+            Account::Tron(a) => Ok(a),
+            other => Err(CrossVmError::wrong_vm(ChainKind::Tron, other.kind())),
         }
     }
 

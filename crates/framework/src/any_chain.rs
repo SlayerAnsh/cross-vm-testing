@@ -4,6 +4,7 @@ use cross_vm_core::{ChainKind, ChainProvider};
 use cross_vm_cosmwasm::{CwChain, CwMockProvider, CwRpcProvider};
 use cross_vm_solana::{SvmChain, SvmMockProvider, SvmRpcProvider};
 use cross_vm_solidity::{EvmChain, EvmMockProvider, EvmRpcProvider};
+use cross_vm_tron::{TronChain, TronMockProvider, TronRpcProvider};
 
 use crate::contract::Account;
 
@@ -21,6 +22,8 @@ pub enum AnyChain {
     Evm(EvmChain),
     /// A Solana chain.
     Svm(SvmChain),
+    /// A Tron chain.
+    Tron(TronChain),
 }
 
 impl AnyChain {
@@ -30,6 +33,7 @@ impl AnyChain {
             AnyChain::CosmWasm(_) => ChainKind::CosmWasm,
             AnyChain::Evm(_) => ChainKind::Evm,
             AnyChain::Svm(_) => ChainKind::Svm,
+            AnyChain::Tron(_) => ChainKind::Tron,
         }
     }
 
@@ -42,6 +46,7 @@ impl AnyChain {
             AnyChain::CosmWasm(c) => Account::CosmWasm(c.new_account(label).await),
             AnyChain::Evm(c) => Account::Evm(c.new_account(label).await),
             AnyChain::Svm(c) => Account::Svm(c.new_account(label).await),
+            AnyChain::Tron(c) => Account::Tron(c.new_account(label).await),
         }
     }
 
@@ -54,6 +59,7 @@ impl AnyChain {
             AnyChain::CosmWasm(c) => c.block_height().await,
             AnyChain::Evm(c) => c.block_height().await,
             AnyChain::Svm(c) => c.block_height().await,
+            AnyChain::Tron(c) => c.block_height().await,
         }
     }
 
@@ -66,6 +72,7 @@ impl AnyChain {
             AnyChain::CosmWasm(c) => c.advance_blocks(n).await,
             AnyChain::Evm(c) => c.advance_blocks(n).await,
             AnyChain::Svm(c) => c.advance_blocks(n).await,
+            AnyChain::Tron(c) => c.advance_blocks(n).await,
         }
     }
 }
@@ -89,6 +96,8 @@ into_any! {
     EvmRpcProvider  => Evm      via EvmChain,
     SvmMockProvider => Svm      via SvmChain,
     SvmRpcProvider  => Svm      via SvmChain,
+    TronMockProvider => Tron via TronChain,
+    TronRpcProvider  => Tron via TronChain,
 }
 
 impl From<CwChain> for AnyChain {
@@ -104,5 +113,10 @@ impl From<EvmChain> for AnyChain {
 impl From<SvmChain> for AnyChain {
     fn from(c: SvmChain) -> Self {
         AnyChain::Svm(c)
+    }
+}
+impl From<TronChain> for AnyChain {
+    fn from(c: TronChain) -> Self {
+        AnyChain::Tron(c)
     }
 }

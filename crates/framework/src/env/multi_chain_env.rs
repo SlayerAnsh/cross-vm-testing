@@ -8,6 +8,7 @@ use cross_vm_core::WalletFactory;
 use cross_vm_cosmwasm::CwChain;
 use cross_vm_solana::SvmChain;
 use cross_vm_solidity::EvmChain;
+use cross_vm_tron::TronChain;
 
 use crate::any_chain::AnyChain;
 use crate::env::phase::Setup;
@@ -102,6 +103,19 @@ impl<S> MultiChainEnv<S> {
             Some(other) => Err(EnvError::WrongVm {
                 label: label.to_string(),
                 expected: cross_vm_core::ChainKind::Svm,
+                found: other.kind(),
+            }),
+            None => Err(EnvError::UnknownChain(label.to_string())),
+        }
+    }
+
+    /// Borrow a Tron chain by label.
+    pub fn tron(&mut self, label: &str) -> Result<&mut TronChain, EnvError> {
+        match self.chains.get_mut(label) {
+            Some(AnyChain::Tron(c)) => Ok(c),
+            Some(other) => Err(EnvError::WrongVm {
+                label: label.to_string(),
+                expected: cross_vm_core::ChainKind::Tron,
                 found: other.kind(),
             }),
             None => Err(EnvError::UnknownChain(label.to_string())),

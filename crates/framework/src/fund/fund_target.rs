@@ -11,6 +11,7 @@ use cross_vm_core::ChainKind;
 use cross_vm_cosmwasm::{Addr, CwAsset};
 use cross_vm_solana::{Address as SvmAddr, SvmAsset};
 use cross_vm_solidity::{Address as EvmAddr, EvmAsset, U256};
+use cross_vm_tron::{TronAddress, TronAsset};
 
 use super::pending::Pending;
 
@@ -65,6 +66,20 @@ impl FundTarget for SvmAddr {
             label,
             who,
             asset: SvmAsset::Native,
+            amount,
+        }
+    }
+}
+
+impl FundTarget for TronAddress {
+    type Amount = u64;
+    const KIND: ChainKind = ChainKind::Tron;
+
+    fn into_pending(label: String, who: Self, _denom: String, amount: u64) -> Pending {
+        Pending::Tron {
+            label,
+            who,
+            asset: TronAsset::Native,
             amount,
         }
     }
