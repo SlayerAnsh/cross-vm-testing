@@ -20,8 +20,9 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
-use alloy_primitives::{Bytes, B256};
+use alloy_primitives::{Address, Bytes, Log, LogData, B256};
 use alloy_signer_local::PrivateKeySigner;
 use cross_vm_core::{ChainProvider, WalletFactory};
 use serde_json::{json, Value};
@@ -35,6 +36,10 @@ use crate::provider::execution::TronExecution;
 const DEFAULT_FEE_LIMIT: u64 = 1_000_000_000;
 /// Energy cap a deployed contract may borrow from a caller, per invocation.
 const DEFAULT_ORIGIN_ENERGY_LIMIT: u64 = 10_000_000;
+/// How many times to poll `gettransactioninfobyid` for a broadcast tx's receipt.
+const TX_POLL_ATTEMPTS: u32 = 20;
+/// Delay between receipt polls (Nile/Tron block time is ~3s).
+const TX_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 /// A live-RPC Tron provider over the TronGrid HTTP API.
 #[derive(Clone)]
@@ -136,9 +141,10 @@ impl TronRpcProvider {
 
     /// Execute a state-mutating call against `to`, signed by `signer`.
     ///
-    /// A broadcast transaction yields no return data; the [`TronExecution`] carries the broadcast
-    /// transaction id with empty `output`/`logs` (per-tx logs are fetched separately via the
-    /// `/v1/transactions/{txid}/events` path, deferred).
+    /// java-tron's broadcast carries no logs, so after broadcasting this polls
+    /// `gettransactioninfobyid` until the transaction is mined (or times out), then returns the
+    /// `TransactionInfo`'s return data and EVM-shaped logs. An on-chain failure (revert,
+    /// out-of-energy) surfaces as [`TronError::Execute`].
     pub async fn call(
         &self,
         to: &TronAddress,
@@ -161,22 +167,34 @@ impl TronRpcProvider {
             .await?;
         check_node_ok(&resp["result"], "triggersmartcontract")?;
         let unsigned = resp["transaction"].clone();
-        if unsigned.is_null() {
-            return Err(TronError::Execute("triggersmartcontract: no transaction".into()));
-        }
-        let tx_hash = unsigned["txID"]
+        let txid = unsigned["txID"]
             .as_str()
-            .and_then(|s| hex::decode(s).ok())
-            .filter(|b| b.len() == 32)
-            .map(|b| B256::from_slice(&b));
+            .ok_or_else(|| TronError::Execute("triggersmartcontract: no txID".into()))?
+            .to_string();
         self.sign_and_broadcast(unsigned, signer)
             .await
             .map_err(|e| TronError::Execute(e.to_string()))?;
-        Ok(TronExecution {
-            output: Bytes::new(),
-            logs: Vec::new(),
-            tx_hash,
-        })
+        let info = self.await_tx_info(&txid).await?;
+        parse_tx_info(&info, &txid)
+    }
+
+    /// Poll `gettransactioninfobyid` until the transaction is mined, returning its
+    /// `TransactionInfo`. Errors if the receipt does not appear within the poll budget.
+    async fn await_tx_info(&self, txid: &str) -> Result<Value, TronError> {
+        for _ in 0..TX_POLL_ATTEMPTS {
+            let info = self
+                .post("gettransactioninfobyid", json!({ "value": txid }))
+                .await?;
+            // An unmined tx returns `{}`; a mined one carries its `id`.
+            if info.get("id").and_then(Value::as_str).is_some() {
+                return Ok(info);
+            }
+            tokio::time::sleep(TX_POLL_INTERVAL).await;
+        }
+        Err(TronError::Execute(format!(
+            "transaction {txid} not confirmed after {}s",
+            u64::from(TX_POLL_ATTEMPTS) * TX_POLL_INTERVAL.as_secs()
+        )))
     }
 
     /// Run a read-only constant call (`triggerconstantcontract`) against `to`.
@@ -282,6 +300,74 @@ fn check_node_ok(result: &Value, ctx: &str) -> Result<(), TronError> {
         return Err(TronError::Rpc(format!("{ctx} failed: {msg}")));
     }
     Ok(())
+}
+
+/// Map a mined `TransactionInfo` into a [`TronExecution`], surfacing an on-chain failure as an
+/// error. Tron logs are EVM-shaped; the log `address` is the 20-byte form without the `0x41`
+/// prefix. Source: <https://developers.tron.network/docs/event>
+fn parse_tx_info(info: &Value, txid: &str) -> Result<TronExecution, TronError> {
+    // A reverted / out-of-energy tx is `result == "FAILED"` (top level) or a non-`SUCCESS`
+    // `receipt.result`; mirror the mock, which errors rather than returning a bad success.
+    let failed = info["result"].as_str() == Some("FAILED")
+        || info["receipt"]["result"]
+            .as_str()
+            .is_some_and(|r| r != "SUCCESS");
+    if failed {
+        let msg = info["resMessage"]
+            .as_str()
+            .map(decode_hex_message)
+            .unwrap_or_default();
+        let reason = info["receipt"]["result"].as_str().unwrap_or("FAILED");
+        return Err(TronError::Execute(format!("tx {reason}: {msg}")));
+    }
+
+    let output = info["contractResult"][0]
+        .as_str()
+        .and_then(|h| hex::decode(h).ok())
+        .map(Bytes::from)
+        .unwrap_or_default();
+
+    let mut logs = Vec::new();
+    if let Some(entries) = info["log"].as_array() {
+        for l in entries {
+            let address = l["address"]
+                .as_str()
+                .and_then(|h| hex::decode(h).ok())
+                .filter(|b| b.len() == 20)
+                .map(|b| Address::from_slice(&b))
+                .unwrap_or_default();
+            let topics = l["topics"]
+                .as_array()
+                .map(|ts| {
+                    ts.iter()
+                        .filter_map(Value::as_str)
+                        .filter_map(|h| hex::decode(h).ok())
+                        .filter(|b| b.len() == 32)
+                        .map(|b| B256::from_slice(&b))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let data = l["data"]
+                .as_str()
+                .and_then(|h| hex::decode(h).ok())
+                .unwrap_or_default();
+            logs.push(Log {
+                address,
+                data: LogData::new_unchecked(topics, Bytes::from(data)),
+            });
+        }
+    }
+
+    let tx_hash = hex::decode(txid)
+        .ok()
+        .filter(|b| b.len() == 32)
+        .map(|b| B256::from_slice(&b));
+
+    Ok(TronExecution {
+        output,
+        logs,
+        tx_hash,
+    })
 }
 
 impl ChainProvider for TronRpcProvider {

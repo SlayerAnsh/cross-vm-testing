@@ -83,11 +83,12 @@ async fn live_deploy_increment_count_on_nile() {
     println!("counter deployed at: {counter}");
     settle().await;
 
-    chain
+    // `call` polls for the receipt internally, so the incremented state is committed on return.
+    let exec = chain
         .call(&counter, selector("increment()"), ONCHAIN_WALLETS.test)
         .await
         .expect("increment");
-    settle().await;
+    println!("increment logs: {}", exec.logs.len());
 
     let out = chain
         .static_call(&counter, selector("count()"))
