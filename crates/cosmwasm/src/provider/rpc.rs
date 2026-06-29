@@ -41,8 +41,11 @@ use crate::msg::CwSerde;
 use crate::provider::CwCode;
 use crate::wallet::CosmosSigner;
 
-/// A live-RPC CosmWasm provider. Read-only: chain-level reads and contract queries hit a
-/// real node; state-mutating operations remain [`CwError::Unimplemented`].
+/// A live-RPC CosmWasm provider. Chain-level reads and contract queries hit a real node via
+/// ABCI queries; the write paths ([`store_code_wasm`](Self::store_code_wasm),
+/// [`instantiate`](Self::instantiate), [`execute_contract`](Self::execute_contract)) sign with
+/// the wallet's secp256k1 key and broadcast. Only `set_balance` (and the trait-object
+/// [`store_code`](Self::store_code)) stay [`CwError::Unimplemented`].
 #[derive(Clone)]
 pub struct CwRpcProvider {
     info: CosmosChainInfo,

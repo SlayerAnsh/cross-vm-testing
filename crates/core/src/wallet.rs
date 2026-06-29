@@ -6,8 +6,8 @@
 //!
 //! - [`WalletSource::EnvMnemonic`] — read a BIP-39 phrase from a process env var, then derive
 //!   via the row's account index / HD path.
-//! - [`WalletSource::Auto`] — generate a fresh random mnemonic at build time (mock chains; the
-//!   address is random and must be funded in the setup `fund` phase).
+//! - [`WalletSource::Auto`] — generate a fresh random mnemonic at factory construction (mock
+//!   chains; the address is random and must be funded in the setup `fund` phase).
 //! - [`WalletSource::EnvPrivateKey`] — read a raw VM-native private key from a process env var
 //!   (hex for EVM/Cosmos, base58 for Solana); no HD derivation.
 //!

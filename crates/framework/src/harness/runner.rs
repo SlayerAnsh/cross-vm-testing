@@ -190,21 +190,21 @@ impl<H: Harness, M: RunMode> Runner<H, M> {
 }
 
 impl<H: Harness> Runner<H, Fuzz> {
-    /// A fuzz shell seeded by `seed`. Load state with [`setup`](Runner::setup), then [`run`].
+    /// A fuzz shell seeded by `seed`. Load state with [`setup`](Runner::setup), then `run`.
     pub fn fuzz(harness: H, seed: u64) -> Self {
         Self::shell(harness, seed)
     }
 }
 
 impl<H: Harness> Runner<H, Invariant> {
-    /// An invariant shell seeded by `seed`. Load state with [`setup`](Runner::setup), then [`run`].
+    /// An invariant shell seeded by `seed`. Load state with [`setup`](Runner::setup), then `run`.
     pub fn invariant(harness: H, seed: u64) -> Self {
         Self::shell(harness, seed)
     }
 }
 
 impl<H: Harness> Runner<H, Endurance> {
-    /// An endurance shell seeded by `seed`. Load state with [`setup`](Runner::setup), then [`run`].
+    /// An endurance shell seeded by `seed`. Load state with [`setup`](Runner::setup), then `run`.
     pub fn endurance(harness: H, seed: u64) -> Self {
         Self::shell(harness, seed)
     }

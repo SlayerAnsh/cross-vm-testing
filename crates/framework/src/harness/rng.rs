@@ -69,7 +69,7 @@ impl Prng {
         weights.len() - 1
     }
 
-    /// Fill `buf` with random bytes (used by [`sample_arbitrary`]).
+    /// Fill `buf` with random bytes (used by `sample_arbitrary` under the `fuzz` feature).
     pub fn fill_bytes(&mut self, buf: &mut [u8]) {
         self.0.fill_bytes(buf);
     }

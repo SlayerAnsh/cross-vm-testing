@@ -20,7 +20,9 @@ pub struct MultiChainEnv<S = Setup> {
     pub(crate) label: String,
     pub(crate) chains: HashMap<String, AnyChain>,
     pub(crate) pending: Vec<Pending>,
-    /// Shared wallet roster, distributed to every chain at [`crate::MultiChainEnv::start`].
+    /// The shared wallet factory passed to [`MultiChainEnv::new`](crate::MultiChainEnv::new).
+    /// Chains are injected already holding their own clone of it, so this is the env's own
+    /// handle, not something distributed to the chains at `start`.
     pub(crate) wallets: Rc<WalletFactory>,
     pub(crate) _marker: PhantomData<S>,
 }
