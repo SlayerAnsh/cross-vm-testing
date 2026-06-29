@@ -47,9 +47,12 @@ jobs:
       # Solana (Agave) platform tools from Anza; the legacy release.solana.com host is flaky.
       # This provides cargo-build-sbf, which builds the program .so directly (no Anchor CLI: it
       # added an anchor-cli/anchor-lang version handshake that silently produced no .so).
+      # Pin v4.0.0: its platform-tools Cargo understands edition2024, which a transitive dep in
+      # the committed solana-contracts/Cargo.lock (toml_parser) requires. Older lines (v2.1.0
+      # ships Cargo 1.79) fail to parse that manifest. Keep this in step with the lock.
       - name: Install Solana
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.0/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/v4.0.0/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
           "$HOME/.local/share/solana/install/active_release/bin/solana" --version
 
