@@ -62,15 +62,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      # The 6 VM/framework crates need no contract artifacts. Their live-RPC tests are #[ignore].
+      # Artifact-free tier. Most crates test fully here (their live-RPC tests are #[ignore]).
+      # Two crates embed a compiled contract at build time in some test targets, which this
+      # tier does not produce, so those targets are excluded (they fail at compile time when
+      # the artifact is absent, even the #[ignore] ones):
+      #   - cross-vm-cosmwasm/tests/onchain.rs            include_bytes!(counter.wasm)  [#[ignore], live]
+      #   - cross-vm-solidity/tests/{counter,onchain}.rs  sol!(out/Counter.sol/Counter.json)
+      # The cross-VM flows that exercise these contracts run in the integration-tests job below
+      # (over the artifacts it builds); the per-crate onchain.rs files are live #[ignore] tests.
       - run: >
           cargo test
           -p cross-vm-core
-          -p cross-vm-cosmwasm
-          -p cross-vm-solidity
           -p cross-vm-solana
           -p cross-vm-framework
           -p cross-vm-macros
+      - run: >
+          cargo test -p cross-vm-cosmwasm
+          --lib --test counter --test vault --test typed_handle
+      - run: cargo test -p cross-vm-solidity --lib
 
   # ----- Heavy tier: isolated so its slowness/flakiness does not block the fast signal -----
 
