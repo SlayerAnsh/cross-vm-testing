@@ -158,6 +158,50 @@ impl Counter {
         Ok(n.saturating_to::<u64>())
     }
 
+    // ----- Tron hooks (TVM runs EVM bytecode; reuse EVM bindings) -----
+    async fn tron_setup(&self, wallet: &str) -> Result<(), CrossVmError> {
+        let chain = self.base.tron()?;
+        let addr = chain
+            .deploy_create(
+                evm_counter::Counter::BYTECODE.clone(),
+                Bytes::new(),
+                WalletLabel::wrap(wallet),
+            )
+            .await?;
+        self.base.set_address(Account::Tron(addr));
+        Ok(())
+    }
+
+    async fn tron_increment(&self, wallet: &str) -> Result<AppResponse<()>, CrossVmError> {
+        use alloy::sol_types::SolCall;
+        let chain = self.base.tron()?;
+        let addr = self.base.tron_addr()?;
+        let calldata = Bytes::from(evm_counter::Counter::incrementCall {}.abi_encode());
+        let exec = chain
+            .call(&addr, calldata, WalletLabel::wrap(wallet))
+            .await?;
+        Ok(AppResponse::tron((), exec.output, exec.logs))
+    }
+
+    async fn tron_count(&self) -> Result<u64, CrossVmError> {
+        use alloy::sol_types::SolCall;
+        let chain = self.base.tron()?;
+        let addr = self.base.tron_addr()?;
+        let out = chain
+            .static_call(
+                &addr,
+                Bytes::from(evm_counter::Counter::countCall {}.abi_encode()),
+            )
+            .await?;
+        let n = evm_counter::Counter::countCall::abi_decode_returns(&out).map_err(|e| {
+            CrossVmError::Query {
+                kind: ChainKind::Tron,
+                reason: e.to_string(),
+            }
+        })?;
+        Ok(n.saturating_to::<u64>())
+    }
+
     // ----- Solana hooks -----
     async fn svm_setup(&self, wallet: &str) -> Result<(), CrossVmError> {
         let chain = self.base.solana()?;

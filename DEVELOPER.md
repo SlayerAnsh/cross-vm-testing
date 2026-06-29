@@ -30,6 +30,7 @@ crates/core       cross-vm-core       no VM dependencies
 crates/cosmwasm   cross-vm-cosmwasm   cw-multi-test, cosmwasm-std
 crates/solidity   cross-vm-solidity   revm (alloy for the test bindings)
 crates/solana     cross-vm-solana     litesvm, granular solana-* crates
+crates/tron       cross-vm-tron       revm core + TVM layers (Tron precompiles, energy/bandwidth shim, sun balances)
 crates/macros     cross-vm-macros     proc-macros (syn/quote): cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, fuzz/invariant/endurance runners
 crates/framework  cross-vm-framework  umbrella over core + all three VM crates
 ```
@@ -37,8 +38,35 @@ crates/framework  cross-vm-framework  umbrella over core + all three VM crates
 `cross-vm-framework` defines `MultiChainEnv`. Each VM crate also exposes a backend enum
 (`CwChain`/`EvmChain`/`SvmChain`, either `Mock` or `Rpc`) that implements `ChainProvider`
 for chain-level operations (accounts, balances, blocks) and delegates idiomatic contract/program
-methods to the inner mock/RPC provider, plus an asset selector (`CwAsset`/`EvmAsset`/`SvmAsset`)
+methods to the inner mock/RPC provider, plus an asset selector (`CwAsset`/`EvmAsset`/`SvmAsset`/`TronAsset`)
 and an inherent `ensure_asset` used by the environment's funding phase.
+
+## Tron crate layout
+
+`cross-vm-tron` (`crates/tron`) is the fourth VM crate. The TVM is an EVM derivative, so the mock reuses a `revm` core (the same `revm` 41 / `alloy-primitives` pins as `cross-vm-solidity`) and layers the Tron-specific behavior on top. Modules:
+
+```
+crates/tron/
+  chain.rs              TronChain backend enum (Mock | Rpc), ChainProvider impl
+  wallet.rs             secp256k1 WalletDeriver, SLIP-44 coin type 195
+  asset.rs              TronAsset selector + ensure_asset (funding phase)
+  error.rs              TronError, converts into CrossVmError
+  provider/
+    address.rs          base58check TronAddress (0x41 prefix; inner 20 bytes = EVM address)
+    mock.rs             TronMockProvider over the revm core
+    rpc.rs              TronRpcProvider (v1 stub: read shapes, writes return Unimplemented)
+    execution.rs        execution result / response plumbing
+  tvm/
+    create.rs           pure tron_create_address / tron_create2_address (tx-id formula, for tooling)
+    precompiles.rs      Tron precompiles injected into revm (TIP-272 relocations + validatemultisign)
+    resources.rs        energy / bandwidth accounting shim and u64 sun balances
+  chains/
+    info.rs             TronChainInfo (ChainSpec impl)
+    presets.rs          MAINNET / NILE / SHASTA / LOCAL
+    sugar.rs            .mock(wallets) / .rpc(wallets) constructors
+```
+
+Build and test. The crate is standalone: `cargo test -p cross-vm-tron` needs no network and no prebuilt contract artifacts (unlike the integration tests). The RPC backend is a v1 stub, so its write paths return `Unimplemented`; the unit tests cover address derivation, the mock's account/balance/block surface, the injected precompiles, and the resource shim. Two divergences are intentional and tested as such: the mock's `CREATE` / `CREATE2` follow revm's EVM address derivation (the Tron tx-id formula lives in the pure `tron_create_address` / `tron_create2_address` reference functions in `tvm/create.rs`), and the energy/bandwidth shim is coarse account-level accounting rather than per-opcode energy costs.
 
 ## Common commands
 
@@ -51,6 +79,7 @@ cargo clippy --workspace --all-targets
 cargo test -p cross-vm-cosmwasm
 cargo test -p cross-vm-solidity
 cargo test -p cross-vm-solana
+cargo test -p cross-vm-tron      # standalone, no network or prebuilt artifacts needed
 
 # examples
 cargo run -p cross-vm-cosmwasm --example cosmwasm_quickstart

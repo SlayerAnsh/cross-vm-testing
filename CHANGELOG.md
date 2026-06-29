@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added (Tron (TVM) chain support)
+
+* New `cross-vm-tron` crate (`crates/tron`): a fourth ecosystem behind the same `ChainProvider` trait, alongside CosmWasm (`cw-multi-test`), EVM (`revm`), and Solana (`litesvm`). Two backends, `TronChain` = `Mock(TronMockProvider)` or `Rpc(TronRpcProvider)`, mirroring the EVM crate (the TVM is an EVM derivative, so the mock reuses a `revm` core and layers the Tron-specific behavior on top).
+* Mock backend: an in-process `revm` core with TVM-accurate layers. A base58check `TronAddress` (the `0x41` version prefix over a secp256k1 key, whose inner 20 bytes equal the matching EVM address); the Tron precompiles injected into revm (TIP-272 relocations, `ripemd160` at `0x20003` and `blake2f` at `0x20009`, plus `validatemultisign` at `0x0a`, all secp256k1, not ed25519); a provider-layer energy and bandwidth accounting shim that sits outside revm's gas loop; and u64 sun balances (1 TRX = 1,000,000 sun). Tron logs are EVM-shaped (address, topics, data), so the mock surfaces revm logs directly.
+* Wallets: secp256k1 at SLIP-44 coin type 195, path `m/44'/195'/<index>'/0/0`.
+* Framework and macro integration: `ChainKind::Tron` is first-class, and `#[cross_vm_contract]` now requires a `tron_` hook per method (alongside `cw_` / `evm_` / `svm_`). `MultiChainEnv`, `AnyChain`, `Account`, `AppResponse`, and `FundTarget` all support Tron. Chain presets `MAINNET`, `NILE`, `SHASTA`, `LOCAL`, aliased in the prelude as `TRON_MAINNET` / `TRON_NILE` / `TRON_SHASTA` / `TRON_LOCAL`.
+* Known v1 limits (documented honestly). The mock's `CREATE` / `CREATE2` use revm's EVM address derivation, not Tron's tx-id-based formula; the real formula ships as the pure functions `tron_create_address` / `tron_create2_address` for tooling, because revm 41 does not allow cleanly overriding the in-VM derivation. The energy shim is coarse account-level accounting, not per-opcode costs. The `TronRpcProvider` is a stub: address derivation and read shapes work, but every write returns `Unimplemented` (java-tron has no in-process Rust VM and no alloy-equivalent client yet). The real read paths (per-tx events via `GET /v1/transactions/{txid}/events`, range search via `eth_getLogs` and TronGrid `/v1/contracts/{addr}/events`) are documented for a later phase.
+
 ### Changed (documentation accuracy sweep)
 
 * `README.md`: rewritten as a tool-style doc (tagline, badges, table of contents, install) and filled the biggest gap, the typed contract layer (`#[cross_vm_contract]`, the `CwExecuteFns` / `CwQueryFns` derives, transaction hooks), plus a macros-at-a-glance table.
