@@ -16,6 +16,7 @@ mod chain_spec;
 mod error;
 mod fund_error;
 mod wallet;
+pub mod wallet_lock;
 
 pub use chain_kind::ChainKind;
 pub use chain_provider::ChainProvider;

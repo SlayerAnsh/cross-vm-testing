@@ -61,8 +61,12 @@ impl<S> MultiChainEnv<S> {
             .ok_or_else(|| EnvError::UnknownChain(label.to_string()))
     }
 
-    /// Advance every injected chain by `n` blocks/slots. The uniform time-warp the endurance
-    /// runner calls between operations so block height progresses across the whole world.
+    /// Advance every injected chain by `n` blocks/slots between endurance operations so block
+    /// height progresses across the whole world.
+    ///
+    /// On mock backends this forces `n` blocks; on RPC backends `advance_blocks` is a no-op (a
+    /// live chain advances on its own), so the endurance loop simply paces against real block
+    /// production instead of forcing it.
     pub async fn advance_all(&mut self, n: u64) {
         for chain in self.chains.values_mut() {
             chain.advance_blocks(n).await;

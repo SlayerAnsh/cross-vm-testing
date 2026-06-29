@@ -10,9 +10,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use cosmwasm_std::{coins, Addr, Coin};
-use cross_vm_core::{ChainProvider, FundError, WalletDeriver, WalletFactory, WalletLabel};
+use cross_vm_core::{
+    wallet_lock, ChainProvider, ChainSpec, FundError, WalletDeriver, WalletFactory, WalletLabel,
+};
 use serde::{Deserialize, Serialize};
-use tokio::sync::OwnedMutexGuard;
 
 use crate::asset::CwAsset;
 use crate::chains::CosmosChainInfo;
@@ -82,25 +83,28 @@ impl CwChain {
         }
     }
 
-    /// Resolve a wallet label to its signer and acquire its broadcast lock. The guard must be
-    /// held for the whole broadcast so the same wallet never sends two txs at once (which would
-    /// collide on the account sequence). Signers are derived once and cached.
-    async fn acquire<'a>(
-        &self,
-        label: WalletLabel<'a>,
-    ) -> Result<(CosmosSigner, OwnedMutexGuard<()>), CwError> {
-        let factory = self.wallets().clone();
-        let def = factory.def(label)?.clone();
-        let guard = factory.lock(label).await?;
+    /// Resolve a wallet label to its signer (derived once and cached). Broadcast serialization is
+    /// handled separately on the RPC path via [`cross_vm_core::wallet_lock`] keyed by the live
+    /// account; the in-process mock backend needs no lock.
+    async fn acquire<'a>(&self, label: WalletLabel<'a>) -> Result<CosmosSigner, CwError> {
         let key = label.as_str();
         if let Some(signer) = self.signers().borrow().get(key).cloned() {
-            return Ok((signer, guard));
+            return Ok(signer);
         }
+        let def = self.wallets().resolve(label)?;
         let signer = self.signer_for(&def)?;
         self.signers()
             .borrow_mut()
             .insert(key.to_string(), signer.clone());
-        Ok((signer, guard))
+        Ok(signer)
+    }
+
+    /// Acquire the global broadcast lock for `addr` on this RPC chain, keyed by `(chain, address)`
+    /// so the same live account serializes process-wide. Held across the whole send -> confirm.
+    async fn broadcast_guard(p: &CwRpcProvider, addr: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let info = p.chain_info();
+        wallet_lock::lock_broadcast(&wallet_lock::lock_key(info.kind(), info.chain_id(), addr))
+            .await
     }
 
     /// Derive (and cache) a wallet's bech32 address without acquiring the broadcast lock.
@@ -110,7 +114,7 @@ impl CwChain {
         if let Some(signer) = self.signers().borrow().get(key).cloned() {
             return Ok(signer.address);
         }
-        let def = self.wallets().def(label)?.clone();
+        let def = self.wallets().resolve(label)?;
         let signer = self.signer_for(&def)?;
         let addr = signer.address.clone();
         self.signers().borrow_mut().insert(key.to_string(), signer);
@@ -135,12 +139,15 @@ impl CwChain {
         wasm: Vec<u8>,
         wallet: WalletLabel<'_>,
     ) -> Result<u64, CwError> {
-        let (signer, _guard) = self.acquire(wallet).await?;
+        let signer = self.acquire(wallet).await?;
         match self {
             CwChain::Mock(_) => Err(CwError::Unimplemented(
                 "mock store_code_wasm (use store_code with a cw-multi-test Contract object)".into(),
             )),
-            CwChain::Rpc(p) => p.store_code_wasm(wasm, &signer).await,
+            CwChain::Rpc(p) => {
+                let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
+                p.store_code_wasm(wasm, &signer).await
+            }
         }
     }
 
@@ -153,13 +160,16 @@ impl CwChain {
         funds: &[Coin],
         label: &str,
     ) -> Result<Addr, CwError> {
-        let (signer, _guard) = self.acquire(wallet).await?;
+        let signer = self.acquire(wallet).await?;
         match self {
             CwChain::Mock(p) => {
                 p.instantiate(code_id, init, &signer.address, funds, label)
                     .await
             }
-            CwChain::Rpc(p) => p.instantiate(code_id, init, &signer, funds, label).await,
+            CwChain::Rpc(p) => {
+                let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
+                p.instantiate(code_id, init, &signer, funds, label).await
+            }
         }
     }
 
@@ -171,10 +181,13 @@ impl CwChain {
         wallet: WalletLabel<'_>,
         funds: &[Coin],
     ) -> Result<cw_multi_test::AppResponse, CwError> {
-        let (signer, _guard) = self.acquire(wallet).await?;
+        let signer = self.acquire(wallet).await?;
         match self {
             CwChain::Mock(p) => p.execute_contract(addr, msg, &signer.address, funds).await,
-            CwChain::Rpc(p) => p.execute_contract(addr, msg, &signer, funds).await,
+            CwChain::Rpc(p) => {
+                let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
+                p.execute_contract(addr, msg, &signer, funds).await
+            }
         }
     }
 

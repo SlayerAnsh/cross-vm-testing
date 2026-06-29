@@ -11,8 +11,9 @@ use std::rc::Rc;
 
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_signer_local::PrivateKeySigner;
-use cross_vm_core::{ChainProvider, FundError, WalletDeriver, WalletFactory, WalletLabel};
-use tokio::sync::OwnedMutexGuard;
+use cross_vm_core::{
+    wallet_lock, ChainProvider, ChainSpec, FundError, WalletDeriver, WalletFactory, WalletLabel,
+};
 
 use crate::asset::EvmAsset;
 use crate::chains::EvmChainInfo;
@@ -60,25 +61,35 @@ impl EvmChain {
         }
     }
 
-    /// Resolve a wallet label to its signer and acquire its broadcast lock. The returned guard
-    /// must be held for the whole broadcast so the same wallet never sends two txs at once
-    /// (which would collide on the nonce). Signers are derived once and cached.
-    async fn acquire<'a>(
-        &self,
-        label: WalletLabel<'a>,
-    ) -> Result<(PrivateKeySigner, OwnedMutexGuard<()>), EvmError> {
-        let factory = self.wallets().clone();
-        let def = factory.def(label)?.clone();
-        let guard = factory.lock(label).await?;
+    /// Resolve a wallet label to its signer (derived once and cached). Broadcast serialization is
+    /// handled separately on the RPC path via [`cross_vm_core::wallet_lock`] keyed by the live
+    /// account; the in-process mock backend needs no lock.
+    async fn acquire<'a>(&self, label: WalletLabel<'a>) -> Result<PrivateKeySigner, EvmError> {
         let key = label.as_str();
         if let Some(signer) = self.signers().borrow().get(key).cloned() {
-            return Ok((signer, guard));
+            return Ok(signer);
         }
+        let def = self.wallets().resolve(label)?;
         let signer = self.signer_for(&def)?;
         self.signers()
             .borrow_mut()
             .insert(key.to_string(), signer.clone());
-        Ok((signer, guard))
+        Ok(signer)
+    }
+
+    /// Acquire the global broadcast lock for `addr` on this RPC chain, keyed by `(chain, address)`
+    /// so the same live account serializes process-wide. Held across the whole send -> confirm.
+    async fn broadcast_guard(
+        p: &EvmRpcProvider,
+        addr: &Address,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let info = p.chain_info();
+        wallet_lock::lock_broadcast(&wallet_lock::lock_key(
+            info.kind(),
+            info.chain_id(),
+            &addr.to_string(),
+        ))
+        .await
     }
 
     /// Derive (and cache) a wallet's address without acquiring the broadcast lock. Useful for
@@ -88,7 +99,7 @@ impl EvmChain {
         if let Some(signer) = self.signers().borrow().get(key).cloned() {
             return Ok(self.signer_address(&signer));
         }
-        let def = self.wallets().def(label)?.clone();
+        let def = self.wallets().resolve(label)?;
         let signer = self.signer_for(&def)?;
         let addr = self.signer_address(&signer);
         self.signers().borrow_mut().insert(key.to_string(), signer);
@@ -102,13 +113,14 @@ impl EvmChain {
         constructor_args: impl AsRef<[u8]>,
         wallet: WalletLabel<'_>,
     ) -> Result<Address, EvmError> {
-        let (signer, _guard) = self.acquire(wallet).await?;
+        let signer = self.acquire(wallet).await?;
+        let addr = self.signer_address(&signer);
         match self {
-            EvmChain::Mock(p) => {
-                p.deploy_create(bytecode, constructor_args, &self.signer_address(&signer))
-                    .await
+            EvmChain::Mock(p) => p.deploy_create(bytecode, constructor_args, &addr).await,
+            EvmChain::Rpc(p) => {
+                let _g = Self::broadcast_guard(p, &addr).await;
+                p.deploy_create(bytecode, constructor_args, &signer).await
             }
-            EvmChain::Rpc(p) => p.deploy_create(bytecode, constructor_args, &signer).await,
         }
     }
 
@@ -119,10 +131,14 @@ impl EvmChain {
         calldata: impl AsRef<[u8]>,
         wallet: WalletLabel<'_>,
     ) -> Result<EvmExecution, EvmError> {
-        let (signer, _guard) = self.acquire(wallet).await?;
+        let signer = self.acquire(wallet).await?;
+        let addr = self.signer_address(&signer);
         match self {
-            EvmChain::Mock(p) => p.call(to, calldata, &self.signer_address(&signer)).await,
-            EvmChain::Rpc(p) => p.call(to, calldata, &signer).await,
+            EvmChain::Mock(p) => p.call(to, calldata, &addr).await,
+            EvmChain::Rpc(p) => {
+                let _g = Self::broadcast_guard(p, &addr).await;
+                p.call(to, calldata, &signer).await
+            }
         }
     }
 

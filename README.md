@@ -24,7 +24,7 @@ On top of that base, three things make full cross VM tests practical:
 
 * **One contract wrapper, three VMs.** Declare a contract's logical methods once and the `#[cross_vm_contract]` macro generates a struct that dispatches each call to the right VM. You write only the per VM glue.
 * **A property testing harness.** Fuzz, invariant, endurance, and scenario runners drive any wrapper over many generated operation sequences, all seeded and reproducible.
-* **Real wallets.** Mnemonics in a `.env`, a compile time roster, per ecosystem HD derivation, and a per wallet broadcast lock so nonces never collide.
+* **Real wallets.** Mnemonics in a `.env`, a compile time roster, per ecosystem HD derivation, and a process-global broadcast lock keyed by `(chain, address)` so live nonces never collide, even across tests.
 
 ## Table of contents
 
@@ -196,7 +196,7 @@ That one harness then drives several runner types:
 | --- | --- | --- |
 | `FuzzRunner::run(ops, kinds, check_every)` | One short random sequence over the loaded world, drawing from all kinds (`None`) or a restricted subset | The input space is large and you want random exploration of operation interleavings |
 | `InvariantRunner::run(ops, None, check_every)` | One long persisted sequence, invariants checked along the way | A stateful sequence must keep a property true (model matches chain, no bad debt) |
-| `EnduranceRunner::run(EnduranceConfig)` | Random ops at random wall clock delays with block progression, then a final sweep | Soak testing for drift, time, or block height dependent bugs |
+| `EnduranceRunner::run(EnduranceConfig)` | Random ops at random wall clock delays (`base_delay + rand(0..=max_delay)`) with block progression, then a final sweep | Soak testing for drift, time, or block height dependent bugs (and live RPC, paced by `base_delay`) |
 | `ScenarioRunner::run_case` / `run_scenario` (rstest) | One concrete op or sequence | Exhaustive coverage of a small grid (chain x chain) via `#[rstest] #[values(..)]` |
 | `ScenarioRunner::replay(history)` | Re runs a recorded failing sequence deterministically | Turning a fuzz failure into a regression test |
 
@@ -225,7 +225,7 @@ Mnemonics are the only secret, and they live in a `.env` (gitignored). Everythin
 * `auto`: generate a fresh random mnemonic at build time (for mock chains).
 * `env_private_key("VAR")`: read a raw VM native key.
 
-The factory reads named variables straight from the process environment, so load the `.env` first (`dotenvy::from_path(".env")`); a missing variable is a hard error. Every broadcast goes through the `WalletFactory` by label under a per wallet async lock, so one wallet never sends two transactions at once and cannot collide on its nonce or account sequence. Per ecosystem HD derivation uses coin types 118 / 60 / 501 (CosmWasm / EVM / Solana).
+The factory keeps each row's source and resolves it on demand: `auto` rows generate their mnemonic once at construction, while `env_mnemonic` / `env_private_key` rows read their variable lazily, only when that wallet first signs. So load the `.env` before signing (`dotenvy::from_path(".env")`); a missing variable fails at the signing call, not at construction, which lets a roster carry a funded on-chain wallet whose secret is absent for runs that never use it (e.g. the `on_chain` row, `env_mnemonic("ON_CHAIN_WALLET")`, used only by the live `rpc-endurance` test). Serializing concurrent broadcasts of one live account is a process-global locker (`core::wallet_lock`) keyed by `(chain, address)`, acquired only on the RPC path and held across send→confirm; mock backends take no lock, and different accounts and chains run in parallel. A global (not per-factory) lock is what makes two separate tests on the same on-chain account serialize. Per ecosystem HD derivation uses coin types 118 / 60 / 501 (CosmWasm / EVM / Solana).
 
 Copy `.env.example` to `.env` and fill in your mnemonics. An all `auto` roster (or the empty `&[]` roster used in the quickstarts) needs no `.env` at all. See `crates/framework/examples/wallet_quickstart.rs` for a derive, sign, broadcast walkthrough.
 
@@ -286,7 +286,7 @@ The heavier harness modes are feature gated to keep the default `cargo test` fas
 cargo test -p cross-vm-integration-tests --test harness --features "fuzz invariant endurance"
 ```
 
-Other handy targets: `make test-cross-vm` (hand written flows), `make test-harness` (scenario matrices + mechanics), `make fmt`.
+`make test-rpc-endurance` runs the endurance harness against a live Base Sepolia chain over RPC (needs network and a funded `ON_CHAIN_WALLET` mnemonic in `.env`; it signs the `on_chain` wallet). Other handy targets: `make test-cross-vm` (hand written flows), `make test-harness` (scenario matrices + mechanics), `make fmt`.
 
 ## Status (Supported / Planned)
 
@@ -295,7 +295,7 @@ Other handy targets: `make test-cross-vm` (hand written flows), `make test-harne
 | Mock provider (in process VM) | Supported | Supported | Supported | `cw-multi-test` / `revm` / `litesvm` |
 | Live RPC reads | Supported | Supported | Supported | validated on `osmo-test-5`, Ethereum Sepolia, Solana Devnet |
 | Live RPC writes (deploy + call) | Supported | Supported | Planned | CosmWasm/EVM sign and broadcast (CosmWasm deploy via `store_code_wasm` with compiled bytes); Solana writes return `Unimplemented`. `set_balance` is `Unimplemented` on every RPC backend (a live chain cannot mint) |
-| Wallet derivation (mnemonic to signer) | Supported | Supported | Supported | coin types 118 / 60 / 501, per wallet async broadcast lock |
+| Wallet derivation (mnemonic to signer) | Supported | Supported | Supported | coin types 118 / 60 / 501, global (chain, address) broadcast lock on the RPC path |
 | Cross VM contract wrapper (`#[cross_vm_contract]`) | Supported | Supported | Supported | typed CosmWasm/EVM calls; Solana hooks hand written |
 | Property `Harness` (fuzz / invariant / endurance / matrix) | Supported (VM agnostic, runs over any injected chain) ||||
 | Broader cross VM orchestration layer | Planned ||||
