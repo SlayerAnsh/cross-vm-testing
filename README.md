@@ -240,7 +240,7 @@ cargo run -p cross-vm-solidity --example evm_rpc_quickstart
 cargo run -p cross-vm-solana   --example solana_rpc_quickstart
 ```
 
-A fourth provider, `TronRpcProvider`, is a v1 stub: address derivation and read shapes are in place, but the write paths return `Unimplemented`. See [Tron (TVM)](#tron-tvm) for why.
+A fourth provider, `TronRpcProvider`, talks to a live java-tron node over the TronGrid HTTP REST API (`/wallet/*` endpoints, via `reqwest` plus `serde_json`). It serves live reads (`balance`, `block_height`, `static_call`) and signs and broadcasts writes (`deploy_create` and `call` build the unsigned transaction at the node, sign its `txID` locally with the wallet's secp256k1 key, then `broadcasttransaction`). Only `set_balance` returns `Unimplemented` (a live chain cannot mint). See [Tron (TVM)](#tron-tvm) for the details.
 
 ## Tron (TVM)
 
@@ -248,7 +248,7 @@ Tron is the fourth ecosystem, behind the same `ChainProvider` trait as the other
 
 The mock runs that `revm` core with TVM-accurate layers on top: a base58check `TronAddress` (the `0x41` version prefix over a secp256k1 key, whose inner 20 bytes equal the matching EVM address), the Tron precompiles injected into revm (the TIP-272 relocations, `ripemd160` at `0x20003` and `blake2f` at `0x20009`, plus `validatemultisign` at `0x0a`, all over secp256k1, not ed25519), a provider-layer energy and bandwidth accounting shim that sits outside revm's gas loop, and u64 sun balances (1 TRX = 1,000,000 sun). Wallets derive over secp256k1 at SLIP-44 coin type 195 (path `m/44'/195'/<index>'/0/0`). Tron logs are EVM-shaped, so the mock surfaces revm logs directly.
 
-Two honest v1 limits. The RPC backend is a stub: address derivation and read shapes work, but every write returns `Unimplemented` (java-tron has no in process Rust VM and no alloy-equivalent client yet; the real read paths are documented for a later phase). And the mock's `CREATE` / `CREATE2` use revm's EVM address derivation, not Tron's tx-id-based formula. The real formula ships as the pure functions `tron_create_address` / `tron_create2_address` for tooling, because revm 41 does not allow cleanly overriding the in-VM derivation. The energy shim is coarse account-level accounting, not per-opcode costs.
+Two honest v1 limits remain in the mock. The mock's `CREATE` / `CREATE2` use revm's EVM address derivation, not Tron's tx-id-based formula. The real formula ships as the pure functions `tron_create_address` / `tron_create2_address` for tooling, because revm 41 does not allow cleanly overriding the in-VM derivation. The energy shim is coarse account-level accounting, not per-opcode costs. The RPC backend is no longer a stub: it drives a live java-tron node over TronGrid HTTP for reads and signed writes; its only remaining gap is per-tx event logs, which are not yet fetched (`call` returns the tx hash with empty logs for now).
 
 ## Macros at a glance
 
@@ -272,7 +272,7 @@ crates/
   cosmwasm/   cross-vm-cosmwasm  CwMockProvider (cw-multi-test), CwRpcProvider (live reads), CwChain, CwAsset
   solidity/   cross-vm-solidity  EvmMockProvider (revm), EvmRpcProvider (live reads), EvmChain, EvmAsset
   solana/     cross-vm-solana    SvmMockProvider (litesvm), SvmRpcProvider (live reads), SvmChain, SvmAsset
-  tron/       cross-vm-tron      TronMockProvider (revm + TVM layers), TronRpcProvider (v1 stub), TronChain, TronAsset
+  tron/       cross-vm-tron      TronMockProvider (revm + TVM layers), TronRpcProvider (live java-tron over TronGrid HTTP), TronChain, TronAsset
   macros/     cross-vm-macros    proc-macros: cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, runners
   framework/  cross-vm-framework MultiChainEnv (umbrella over all VMs), the Harness runners, prelude
 ```
@@ -305,14 +305,14 @@ Other handy targets: `make test-cross-vm` (hand written flows), `make test-harne
 | Capability | CosmWasm | EVM | Solana | Tron | Notes |
 | --- | --- | --- | --- | --- | --- |
 | Mock provider (in process VM) | Supported | Supported | Supported | Supported | `cw-multi-test` / `revm` / `litesvm`; Tron is a `revm` core with TVM-accurate layers |
-| Live RPC reads | Supported | Supported | Supported | Stub | validated on `osmo-test-5`, Ethereum Sepolia, Solana Devnet; Tron RPC is a v1 shape-only stub |
-| Live RPC writes (deploy + call) | Supported | Supported | Planned | Planned | CosmWasm/EVM sign and broadcast (CosmWasm deploy via `store_code_wasm` with compiled bytes); Solana and Tron writes return `Unimplemented`. `set_balance` is `Unimplemented` on every RPC backend (a live chain cannot mint) |
+| Live RPC reads | Supported | Supported | Supported | Supported | validated on `osmo-test-5`, Ethereum Sepolia, Solana Devnet; Tron RPC reads over TronGrid HTTP (block height, native balance, `triggerconstantcontract`), exercised against Nile |
+| Live RPC writes (deploy + call) | Supported | Supported | Planned | Supported | CosmWasm/EVM/Tron sign and broadcast (CosmWasm deploy via `store_code_wasm` with compiled bytes; Tron signs the `txID` and broadcasts over TronGrid HTTP); Solana writes return `Unimplemented`. `set_balance` is `Unimplemented` on every RPC backend (a live chain cannot mint) |
 | Wallet derivation (mnemonic to signer) | Supported | Supported | Supported | Supported | coin types 118 / 60 / 501 / 195, per wallet async broadcast lock |
 | Cross VM contract wrapper (`#[cross_vm_contract]`) | Supported | Supported | Supported | Supported | typed CosmWasm/EVM calls; Solana and Tron hooks hand written |
 | Property `Harness` (fuzz / invariant / endurance / matrix) | Supported (VM agnostic, runs over any injected chain) |||||
 | Broader cross VM orchestration layer | Planned |||||
 
-**Planned.** Solana live RPC writes (its mock coupled return types are being decoupled), the java-tron RPC read and write paths (the Tron RPC backend is a v1 stub), and the broader cross VM orchestration layer above `MultiChainEnv`.
+**Planned.** Solana live RPC writes (its mock coupled return types are being decoupled), and the broader cross VM orchestration layer above `MultiChainEnv`.
 
 **Known Tron mock divergences.** `CREATE` / `CREATE2` follow revm's EVM address derivation rather than Tron's tx-id-based formula (the real formula is exposed as the pure functions `tron_create_address` / `tron_create2_address`), and the energy/bandwidth shim is coarse account-level accounting, not per-opcode energy costs.
 

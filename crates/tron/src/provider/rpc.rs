@@ -1,59 +1,47 @@
-//! Live java-tron RPC provider (stub parity).
+//! Live java-tron RPC provider over the TronGrid HTTP REST API.
 //!
-//! [`TronRpcProvider`] mirrors the shape of the EVM [`EvmRpcProvider`] so a Tron chain can sit
-//! behind the shared `ChainProvider` trait with the same call surface. Unlike the EVM backend,
-//! v1 ships no live java-tron client: there is no alloy-equivalent in-process client for Tron, so
-//! every write/network path returns [`TronError::Unimplemented`] rather than performing real I/O.
-//! Chain reads return inert defaults (`balance` → `0`, `block_height` → `0`) and `new_account`
-//! returns a deterministic placeholder address, exactly as the EVM RPC backend does during its
-//! read-only phase.
+//! [`TronRpcProvider`] mirrors the EVM [`EvmRpcProvider`]: chain reads ([`balance`],
+//! [`block_height`]) and read-only [`static_call`] need no signer; the write paths
+//! ([`deploy_create`], [`call`]) sign the transaction id with the wallet's secp256k1 key and
+//! broadcast. Only `set_balance` stays [`TronError::Unimplemented`] (a live chain cannot mint).
 //!
-//! [`EvmRpcProvider`]: https://docs.rs/cross-vm-solidity
+//! Transport is TronGrid HTTP (`/wallet/*`), not gRPC, so the crate keeps no Tron-specific
+//! dependency (just `reqwest` + `serde_json`). The flow for a write is the standard java-tron
+//! three step: build the unsigned transaction at the node (`/wallet/deploycontract` or
+//! `/wallet/triggersmartcontract`), sign its `txID` locally, then `/wallet/broadcasttransaction`.
+//! Addresses cross the wire in 0x41 hex form (`visible=false`).
 //!
-//! # DEFERRED: real java-tron read/write paths
-//!
-//! When the live backend lands, the read and write paths map onto java-tron / TronGrid HTTP and
-//! gRPC as follows (recorded here so the future design is anchored to authoritative endpoints):
-//!
-//! - Per-transaction events: `GET /v1/transactions/{txid}/events` (TronGrid) to resolve the logs
-//!   emitted by a single broadcast transaction.
-//!   Source: <https://developers.tron.network/reference/get-events-by-transaction-id>
-//! - Range / topic log search: `eth_getLogs` (java-tron's EVM-compatible JSON-RPC) for block-range
-//!   and topic filters, with the TronGrid `GET /v1/contracts/{addr}/events` endpoint as the
-//!   contract-scoped alternative.
-//!   Source: <https://developers.tron.network/reference/eth_getlogs>
-//! - Transaction broadcast (writes): gRPC `TriggerSmartContract` for contract deploys/calls and
-//!   `TransferContract` for native transfers, signed with the wallet's secp256k1 key.
-//!
-//! Until that backend exists, the methods below stand in as `Unimplemented` stubs.
+//! [`balance`]: TronRpcProvider::balance
+//! [`block_height`]: ChainProvider::block_height
+//! [`static_call`]: TronRpcProvider::static_call
+//! [`deploy_create`]: TronRpcProvider::deploy_create
+//! [`call`]: TronRpcProvider::call
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use alloy_primitives::Bytes;
+use alloy_primitives::{Bytes, B256};
 use alloy_signer_local::PrivateKeySigner;
 use cross_vm_core::{ChainProvider, WalletFactory};
+use serde_json::{json, Value};
 
 use crate::chains::TronChainInfo;
 use crate::error::TronError;
-use crate::provider::address::{address_from_label, TronAddress};
+use crate::provider::address::{address_from_label, address_from_pubkey, TronAddress};
 use crate::provider::execution::TronExecution;
 
-/// A stub-parity live-RPC Tron provider.
-///
-/// Carries the same fields as the EVM RPC provider (chain metadata, endpoint, shared wallet
-/// roster, per-label signer cache) so the live backend can be filled in later without changing
-/// the surface. In v1 every write path returns [`TronError::Unimplemented`].
-//
-// `rpc_url`/`wallets`/`signers` are part of the stub-parity surface but are not read until the
-// live backend and the crate-integration layer (`TronChain`, chain sugar) land; allow dead_code
-// until then rather than dropping fields the future write path needs.
+/// Default fee ceiling for a write, in sun (1000 TRX). Tron rejects a tx that would burn more.
+const DEFAULT_FEE_LIMIT: u64 = 1_000_000_000;
+/// Energy cap a deployed contract may borrow from a caller, per invocation.
+const DEFAULT_ORIGIN_ENERGY_LIMIT: u64 = 10_000_000;
+
+/// A live-RPC Tron provider over the TronGrid HTTP API.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct TronRpcProvider {
     info: TronChainInfo,
     rpc_url: String,
+    http: reqwest::Client,
     /// Shared wallet roster; empty until the testing env attaches one at setup.
     pub(crate) wallets: Rc<WalletFactory>,
     /// Per-label derived-signer cache (derive once, reuse).
@@ -64,56 +52,236 @@ impl TronRpcProvider {
     /// Create an RPC provider bound to a chain's metadata.
     ///
     /// Stays infallible so `NILE.rpc(wallets)` sugar keeps working; a missing or empty `rpc_url`
-    /// would surface as an error at the first network call instead (once the live backend lands).
+    /// surfaces as an error at the first network call instead.
     pub fn new(info: TronChainInfo, wallets: Rc<WalletFactory>) -> Self {
-        let rpc_url = info.rpc_url.unwrap_or("").to_string();
+        let rpc_url = info.rpc_url.unwrap_or("").trim_end_matches('/').to_string();
         Self {
             info,
             rpc_url,
+            http: reqwest::Client::new(),
             wallets,
             signers: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
-    // ----- Write paths: unimplemented in v1 (no live java-tron client). -----
+    /// POST `body` to a `/wallet/<path>` endpoint and return the decoded JSON.
+    async fn post(&self, path: &str, body: Value) -> Result<Value, TronError> {
+        if self.rpc_url.is_empty() {
+            return Err(TronError::Rpc(format!(
+                "chain '{}' has no rpc_url; use a chain preset with an endpoint",
+                self.info.chain_id
+            )));
+        }
+        let url = format!("{}/wallet/{path}", self.rpc_url);
+        self.http
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| TronError::Rpc(e.to_string()))?
+            .json::<Value>()
+            .await
+            .map_err(|e| TronError::Rpc(format!("decode {path}: {e}")))
+    }
 
-    /// Deploy bytecode via a create transaction signed by `signer`.
-    ///
-    /// DEFERRED: the live path signs and broadcasts via gRPC `TriggerSmartContract`, then resolves
-    /// the new contract address from the transaction receipt. Unimplemented in v1.
+    /// Current block number. Inherent fallible variant of the trait's infallible
+    /// [`ChainProvider::block_height`].
+    pub async fn try_block_height(&self) -> Result<u64, TronError> {
+        let v = self.post("getnowblock", json!({})).await?;
+        v["block_header"]["raw_data"]["number"]
+            .as_u64()
+            .ok_or_else(|| TronError::Rpc("getnowblock: missing block number".into()))
+    }
+
+    /// Deploy bytecode via a create transaction signed by `signer`, returning the new contract
+    /// address the node assigns.
     pub async fn deploy_create(
         &self,
-        _bytecode: Bytes,
-        _constructor_args: impl AsRef<[u8]>,
-        _signer: &PrivateKeySigner,
+        bytecode: Bytes,
+        constructor_args: impl AsRef<[u8]>,
+        signer: &PrivateKeySigner,
     ) -> Result<TronAddress, TronError> {
-        Err(TronError::Unimplemented("tron rpc deploy_create".into()))
+        let owner = signer_address(signer);
+        let mut initcode = bytecode.to_vec();
+        initcode.extend_from_slice(constructor_args.as_ref());
+        let unsigned = self
+            .post(
+                "deploycontract",
+                json!({
+                    "owner_address": owner.to_hex(),
+                    "abi": "[]",
+                    "bytecode": hex::encode(&initcode),
+                    "fee_limit": DEFAULT_FEE_LIMIT,
+                    "call_value": 0,
+                    "consume_user_resource_percent": 100,
+                    "origin_energy_limit": DEFAULT_ORIGIN_ENERGY_LIMIT,
+                    "visible": false,
+                }),
+            )
+            .await?;
+        check_node_ok(&unsigned, "deploycontract")?;
+        let contract_hex = unsigned["contract_address"]
+            .as_str()
+            .or_else(|| {
+                unsigned["raw_data"]["contract"][0]["parameter"]["value"]["contract_address"]
+                    .as_str()
+            })
+            .ok_or_else(|| TronError::Deploy("deploycontract: no contract_address".into()))?;
+        let addr = tron_address_from_hex(contract_hex).map_err(|e| TronError::Deploy(e.0))?;
+        self.sign_and_broadcast(unsigned, signer)
+            .await
+            .map_err(|e| TronError::Deploy(e.to_string()))?;
+        Ok(addr)
     }
 
     /// Execute a state-mutating call against `to`, signed by `signer`.
     ///
-    /// DEFERRED: the live path signs and broadcasts via gRPC `TriggerSmartContract` and reads the
-    /// emitted logs back via `GET /v1/transactions/{txid}/events`. Unimplemented in v1.
+    /// A broadcast transaction yields no return data; the [`TronExecution`] carries the broadcast
+    /// transaction id with empty `output`/`logs` (per-tx logs are fetched separately via the
+    /// `/v1/transactions/{txid}/events` path, deferred).
     pub async fn call(
         &self,
-        _to: &TronAddress,
-        _calldata: impl AsRef<[u8]>,
-        _signer: &PrivateKeySigner,
+        to: &TronAddress,
+        calldata: impl AsRef<[u8]>,
+        signer: &PrivateKeySigner,
     ) -> Result<TronExecution, TronError> {
-        Err(TronError::Unimplemented("tron rpc call".into()))
+        let owner = signer_address(signer);
+        let resp = self
+            .post(
+                "triggersmartcontract",
+                json!({
+                    "owner_address": owner.to_hex(),
+                    "contract_address": to.to_hex(),
+                    "data": hex::encode(calldata.as_ref()),
+                    "call_value": 0,
+                    "fee_limit": DEFAULT_FEE_LIMIT,
+                    "visible": false,
+                }),
+            )
+            .await?;
+        check_node_ok(&resp["result"], "triggersmartcontract")?;
+        let unsigned = resp["transaction"].clone();
+        if unsigned.is_null() {
+            return Err(TronError::Execute("triggersmartcontract: no transaction".into()));
+        }
+        let tx_hash = unsigned["txID"]
+            .as_str()
+            .and_then(|s| hex::decode(s).ok())
+            .filter(|b| b.len() == 32)
+            .map(|b| B256::from_slice(&b));
+        self.sign_and_broadcast(unsigned, signer)
+            .await
+            .map_err(|e| TronError::Execute(e.to_string()))?;
+        Ok(TronExecution {
+            output: Bytes::new(),
+            logs: Vec::new(),
+            tx_hash,
+        })
     }
 
-    /// Run a read-only static call against `to`.
-    ///
-    /// DEFERRED: the live path issues an `eth_call` against java-tron's EVM-compatible JSON-RPC.
-    /// Unimplemented in v1.
+    /// Run a read-only constant call (`triggerconstantcontract`) against `to`.
     pub async fn static_call(
         &self,
-        _to: &TronAddress,
-        _calldata: impl AsRef<[u8]>,
+        to: &TronAddress,
+        calldata: impl AsRef<[u8]>,
     ) -> Result<Bytes, TronError> {
-        Err(TronError::Unimplemented("tron rpc static_call".into()))
+        let resp = self
+            .post(
+                "triggerconstantcontract",
+                json!({
+                    // The zero address is a valid caller for a constant (no-state-change) call.
+                    "owner_address": "410000000000000000000000000000000000000000",
+                    "contract_address": to.to_hex(),
+                    "data": hex::encode(calldata.as_ref()),
+                    "visible": false,
+                }),
+            )
+            .await?;
+        check_node_ok(&resp["result"], "triggerconstantcontract")?;
+        let hexstr = resp["constant_result"][0].as_str().unwrap_or("");
+        let bytes = hex::decode(hexstr)
+            .map_err(|e| TronError::Query(format!("constant_result hex: {e}")))?;
+        Ok(Bytes::from(bytes))
     }
+
+    /// Sign an unsigned transaction's `txID` with `signer` and broadcast it.
+    async fn sign_and_broadcast(
+        &self,
+        mut tx: Value,
+        signer: &PrivateKeySigner,
+    ) -> Result<(), TronError> {
+        let txid_hex = tx["txID"]
+            .as_str()
+            .ok_or_else(|| TronError::Rpc("transaction has no txID".into()))?;
+        let txid = hex::decode(txid_hex)
+            .map_err(|e| TronError::Rpc(format!("bad txID hex: {e}")))?;
+        let sig = sign_txid(signer, &txid)?;
+        tx["signature"] = json!([hex::encode(sig)]);
+        let res = self.post("broadcasttransaction", tx).await?;
+        if res["result"].as_bool() == Some(true) {
+            return Ok(());
+        }
+        let code = res["code"].as_str().unwrap_or("FAILED");
+        let msg = res["message"]
+            .as_str()
+            .map(decode_hex_message)
+            .unwrap_or_default();
+        Err(TronError::Rpc(format!("broadcast rejected ({code}): {msg}")))
+    }
+}
+
+/// The Tron address a secp256k1 signer controls.
+fn signer_address(signer: &PrivateKeySigner) -> TronAddress {
+    let encoded = signer.credential().verifying_key().to_encoded_point(false);
+    address_from_pubkey(encoded.as_bytes())
+}
+
+/// Sign the 32-byte `txID` with secp256k1, returning the 65-byte `r || s || v` Tron signature.
+fn sign_txid(signer: &PrivateKeySigner, txid: &[u8]) -> Result<[u8; 65], TronError> {
+    let (sig, recid) = signer
+        .credential()
+        .sign_prehash_recoverable(txid)
+        .map_err(|e| TronError::Wallet(format!("sign txID: {e}")))?;
+    let mut out = [0u8; 65];
+    out[..64].copy_from_slice(&sig.to_bytes());
+    out[64] = recid.to_byte();
+    Ok(out)
+}
+
+/// A small error wrapper so address parsing can flow through the various `TronError` variants.
+struct AddrErr(String);
+
+/// Parse a node-returned 0x41 hex address into a [`TronAddress`].
+fn tron_address_from_hex(h: &str) -> Result<TronAddress, AddrErr> {
+    let bytes = hex::decode(h).map_err(|e| AddrErr(format!("address hex: {e}")))?;
+    if bytes.len() != 21 || bytes[0] != 0x41 {
+        return Err(AddrErr(format!("not a 0x41 address: {h}")));
+    }
+    Ok(TronAddress::from_evm(alloy_primitives::Address::from_slice(&bytes[1..])))
+}
+
+/// java-tron encodes some error messages as hex; decode to UTF-8 when it parses, else pass through.
+fn decode_hex_message(m: &str) -> String {
+    match hex::decode(m) {
+        Ok(bytes) => String::from_utf8(bytes).unwrap_or_else(|_| m.to_string()),
+        Err(_) => m.to_string(),
+    }
+}
+
+/// Surface a node-level `{result:{result:false, code, message}}` (or bare `{Error}`) as an error.
+fn check_node_ok(result: &Value, ctx: &str) -> Result<(), TronError> {
+    if let Some(err) = result["Error"].as_str() {
+        return Err(TronError::Rpc(format!("{ctx}: {err}")));
+    }
+    // `triggerconstantcontract`/`triggersmartcontract` wrap status in `result.result`.
+    if result.get("result").is_some() && result["result"].as_bool() == Some(false) {
+        let msg = result["message"]
+            .as_str()
+            .map(decode_hex_message)
+            .unwrap_or_default();
+        return Err(TronError::Rpc(format!("{ctx} failed: {msg}")));
+    }
+    Ok(())
 }
 
 impl ChainProvider for TronRpcProvider {
@@ -128,25 +296,29 @@ impl ChainProvider for TronRpcProvider {
     }
 
     async fn new_account(&mut self, label: &str) -> TronAddress {
-        // No signing backend in the read-only phase; return a deterministic placeholder
-        // address. Real key derivation arrives with the write (sign + broadcast) pass.
+        // No signing backend here; the real address comes from the wallet roster via the chain
+        // handle's `wallet_address`. Return a deterministic placeholder, as the EVM RPC does.
         address_from_label(label)
     }
 
-    async fn balance(&self, _addr: &TronAddress) -> Result<u64, TronError> {
-        // v1 has no live read path. The real backend would query the node for the account's
-        // native (TRX, in sun) balance; until then report zero.
-        Ok(0)
+    async fn balance(&self, addr: &TronAddress) -> Result<u64, TronError> {
+        let v = self
+            .post(
+                "getaccount",
+                json!({ "address": addr.to_hex(), "visible": false }),
+            )
+            .await?;
+        // An account that has never transacted returns `{}`; treat a missing balance as zero.
+        Ok(v["balance"].as_u64().unwrap_or(0))
     }
 
     async fn set_balance(&mut self, _addr: &TronAddress, _amount: u64) -> Result<(), TronError> {
         // Cannot mint on a real chain. Use a faucet; declared funding is validated, not minted.
-        Err(TronError::Unimplemented("tron rpc set_balance".into()))
+        Err(TronError::Unimplemented("rpc set_balance".into()))
     }
 
     async fn block_height(&self) -> u64 {
-        // v1 has no live read path; the real backend would query the latest block number.
-        0
+        self.try_block_height().await.unwrap_or(0)
     }
 
     async fn advance_blocks(&mut self, _n: u64) {
@@ -157,7 +329,7 @@ impl ChainProvider for TronRpcProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chains::NILE;
+    use crate::chains::{LOCAL, NILE};
     use cross_vm_core::{ChainProvider, WalletFactory};
     use std::rc::Rc;
 
@@ -165,7 +337,10 @@ mod tests {
     async fn set_balance_unimplemented() {
         let mut c = TronRpcProvider::new(NILE, Rc::new(WalletFactory::from_roster(&[]).unwrap()));
         let a = c.new_account("x").await;
-        assert!(c.set_balance(&a, 1).await.is_err());
+        assert!(matches!(
+            c.set_balance(&a, 1).await,
+            Err(TronError::Unimplemented(_))
+        ));
     }
 
     #[tokio::test]
@@ -176,12 +351,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deploy_unimplemented() {
-        let c = TronRpcProvider::new(NILE, Rc::new(WalletFactory::from_roster(&[]).unwrap()));
+    async fn no_endpoint_errors_offline() {
+        // LOCAL has no rpc_url, so a network call fails fast without touching the network.
+        let c = TronRpcProvider::new(LOCAL, Rc::new(WalletFactory::from_roster(&[]).unwrap()));
         let signer = PrivateKeySigner::random();
-        let res = c
-            .deploy_create(Bytes::new(), Vec::<u8>::new(), &signer)
-            .await;
-        assert!(matches!(res, Err(TronError::Unimplemented(_))));
+        let res = c.deploy_create(Bytes::new(), Vec::<u8>::new(), &signer).await;
+        assert!(matches!(res, Err(TronError::Deploy(_) | TronError::Rpc(_))));
+    }
+
+    #[test]
+    fn signer_address_is_tron_shaped() {
+        let signer = PrivateKeySigner::random();
+        assert!(signer_address(&signer).to_base58().starts_with('T'));
     }
 }

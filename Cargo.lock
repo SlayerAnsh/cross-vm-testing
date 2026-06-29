@@ -2343,14 +2343,17 @@ dependencies = [
 name = "cross-vm-tron"
 version = "0.1.0"
 dependencies = [
- "alloy",
  "alloy-primitives",
  "alloy-signer-local",
  "bs58",
  "cross-vm-core",
  "cross-vm-macros",
+ "dotenvy",
+ "hex",
  "k256",
+ "reqwest 0.12.28",
  "revm",
+ "serde_json",
  "sha2 0.10.9",
  "sha3 0.10.9",
  "thiserror 2.0.18",

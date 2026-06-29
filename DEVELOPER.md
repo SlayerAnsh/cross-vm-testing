@@ -54,7 +54,7 @@ crates/tron/
   provider/
     address.rs          base58check TronAddress (0x41 prefix; inner 20 bytes = EVM address)
     mock.rs             TronMockProvider over the revm core
-    rpc.rs              TronRpcProvider (v1 stub: read shapes, writes return Unimplemented)
+    rpc.rs              TronRpcProvider (live java-tron over TronGrid HTTP: reads, static_call, signed deploy/call)
     execution.rs        execution result / response plumbing
   tvm/
     create.rs           pure tron_create_address / tron_create2_address (tx-id formula, for tooling)
@@ -66,7 +66,7 @@ crates/tron/
     sugar.rs            .mock(wallets) / .rpc(wallets) constructors
 ```
 
-Build and test. The crate is standalone: `cargo test -p cross-vm-tron` needs no network and no prebuilt contract artifacts (unlike the integration tests). The RPC backend is a v1 stub, so its write paths return `Unimplemented`; the unit tests cover address derivation, the mock's account/balance/block surface, the injected precompiles, and the resource shim. Two divergences are intentional and tested as such: the mock's `CREATE` / `CREATE2` follow revm's EVM address derivation (the Tron tx-id formula lives in the pure `tron_create_address` / `tron_create2_address` reference functions in `tvm/create.rs`), and the energy/bandwidth shim is coarse account-level accounting rather than per-opcode energy costs.
+Build and test. The RPC backend drives a live java-tron node over the TronGrid HTTP REST API (reads, `static_call`, and signed `deploy_create` / `call`). The standalone `cargo test -p cross-vm-tron` unit tests still need no network and no prebuilt contract artifacts (unlike the integration tests): they cover address derivation, the mock's account/balance/block surface, the injected precompiles, the resource shim, and the RPC error/offline paths. The live RPC reads and writes are exercised by the gated `tests/onchain.rs` (run with `--ignored`): one test reads the Nile testnet block height over real HTTP, and the write test deploys the Counter and runs increment/count against Nile (it needs a funded `MNEMONIC_TEST` wallet at coin type 195). Two divergences are intentional and tested as such: the mock's `CREATE` / `CREATE2` follow revm's EVM address derivation (the Tron tx-id formula lives in the pure `tron_create_address` / `tron_create2_address` reference functions in `tvm/create.rs`), and the energy/bandwidth shim is coarse account-level accounting rather than per-opcode energy costs.
 
 ## Common commands
 

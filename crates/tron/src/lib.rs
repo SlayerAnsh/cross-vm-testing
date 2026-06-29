@@ -20,6 +20,7 @@ pub mod provider;
 pub mod tvm;
 mod wallet;
 
+pub use alloy_primitives::{Bytes, Log, U256};
 pub use asset::TronAsset;
 pub use chain::TronChain;
 pub use chains::TronChainInfo;
