@@ -213,7 +213,26 @@ only; not dependencies, see Reference implementations):
   ERC20 path. v1 provides the TRC20 path; the TRC10 funding path is called out as
   additional work and may land in a follow-up rather than v1.
 
-### Chain metadata (`chains/`)
+### Events (`provider/mock.rs`, `provider/rpc.rs`)
+
+Tron contract logs are EVM-shaped. In `TransactionInfo` (returned by
+`gettransactioninfobyid` / gRPC `GetTransactionInfoById`, NOT the base `Transaction`)
+each `Log` is `{ address, topics[], data }` with `topics[0] = keccak256("Event(types)")`,
+identical to an Ethereum receipt. The single divergence: the log `address` is the
+20-byte form WITHOUT the `0x41` prefix.
+
+* **Mock.** `revm` already produces EVM logs (`address` / `topics` / `data`). Surface
+  them directly; when presenting Tron-style addresses, wrap the 20 bytes back into a
+  `TronAddress` (re-add `0x41`). No extra machinery: event assertions in the property
+  harness work off the revm logs. Topic hashing matches `keccak256` exactly.
+* **RPC (later phase).** Minimal per-tx read path is
+  `GET /v1/transactions/{txid}/events` (returns decoded params, no manual ABI decode).
+  Range / topic search has three tiers: `eth_getLogs` on the JSON-RPC layer
+  (`fromBlock` / `toBlock` / `address` / `topics`; 5000-block range cap), the TronGrid
+  Event API `GET /v1/contracts/{addr}/events` (filters `event_name` / `block_number` /
+  timestamp / `only_confirmed`, `fingerprint` pagination), or a self-hosted event
+  plugin (Mongo / Kafka). A vanilla FullNode has NO native log index. v1 is stub-parity
+  so none of this is built yet; it is recorded here for the write-path phase.
 
 `TronChainInfo` implements `ChainSpec` (chain_id, name, native_symbol `TRX`,
 optional rpc_url, `kind() -> ChainKind::Tron`), following `EvmChainInfo`. Presets:
@@ -266,6 +285,9 @@ Required citations:
 | Block-context opcode differences (GASPRICE/BASEFEE/DIFFICULTY/GASLIMIT) | https://developers.tron.network/v4.4.0/docs/vm-vs-evm |
 | Per-opcode energy table | https://developers.tron.network/docs/opcodes |
 | RPC transport / tx builder shape | https://github.com/39george/tronic and https://github.com/throgxyz/tronz |
+| Event log shape (TransactionInfo.log) | https://developers.tron.network/docs/event and https://github.com/tronprotocol/java-tron/blob/develop/protocol/src/main/protos/core/Tron.proto |
+| Event query APIs (per-tx, per-contract) | https://developers.tron.network/reference/get-events-by-transaction-id and https://developers.tron.network/reference/get-events-by-contract-address |
+| eth_getLogs compatibility | https://developers.tron.network/reference/eth_getlogs |
 
 Reference implementation for all of the above is `java-tron`
 (https://github.com/tronprotocol/java-tron).
