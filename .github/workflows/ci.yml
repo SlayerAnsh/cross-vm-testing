@@ -19,10 +19,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # rustflags: "" so the global default of -D warnings is not applied to every cargo
+      # invocation. We enforce -D warnings explicitly on clippy below; the third-party Solana
+      # program build (cargo build-sbf) emits deprecation warnings we do not control.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
 
       # ----- Cheap, artifact-free checks first, so a trivial failure does not pay for the
-      #       Foundry / Solana / Anchor toolchain installs below. -----
+      #       Foundry / Solana toolchain installs below. -----
       - name: cargo fmt
         run: cargo fmt --all --check
       # No --all-targets: the test targets embed gitignored contract artifacts that only exist
@@ -39,23 +44,14 @@ jobs:
       - name: forge fmt
         working-directory: examples/solidity-contracts
         run: forge fmt --check
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
       # Solana (Agave) platform tools from Anza; the legacy release.solana.com host is flaky.
+      # This provides cargo-build-sbf, which builds the program .so directly (no Anchor CLI: it
+      # added an anchor-cli/anchor-lang version handshake that silently produced no .so).
       - name: Install Solana
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.0/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-      # Anchor from the prebuilt npm package. npm leaves the shipped binary non-executable, so
-      # chmod it before use (the setup-anchor action tripped over this with an EACCES). Pinned;
-      # bump alongside the Solana version if `anchor build` hits a platform-tools mismatch.
-      - name: Install Anchor
-        run: |
-          npm install -g @coral-xyz/anchor-cli@0.31.1
-          chmod +x "$(npm root -g)/@coral-xyz/anchor-cli/anchor"
-          anchor --version
-          solana --version
+          "$HOME/.local/share/solana/install/active_release/bin/solana" --version
 
       # ----- Build the embedded artifacts once, then reuse across the test steps below. -----
       # EVM: out/*.json consumed by sol! (test contracts skipped, they need forge-std).
@@ -65,7 +61,14 @@ jobs:
       - name: Compile Solidity artifacts
         run: make compile-solidity
       - name: Compile Solana artifacts
-        run: make compile-solana
+        run: |
+          make compile-solana
+          # Fail loudly if the .so are missing (a build that no-ops would otherwise pass here
+          # and only fail later at the include_bytes! in the test compile).
+          for so in counter ping_pong vault; do
+            test -f "examples/solana-contracts/target/deploy/$so.so" \
+              || { echo "missing $so.so after compile-solana"; exit 1; }
+          done
 
       # ----- Tests. One target dir, reused; the artifacts above are already built. -----
       # Everything except cross-vm-cosmwasm, whose tests/onchain.rs embeds a compiled
