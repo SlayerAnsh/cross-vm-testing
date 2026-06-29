@@ -208,6 +208,7 @@ async fn endurance_honors_wall_clock_and_passes() {
     let rep = r
         .run(
             EnduranceConfig::new(Duration::from_millis(40))
+                .base_delay(Duration::from_millis(1))
                 .max_delay(Duration::from_millis(1))
                 .check_every(5)
                 .advance_blocks(1, 2),

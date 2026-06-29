@@ -2280,6 +2280,7 @@ dependencies = [
  "cross-vm-solana",
  "cross-vm-solidity",
  "cw-multi-test",
+ "dotenvy",
  "ping-pong",
  "rstest",
  "solana-instruction",

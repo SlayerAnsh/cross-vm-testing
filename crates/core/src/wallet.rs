@@ -11,10 +11,12 @@
 //! - [`WalletSource::EnvPrivateKey`] — read a raw VM-native private key from a process env var
 //!   (hex for EVM/Cosmos, base58 for Solana); no HD derivation.
 //!
-//! Secrets live only in the process environment (load a `.env` with `dotenvy` before building
-//! if you keep them in a file). The [`WalletFactory`] resolves every roster row into a
-//! [`WalletDef`] and hands out a per-wallet async lock so the same wallet never broadcasts two
-//! transactions concurrently (which would collide on the EVM nonce / Cosmos account sequence).
+//! Secrets live only in the process environment (load a `.env` with `dotenvy` before the wallet is
+//! used if you keep them in a file). The [`WalletFactory`] resolves every roster row into a
+//! [`WalletDef`] on demand. Serializing concurrent broadcasts of one live account (which would
+//! collide on the EVM nonce / Cosmos account sequence) is *not* the factory's job: that is the
+//! process-global [`crate::wallet_lock`], keyed by `(chain, address)`, so the same account
+//! serializes across tests where a per-factory lock could not.
 //!
 //! This module is deliberately VM-agnostic: it knows nothing about `Address`, `Keypair`, or
 //! coin types. The actual mnemonic -> signer derivation lives in each VM crate via the
@@ -23,9 +25,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
-
-use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::chain_provider::ChainProvider;
 use crate::error::CrossVmError;
@@ -66,7 +65,9 @@ impl AsRef<str> for WalletLabel<'_> {
     }
 }
 
-/// How a wallet resolves its signing material. Each roster row carries exactly one.
+/// How a wallet resolves its signing material. Each roster row carries exactly one. Stored by the
+/// [`WalletFactory`] and resolved dynamically (env vars are read at wallet-use time).
+#[derive(Clone, Copy, Debug)]
 pub enum WalletSource {
     /// Read a BIP-39 mnemonic phrase from this process env var, then derive via the row's
     /// account index / HD path.
@@ -97,7 +98,7 @@ pub struct WalletSpec {
 /// A resolved wallet's signing material. Held in-process only.
 #[derive(Clone, Debug)]
 pub enum WalletDef {
-    /// A BIP-39 mnemonic plus its derivation parameters (from `EnvMnemonic` or `Auto`).
+    /// A BIP-39 mnemonic plus its derivation parameters (from `Auto`, or a resolved `EnvMnemonic`).
     Mnemonic {
         /// The resolved BIP-39 phrase (from a process env var or freshly generated).
         phrase: String,
@@ -111,71 +112,91 @@ pub enum WalletDef {
     PrivateKey(String),
 }
 
-/// Owns the resolved wallet roster and per-wallet broadcast locks.
+/// One roster row as kept by the factory: its [`WalletSource`] plus derivation params, resolved to
+/// a [`WalletDef`] on demand. `Auto` rows carry their generated phrase so their derived address is
+/// stable within a run; env rows read their secret at use time.
+#[derive(Debug)]
+struct Row {
+    source: WalletSource,
+    index: u32,
+    hd_path: Option<String>,
+    /// Pre-generated mnemonic for an `Auto` row; `None` for env-sourced rows.
+    auto_phrase: Option<String>,
+}
+
+/// Owns the wallet roster as [`WalletSource`] rows, resolved to signing material on demand.
 ///
 /// VM-agnostic by design (see module docs). Cheap to share behind an `Rc`; each VM chain holds
-/// a clone and derives its own signer type from the [`WalletDef`] it looks up here.
+/// a clone and derives its own signer type from the [`WalletDef`] it resolves here. Broadcast
+/// serialization is **not** here: it lives in the process-global [`crate::wallet_lock`], keyed by
+/// `(chain, address)`, so the same live account serializes across tests (a per-factory lock could
+/// not, since each test builds its own factory).
 #[derive(Debug)]
 pub struct WalletFactory {
-    defs: HashMap<String, WalletDef>,
-    locks: HashMap<String, Arc<Mutex<()>>>,
+    rows: HashMap<String, Row>,
 }
 
 impl WalletFactory {
-    /// Resolve every roster row into a [`WalletDef`]. The only way to construct a factory.
+    /// Store each roster row by label. The only way to construct a factory.
     ///
-    /// `EnvMnemonic`/`EnvPrivateKey` rows read their value from the process environment (load a
-    /// `.env` with `dotenvy` first if you keep secrets in a file); a missing variable is a
-    /// [`CrossVmError::SecretVarMissing`] error. `Auto` rows generate a fresh mnemonic.
+    /// `Auto` rows generate their fresh mnemonic now (so the derived address is stable within the
+    /// run); env-sourced rows keep their [`WalletSource`] and are read lazily by [`resolve`]. The
+    /// env var is therefore read only when the wallet is actually used, so a roster can carry an
+    /// on-chain wallet whose secret is absent for runs that never sign with it. Load a `.env` with
+    /// `dotenvy` before the wallet is used if you keep secrets in a file.
+    ///
+    /// [`resolve`]: Self::resolve
     pub fn from_roster(roster: &[WalletSpec]) -> Result<Self, CrossVmError> {
-        let mut defs = HashMap::new();
-        let mut locks = HashMap::new();
+        let mut rows = HashMap::new();
         for spec in roster {
-            locks.insert(spec.label.to_string(), Arc::new(Mutex::new(())));
-            let def = match &spec.source {
-                WalletSource::Auto => WalletDef::Mnemonic {
-                    phrase: generate_mnemonic()?,
-                    index: spec.index,
-                    hd_path: spec.hd_path.map(str::to_string),
-                },
-                WalletSource::EnvMnemonic(var) => WalletDef::Mnemonic {
-                    phrase: read_env(var, spec.label)?,
-                    index: spec.index,
-                    hd_path: spec.hd_path.map(str::to_string),
-                },
-                WalletSource::EnvPrivateKey(var) => {
-                    WalletDef::PrivateKey(read_env(var, spec.label)?)
-                }
+            // `Auto` is the only source resolved eagerly: generate once so it stays stable.
+            let auto_phrase = match spec.source {
+                WalletSource::Auto => Some(generate_mnemonic()?),
+                _ => None,
             };
-            defs.insert(spec.label.to_string(), def);
+            rows.insert(
+                spec.label.to_string(),
+                Row {
+                    source: spec.source,
+                    index: spec.index,
+                    hd_path: spec.hd_path.map(str::to_string),
+                    auto_phrase,
+                },
+            );
         }
-        Ok(Self { defs, locks })
+        Ok(Self { rows })
     }
 
-    /// Look up a resolved wallet by label.
-    pub fn def<'a>(&self, label: WalletLabel<'a>) -> Result<&WalletDef, CrossVmError> {
-        self.defs
-            .get(label.as_str())
-            .ok_or_else(|| CrossVmError::WalletNotFound {
-                label: label.to_string(),
-            })
-    }
-
-    /// Acquire the wallet's broadcast lock. The returned guard is `'static` (owned) so it can
-    /// be held across `.await` points for the whole build -> sign -> broadcast sequence, then
-    /// released on drop. Uses an async mutex: on the single-thread runtime a `std` mutex held
-    /// across an await would deadlock.
-    pub async fn lock<'a>(
-        &self,
-        label: WalletLabel<'a>,
-    ) -> Result<OwnedMutexGuard<()>, CrossVmError> {
-        let m = self
-            .locks
+    /// Resolve a wallet's [`WalletSource`] into a [`WalletDef`], reading env-sourced secrets now.
+    ///
+    /// `Auto` returns its pre-generated mnemonic; `EnvMnemonic`/`EnvPrivateKey` read their process
+    /// env var (a missing variable is a [`CrossVmError::SecretVarMissing`] error raised here, at the
+    /// signing call, not at [`from_roster`](Self::from_roster)).
+    pub fn resolve<'a>(&self, label: WalletLabel<'a>) -> Result<WalletDef, CrossVmError> {
+        let row = self
+            .rows
             .get(label.as_str())
             .ok_or_else(|| CrossVmError::WalletNotFound {
                 label: label.to_string(),
             })?;
-        Ok(m.clone().lock_owned().await)
+        Ok(match row.source {
+            WalletSource::Auto => WalletDef::Mnemonic {
+                phrase: row
+                    .auto_phrase
+                    .clone()
+                    .expect("auto row carries a generated phrase"),
+                index: row.index,
+                hd_path: row.hd_path.clone(),
+            },
+            WalletSource::EnvMnemonic(var) => WalletDef::Mnemonic {
+                phrase: read_env(var, label.as_str())?,
+                index: row.index,
+                hd_path: row.hd_path.clone(),
+            },
+            WalletSource::EnvPrivateKey(var) => {
+                WalletDef::PrivateKey(read_env(var, label.as_str())?)
+            }
+        })
     }
 }
 
@@ -224,7 +245,8 @@ pub trait WalletDeriver: ChainProvider {
     fn signer_address(&self, signer: &Self::Signer) -> Self::Address;
 
     /// Resolve a [`WalletDef`] into a signer: mnemonic rows derive via index/HD path, private-key
-    /// rows derive directly. Used by every VM's `acquire`/`wallet_address` path.
+    /// rows derive directly. The `WalletDef` is already fully resolved by
+    /// [`WalletFactory::resolve`]. Used by every VM's `acquire`/`wallet_address` path.
     fn signer_for(&self, def: &WalletDef) -> Result<Self::Signer, Self::Error> {
         match def {
             WalletDef::Mnemonic {
@@ -270,17 +292,18 @@ mod tests {
         },
     ];
 
-    /// Extract a mnemonic def's phrase/index, panicking if it is a private-key def.
+    /// Extract a resolved mnemonic def's phrase/index, panicking on any other variant.
     fn mnemonic(def: &WalletDef) -> (&str, u32) {
         match def {
             WalletDef::Mnemonic { phrase, index, .. } => (phrase, *index),
-            WalletDef::PrivateKey(_) => panic!("expected a mnemonic def"),
+            other => panic!("expected a resolved mnemonic def, got {other:?}"),
         }
     }
 
     #[test]
     fn resolves_env_mnemonic_and_auto_rows() {
-        // Use a test-unique env var to avoid colliding with other tests' process env.
+        // Construction reads no env; `resolve` reads the var dynamically. `Auto` resolves to its
+        // pre-generated mnemonic.
         std::env::set_var("CORE_TEST_MNEMONIC_MAIN", PHRASE);
         let roster: &[WalletSpec] = &[
             WalletSpec {
@@ -303,9 +326,10 @@ mod tests {
             },
         ];
         let f = WalletFactory::from_roster(roster).unwrap();
-        assert_eq!(mnemonic(f.def(ALICE).unwrap()), (PHRASE, 0));
-        assert_eq!(mnemonic(f.def(BOB).unwrap()).1, 1);
-        let (gen, _) = mnemonic(f.def(EPHEMERAL).unwrap());
+        assert_eq!(mnemonic(&f.resolve(ALICE).unwrap()), (PHRASE, 0));
+        assert_eq!(mnemonic(&f.resolve(BOB).unwrap()).1, 1);
+        let def = f.resolve(EPHEMERAL).unwrap();
+        let (gen, _) = mnemonic(&def);
         assert_eq!(gen.split_whitespace().count(), 12);
         assert_ne!(gen, PHRASE);
         assert!(bip39::Mnemonic::parse_normalized(gen).is_ok());
@@ -322,31 +346,43 @@ mod tests {
         }];
         let f = WalletFactory::from_roster(roster).unwrap();
         assert!(matches!(
-            f.def(ALICE).unwrap(),
+            f.resolve(ALICE).unwrap(),
             WalletDef::PrivateKey(k) if k == "0xdeadbeef"
         ));
     }
 
     #[test]
-    fn missing_env_var_is_error() {
+    fn missing_env_var_is_deferred_to_resolve() {
+        // A missing env var no longer fails at construction; it errors only when the wallet is
+        // resolved (i.e. at the signing call).
         let roster: &[WalletSpec] = &[WalletSpec {
             label: "alice",
             source: WalletSource::EnvMnemonic("CORE_TEST_DEFINITELY_UNSET_VAR"),
             index: 0,
             hd_path: None,
         }];
-        let err = WalletFactory::from_roster(roster).unwrap_err();
+        let f = WalletFactory::from_roster(roster).expect("construction defers env resolution");
         assert!(matches!(
-            err,
+            f.resolve(ALICE).unwrap_err(),
             CrossVmError::SecretVarMissing { ref var, .. } if var == "CORE_TEST_DEFINITELY_UNSET_VAR"
         ));
+    }
+
+    #[test]
+    fn auto_resolves_stably() {
+        // Two resolves of the same `Auto` wallet return the same generated phrase (its derived
+        // address must be stable within a run).
+        let f = WalletFactory::from_roster(AUTO_ROSTER).unwrap();
+        let a = f.resolve(ALICE).unwrap();
+        let b = f.resolve(ALICE).unwrap();
+        assert_eq!(mnemonic(&a).0, mnemonic(&b).0);
     }
 
     #[test]
     fn unknown_label_is_not_found() {
         let f = WalletFactory::from_roster(AUTO_ROSTER).unwrap();
         assert!(matches!(
-            f.def(NOBODY).unwrap_err(),
+            f.resolve(NOBODY).unwrap_err(),
             CrossVmError::WalletNotFound { .. }
         ));
     }
@@ -362,50 +398,8 @@ mod tests {
         let a = WalletFactory::from_roster(GEN_ONLY).unwrap();
         let b = WalletFactory::from_roster(GEN_ONLY).unwrap();
         assert_ne!(
-            mnemonic(a.def(EPHEMERAL).unwrap()).0,
-            mnemonic(b.def(EPHEMERAL).unwrap()).0
+            mnemonic(&a.resolve(EPHEMERAL).unwrap()).0,
+            mnemonic(&b.resolve(EPHEMERAL).unwrap()).0
         );
-    }
-
-    #[tokio::test]
-    async fn same_wallet_lock_serializes() {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-
-        let f = Rc::new(WalletFactory::from_roster(AUTO_ROSTER).unwrap());
-        let inflight = Rc::new(RefCell::new(0u32));
-        let max_seen = Rc::new(RefCell::new(0u32));
-
-        let task = |f: Rc<WalletFactory>, inflight: Rc<RefCell<u32>>, max: Rc<RefCell<u32>>| async move {
-            let _guard = f.lock(ALICE).await.unwrap();
-            {
-                let mut n = inflight.borrow_mut();
-                *n += 1;
-                let mut m = max.borrow_mut();
-                if *n > *m {
-                    *m = *n;
-                }
-            }
-            tokio::task::yield_now().await;
-            *inflight.borrow_mut() -= 1;
-        };
-
-        tokio::join!(
-            task(f.clone(), inflight.clone(), max_seen.clone()),
-            task(f.clone(), inflight.clone(), max_seen.clone()),
-        );
-        assert_eq!(
-            *max_seen.borrow(),
-            1,
-            "same-wallet broadcasts must not overlap"
-        );
-    }
-
-    #[tokio::test]
-    async fn different_wallets_do_not_contend() {
-        use std::rc::Rc;
-        let f = Rc::new(WalletFactory::from_roster(AUTO_ROSTER).unwrap());
-        let _alice = f.lock(ALICE).await.unwrap();
-        let _bob = f.lock(BOB).await.unwrap();
     }
 }
