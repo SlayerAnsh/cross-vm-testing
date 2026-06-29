@@ -16,7 +16,8 @@ use solana_signer::Signer;
 use crate::chain::SvmChain;
 use crate::error::SvmError;
 
-/// A Solana signer: the ed25519 keypair, shared (it is not `Clone`).
+/// A Solana signer: an ed25519 keypair wrapped in `Rc` so the signer is `Clone` even though
+/// `Keypair` itself is not.
 #[derive(Clone)]
 pub struct SvmSigner(pub Rc<Keypair>);
 

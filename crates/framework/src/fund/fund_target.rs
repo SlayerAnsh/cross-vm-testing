@@ -5,7 +5,7 @@
 //! and amount type automatically from `who`'s type. Testing can fund native balances
 //! only, so the asset is given as a raw denom string (the bank denom on CosmWasm;
 //! informational on EVM/Solana, which each have a single native coin). Each call lowers
-//! into a [`Pending`] requirement that [`crate::MultiChainEnv::start`] applies asynchronously.
+//! into a `Pending` requirement that [`crate::MultiChainEnv::start`] applies asynchronously.
 
 use cross_vm_core::ChainKind;
 use cross_vm_cosmwasm::{Addr, CwAsset};
@@ -21,7 +21,7 @@ pub trait FundTarget: Clone + 'static {
     /// VM this target belongs to (used to validate the chain label up front).
     const KIND: ChainKind;
 
-    /// Lower a `fund(...)` call into a native-funding [`Pending`] requirement.
+    /// Lower a `fund(...)` call into a native-funding `Pending` requirement.
     ///
     /// `denom` is the bank denom on CosmWasm; EVM and Solana ignore it because each has
     /// a single native coin.

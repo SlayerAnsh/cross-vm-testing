@@ -30,8 +30,9 @@ use crate::error::EvmError;
 use crate::provider::address::address_from_label;
 use crate::provider::EvmExecution;
 
-/// A live-RPC EVM provider. Read-only: chain-level reads and static calls hit a real node;
-/// state-mutating operations remain [`EvmError::Unimplemented`].
+/// A live-RPC EVM provider. Chain-level reads and static calls hit a real node; the write paths
+/// ([`deploy_create`](Self::deploy_create), [`call`](Self::call)) sign with the wallet's
+/// `EthereumWallet` and broadcast. Only `set_balance` stays [`EvmError::Unimplemented`].
 #[derive(Clone)]
 pub struct EvmRpcProvider {
     info: EvmChainInfo,

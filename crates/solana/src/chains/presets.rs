@@ -1,6 +1,7 @@
 //! Predefined Solana clusters.
 //!
-//! Use them as `SvmMockProvider::new(SOLANA_DEVNET)` or `SOLANA_DEVNET.mock()`.
+//! Use them as `SvmMockProvider::new(SOLANA_DEVNET, wallets)` or `SOLANA_DEVNET.mock(wallets)`,
+//! where `wallets` is the shared `Rc<WalletFactory>`.
 
 use super::commitment::Commitment;
 use super::info::SolanaChainInfo;

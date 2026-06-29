@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Changed (documentation accuracy sweep)
+
+* `README.md`: rewritten as a tool-style doc (tagline, badges, table of contents, install) and filled the biggest gap, the typed contract layer (`#[cross_vm_contract]`, the `CwExecuteFns` / `CwQueryFns` derives, transaction hooks), plus a macros-at-a-glance table.
+* `README.md`, `SPEC.md`: corrected the live-RPC-writes status. CosmWasm RPC writes (`store_code_wasm` / `instantiate` / `execute_contract`) are implemented and sign + broadcast, not planned; only Solana RPC writes remain `Unimplemented`. `set_balance` stays `Unimplemented` on every RPC backend.
+* `SPEC.md`: rewrote the wallet section to the real API (`define_wallet_roster!`, `WalletFactory::from_roster`, `Auto` / `EnvMnemonic` / `EnvPrivateKey`), corrected the shared-factory story (the env does not build or distribute it), fixed the `.mock(wallets)` / `.rpc(wallets)` constructor examples, and moved the property-testing harness out of "out of scope" into its own design section.
+* `DEVELOPER.md`: corrected the test-file inventory, the macros-crate description, the gitignored-artifact prerequisites, and the EVM bytecode-regeneration section (loaded via `sol!` / `Counter::BYTECODE`, not a pasted constant).
+* rustdoc: fixed stale or misleading doc comments surfaced by a crate-wide audit, including the `CwRpcProvider` / `EvmRpcProvider` "read-only" struct docs (both broadcast writes), the `chains/presets.rs` `.mock()` examples (missing the `wallets` arg) across all three VM crates, the `CosmosChainInfo` "all fields `&'static str`" claim, the `MultiChainEnv` wallet-distribution field doc, `SvmSigner`'s `Clone` note, and the `cross-vm-macros` broken intra-doc links.
+
+### Added (CI: GitHub Actions workflow)
+
+* `.github/workflows/ci.yml`: a tiered CI pipeline on push to `main`, pull requests, and manual dispatch. A fast artifact-free tier gates every change: `fmt` (`cargo fmt --all --check` plus `forge fmt --check`), `clippy` (`cargo clippy --workspace -- -D warnings`, no `--all-targets` so the artifact-embedding test targets are not pulled in), `doc` (`cargo doc --workspace --no-deps`), `build` (`cargo build --workspace`), and `unit-tests` (the six library crates, whose live-RPC tests stay `#[ignore]`). A separate heavier `integration-tests` job installs Foundry and the Solana/Anchor toolchain, runs `make compile-solidity` and `make compile-solana` to produce the gitignored EVM and Solana artifacts the integration tests embed at compile time, then runs `cargo test -p cross-vm-integration-tests`. CosmWasm contracts are native path dependencies, so no Docker optimizer build is needed in CI. The toolchain reads `rust-toolchain.toml`; runs share a `concurrency` group that cancels superseded commits.
+* `cross-vm-framework`: minor rustdoc fixes so the docs build clean (broken intra-doc links to `run` and the crate-private `Pending` replaced with plain code spans).
+
 ### Added (cross-VM ping-pong relayer test)
 
 * `cross-vm-integration-tests`: a cross-VM ping-pong test (`tests/cross_vm/ping_pong.rs`) that relays IBC-style packets between heterogeneous chains. A `PingPong` cross-VM wrapper (`tests/support/ping_pong.rs`, `#[cross_vm_contract]`) deploys the existing CosmWasm, EVM, and Solana ping-pong contracts unchanged and exposes one logical interface (`ping` / `receive_packet` / `acknowledge_packet` / `stats` / `port`). Each deployed handle carries an `on_after` hook that parses the emitted packet-lifecycle events (`SendPacket` / `ReceivePacket` / `WriteAcknowledgement` / `AcknowledgePacket`) into a shared ledger.

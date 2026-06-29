@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ----- Fast tier: artifact-free, gates every push/PR -----
+
+  fmt:
+    name: Format (rust + solidity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo fmt --all --check
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: forge fmt --check
+        working-directory: examples/solidity-contracts
+        run: forge fmt --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # No --all-targets: the test targets embed gitignored contract artifacts that only exist
+      # after `make compile`. Lib/bin clippy stays artifact-free.
+      - run: cargo clippy --workspace -- -D warnings
+
+  doc:
+    name: Doc lint (rustdoc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # `cargo doc` builds the public API docs and fails on hard doc errors (e.g. doc code that
+      # references missing items). Artifact-free: it compiles lib targets only, never doctests.
+      - run: cargo doc --workspace --no-deps
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo build --workspace
+
+  unit-tests:
+    name: Unit tests (library crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # The 6 VM/framework crates need no contract artifacts. Their live-RPC tests are #[ignore].
+      - run: >
+          cargo test
+          -p cross-vm-core
+          -p cross-vm-cosmwasm
+          -p cross-vm-solidity
+          -p cross-vm-solana
+          -p cross-vm-framework
+          -p cross-vm-macros
+
+  # ----- Heavy tier: isolated so its slowness/flakiness does not block the fast signal -----
+
+  integration-tests:
+    name: Integration tests (cross-VM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: foundry-rs/foundry-toolchain@v1
+      # Solana platform-tools + Anchor (via avm). Versions pinned here; bump if `anchor build`
+      # fails on a platform-tools mismatch. The repo itself pins no Anchor/Solana version.
+      - uses: metadaoproject/setup-anchor@v2
+        with:
+          anchor-version: 0.31.1
+          solana-cli-version: 2.1.0
+          node-version: 20
+      # EVM artifacts: out/*.json consumed by `sol!`. Solana artifacts: target/deploy/*.so consumed
+      # by include_bytes!. CosmWasm contracts are native path deps, so no wasm/Docker build needed.
+      - run: make compile-solidity
+      - run: make compile-solana
+      - run: cargo test -p cross-vm-integration-tests

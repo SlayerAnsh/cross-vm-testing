@@ -3,7 +3,11 @@
 ## Prerequisites
 
 * Rust stable (developed against 1.96, edition 2021).
-* For regenerating the EVM test bytecode only: Foundry (`forge`). The committed bytecode means tests run without it.
+* Building the integration-test contract artifacts (all git-ignored): Foundry (`forge`) for the EVM Counter, `cargo-build-sbf` for the Solana program, and the CosmWasm wasm builds. Run `make compile` (or a single ecosystem target) before `cargo test -p cross-vm-integration-tests`. The pure unit tests in each VM crate need none of this.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on push to `main`, on pull requests, and on manual dispatch. It is tiered. A fast artifact-free tier (`fmt`, `clippy`, `doc`, `build`, and `unit-tests` over the six library crates) gates every change and needs no contract toolchains. A separate `integration-tests` job installs Foundry and the Solana/Anchor toolchain, runs `make compile-solidity` and `make compile-solana` to build the artifacts the cross-VM tests embed at compile time, then runs `cargo test -p cross-vm-integration-tests`. CosmWasm contracts are native path dependencies, so CI needs no Docker optimizer. The pinned Anchor and Solana versions in that job may need bumping if `anchor build` fails on a platform-tools mismatch.
 
 ## Async
 
@@ -22,7 +26,7 @@ crates/core       cross-vm-core       no VM dependencies
 crates/cosmwasm   cross-vm-cosmwasm   cw-multi-test, cosmwasm-std
 crates/solidity   cross-vm-solidity   revm (alloy for the test bindings)
 crates/solana     cross-vm-solana     litesvm, granular solana-* crates
-crates/macros     cross-vm-macros     proc-macro (syn/quote): #[cross_vm_contract]
+crates/macros     cross-vm-macros     proc-macros (syn/quote): cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, fuzz/invariant/endurance runners
 crates/framework  cross-vm-framework  umbrella over core + all three VM crates
 ```
 
@@ -58,7 +62,7 @@ Each crate has unit tests (chain metadata, account creation, balance set/get, bl
 * `cross-vm-solidity`: `deploy_create` the Solidity `Counter` from `examples/solidity-contracts` (creation bytecode from the forge artifact via `sol!`), then `call` for `increment`/`reset`, read via `static_call`.
 * `cross-vm-solana`: airdrop, System Program transfer through `send_transaction`, balance assertion.
 * `cross-vm-framework`: keeps only framework functionality tests. `src/tests.rs` covers `MultiChainEnv` setup, label/VM error handling, native funding, and the before/after hook mechanics; inline `#[cfg(test)]` mods in `contract/account.rs`, `contract/response.rs`, `harness/rng.rs`, and `harness/outcome.rs` cover their units. The heavy multi-chain integration tests live in their own crate (see below), so the framework build no longer drags the contract-artifact toolchain.
-* `cross-vm-integration-tests` (`examples/integration-tests`): the multi-chain integration and example tests, co-located with the contract artifacts they embed. Two test binaries. `tests/harness/` holds the property-testing examples (`runner.rs`, `counter.rs`, `vault.rs`); `tests/cross_vm/` holds the multi-chain tests (`setup.rs`, `counter.rs`, `wallet.rs`). Both share `tests/support/`, split by concern into `counter.rs` (the cross-VM `Counter` wrapper), `vault.rs` (the cross-VM `Vault` wrapper), and `wallets.rs` (`test_wallets` plus funding helpers), aggregated by `tests/support/mod.rs`. Each group has a `main.rs` that declares its modules (Cargo treats `tests/<group>/main.rs` as one test target). `tests/cross_vm/counter.rs` runs one rstest over all three VMs (`#[values(OSMOSIS.mock(), ETHEREUM.mock(), SOLANA_DEVNET.mock())]`) driving the single `Counter` wrapper. All three VMs use the canonical contracts from `examples/`. The EVM and Solana cases read build artifacts at compile time, all git-ignored, so run `make compile` (or `make compile-solidity compile-solana`) before `cargo test -p cross-vm-integration-tests`. A fresh checkout will not compile the tests until they exist:
+* `cross-vm-integration-tests` (`examples/integration-tests`): the multi-chain integration and example tests, co-located with the contract artifacts they embed. Two test binaries. `tests/harness/` holds the property-testing examples (`counter.rs`, `vault.rs`, `ping_pong.rs`, and `mechanics.rs` for the runner mechanics); `tests/cross_vm/` holds the multi-chain tests (`setup.rs`, `counter.rs`, `wallet.rs`, `ping_pong.rs`). Both share `tests/support/`, split by concern into `counter.rs` (the cross-VM `Counter` wrapper), `vault.rs` (the cross-VM `Vault` wrapper), `ping_pong.rs` and `bridge.rs` (the ping-pong relayer flow), and `wallets.rs` (`test_wallets` plus funding helpers), aggregated by `tests/support/mod.rs`. Each group has a `main.rs` that declares its modules (Cargo treats `tests/<group>/main.rs` as one test target). `tests/cross_vm/counter.rs` runs one rstest over all three VMs (`#[values(ChainKind::CosmWasm, ChainKind::Evm, ChainKind::Svm)]`, each case building the matching `.mock(wallets)`) driving the single `Counter` wrapper. All three VMs use the canonical contracts from `examples/`. The EVM and Solana cases read build artifacts at compile time, all git-ignored, so run `make compile` (or `make compile-solidity compile-solana`) before `cargo test -p cross-vm-integration-tests`. A fresh checkout will not compile the tests until they exist:
   * CosmWasm: the `examples/cosmwasm-contracts/counter` crate is consumed as an rlib (no artifact build needed).
   * EVM: `sol!` parses `examples/solidity-contracts/out/Counter.sol/Counter.json` (forge build) for the ABI and creation bytecode.
   * Solana: `include_bytes!` loads `examples/solana-contracts/target/deploy/counter.so` (`cargo-build-sbf`).
@@ -157,7 +161,9 @@ These ecosystems change their public APIs frequently. Pin exact majors and follo
 
 ## Regenerating the EVM counter bytecode
 
+The EVM creation bytecode is not pasted into a constant. `alloy::sol!` reads the forge artifact JSON at compile time and generates both the call bindings and a `Counter::BYTECODE` constant from it (see `crates/solidity/tests/counter.rs` and `examples/integration-tests/tests/support/counter.rs`). To refresh it, rebuild the artifact:
+
 ```
-forge build           # from a project containing the Counter.sol shown in tests/counter.rs
-# copy out/Counter.sol/Counter.json -> .bytecode.object into COUNTER_CREATION_BYTECODE
+make compile-solidity     # runs `forge build` in examples/solidity-contracts
+# -> regenerates examples/solidity-contracts/out/Counter.sol/Counter.json, which sol! consumes
 ```

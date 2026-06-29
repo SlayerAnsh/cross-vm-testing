@@ -1,93 +1,57 @@
+<div align="center">
+
 # cross-vm-testing
 
-A Rust testing suite for cross VM work spanning three execution environments: CosmWasm (via `cw-multi-test`), EVM/Solidity (via `revm`), and Solana (via `litesvm`).
+**Write one test. Run it on CosmWasm, EVM, and Solana.**
 
-Phase 1 ships one chain provider per ecosystem. A chain provider is the analogue of alloy's `Provider`, cw-orch's `CwEnv`, or test-tube's `Runner`. Each provider wraps an in process VM ("mock") behind a single shared trait, so test code and cross VM scripts read the same regardless of target chain.
+A Rust testing suite for cross VM work. It puts three execution environments behind a single async trait, so the same test code drives an in process CosmWasm chain (`cw-multi-test`), an EVM (`revm`), and Solana (`litesvm`) without changing shape.
 
-## Workspace layout
+![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)
+![Edition](https://img.shields.io/badge/edition-2021-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/badge/version-0.1.0-lightgrey)
+![VMs](https://img.shields.io/badge/VMs-CosmWasm%20%7C%20EVM%20%7C%20Solana-purple)
 
-```
-crates/
-  core/       cross-vm-core      shared ChainProvider / ChainSpec traits, ChainKind, CrossVmError, FundError
-  cosmwasm/   cross-vm-cosmwasm  CwMockProvider (cw-multi-test), CwRpcProvider (live reads), CwChain, CwAsset
-  solidity/   cross-vm-solidity  EvmMockProvider (revm), EvmRpcProvider (live reads), EvmChain, EvmAsset
-  solana/     cross-vm-solana    SvmMockProvider (litesvm), SvmRpcProvider (live reads), SvmChain, SvmAsset
-  framework/  cross-vm-framework MultiChainEnv (umbrella over all VMs), prelude
-```
+</div>
 
-Each VM crate carries a `chains` module with predefined chain constants used to spin up a provider quickly. The `cross-vm-framework` crate re-exports everything and adds the multi chain `MultiChainEnv`.
+---
 
-## MultiChainEnv: many chains, one simulation
+## Why
 
-`MultiChainEnv` models a chain simulation with two phases. During setup you inject chains and declare funding; `start()` applies the plan and enters the running phase, where only chain execution is allowed (funding and injection are gone at the type level).
+Cross VM work (bridges, relayers, multi chain protocols) usually means three separate test stacks with three different mental models. This suite collapses that. A chain provider here is the analogue of alloy's `Provider`, cw-orch's `CwEnv`, or test-tube's `Runner`: one shared trait, one in process VM per ecosystem behind it, identical call sites regardless of target chain.
 
-```rust
-use std::rc::Rc;
-use cross_vm_framework::prelude::*;
+On top of that base, three things make full cross VM tests practical:
 
-// The suite is async; run on a current-thread runtime (#[tokio::test] / #[tokio::main]).
-// One WalletFactory is shared by the env and every chain. An empty roster needs no .env.
-let wallets = Rc::new(WalletFactory::from_roster(&[]).unwrap());
-let mut env = MultiChainEnv::new("swap-test", wallets.clone());
-env.inject("osmosis", AnyChain::from(OSMOSIS.mock(wallets.clone())));
-env.inject("eth", AnyChain::from(ETHEREUM.mock(wallets.clone())));
+* **One contract wrapper, three VMs.** Declare a contract's logical methods once and the `#[cross_vm_contract]` macro generates a struct that dispatches each call to the right VM. You write only the per VM glue.
+* **A property testing harness.** Fuzz, invariant, endurance, and scenario runners drive any wrapper over many generated operation sequences, all seeded and reproducible.
+* **Real wallets.** Mnemonics in a `.env`, a compile time roster, per ecosystem HD derivation, and a per wallet broadcast lock so nonces never collide.
 
-let cw_alice = env.cosmwasm("osmosis").unwrap().new_account("alice").await;
-let evm_alice = env.evm("eth").unwrap().new_account("alice").await;
-// Testing funds native balances only. The asset is a raw denom string (the bank denom
-// on CosmWasm; ignored on EVM/Solana, which each have a single native coin).
-env.fund("osmosis", &cw_alice, "uosmo", 1_000_000u128).unwrap();
-env.fund("eth", &evm_alice, "eth", cross_vm_solidity::U256::from(5u64)).unwrap();
+## Table of contents
 
-let mut env = env.start().await.unwrap();       // running phase
-let bal = env.cosmwasm("osmosis").unwrap().balance(&cw_alice).await.unwrap();
-// Accessing a label that was never injected returns Err(EnvError::UnknownChain):
-assert!(env.solana("sol").is_err());
-// env.fund(...);  // compile error: not available once running
-```
+* [Install](#install)
+* [Quickstart](#quickstart)
+* [MultiChainEnv: many chains, one simulation](#multichainenv-many-chains-one-simulation)
+* [Cross VM contracts: one wrapper, three VMs](#cross-vm-contracts-one-wrapper-three-vms)
+* [Two ways to write a test](#two-ways-to-write-a-test)
+* [Property testing harness](#property-testing-harness)
+* [Wallets](#wallets)
+* [Live RPC providers](#live-rpc-providers)
+* [Macros at a glance](#macros-at-a-glance)
+* [Workspace layout](#workspace-layout)
+* [Build and test](#build-and-test)
+* [Status](#status-supported--planned)
 
-All provider and env operations are `async`. Because the mock backends (`revm`,
-`litesvm`, `cw-multi-test`) are not `Send`, run on a current-thread runtime:
-`#[tokio::test]` and `#[tokio::main(flavor = "current_thread")]`.
+## Install
 
-Funding semantics: native assets mock mint the shortfall; token assets (cw20/erc20/SPL) are validated against the real on chain balance (you mint them by deploying the token during setup). On all three RPC providers, native funding validates rather than mints (a live chain cannot mint): it reads the real balance and reports a `Shortfall` if the account is underfunded. Token RPC funding paths (cw20/erc20/SPL) return `Unimplemented`.
+This is a Cargo workspace, not yet published to crates.io. Depend on the framework crate by path (it re-exports every VM crate and the prelude):
 
-## Two ways to write a test: MultiChainEnv directly, or the Harness runner
-
-Both run on the same chains. The difference is who drives the operations.
-
-Use **`MultiChainEnv` directly** when the test is a fixed storyline you write out by hand: inject the chains, fund, `start()`, then run a known sequence of calls and assert the exact end state. This is the right tool for "does this specific cross VM flow work" (deploy here, call there, assert balances on a third chain). Every step and assertion is explicit and the failure points straight at the line that broke. See `examples/integration-tests/tests/cross_vm/`.
-
-Use the **`Harness` runner** when you want a property checked across *many* sequences you did not write by hand. You implement one `Harness` (a `World` of persisted bookkeeping, an `Operation` enum, an `Invariant` enum, an `OpKind` enum of the data-free operation kinds, and `apply` / `generate_op` / `check`). Generation is decomposed: `generate_op(rng, world, kind)` builds a random instance of one kind, and `generate` (a provided default, override only to bias the kind mix) picks a kind and calls it. The harness no longer builds the environment itself: each test builds its own `(Ctx, World)` (deploy, prime the model, set up op preconditions) and loads it into a mode-typed runner with `r.setup(ctx, world)`. The runner sits on top of the env, it does not replace it. That one harness then drives several runner types:
-
-| Runner | What it does | Reach for it when |
-| --- | --- | --- |
-| `FuzzRunner::run(ops, kinds, check_every)` | One short random sequence over the loaded world, drawing from all kinds (`None`) or a restricted subset | The input space is large and you want random exploration of operation interleavings |
-| `InvariantRunner::run(ops, None, check_every)` | One long persisted sequence, invariants checked along the way | A stateful sequence must keep a property true (model matches chain, no bad debt) |
-| `EnduranceRunner::run(EnduranceConfig)` | Random ops at random wall clock delays with block progression, then a final sweep | Soak testing for drift, time, or block height dependent bugs |
-| `ScenarioRunner::run_case` / `run_scenario` (rstest) | One concrete op or sequence | Exhaustive coverage of a small grid (for example chain x chain) via `#[rstest] #[values(..)]` |
-| `ScenarioRunner::replay(history)` | Re runs a recorded failing sequence deterministically | Turning a fuzz failure into a regression test |
-
-The runner contributes deterministic seeding (read it back with `r.seed()` to vary setup per case), the op count, and the random op stream. It does not mutate operation fields itself: what gets randomized is whatever your `generate_op` writes (fill fields with `rng.range(..)`, or derive `Arbitrary` and call `sample_arbitrary` for full field fuzzing). Invariants whose precondition has not happened yet return `CheckOutcome::Skipped` instead of failing.
-
-The fuzz, invariant, and endurance runs are written as attribute macros that inject a seeded, mode-typed runner shell into a `#[runner]` argument. You write the setup, the `run(..)` call, and the asserts in the body. `#[fuzz_runner]` fans the test out into one `#[tokio::test]` per case (parallel, individually named, filterable, reproducible by seed):
-
-```rust
-#[fuzz_runner(harness = CounterHarness, seed = 7, cases = 64)]
-async fn counter_fuzz(#[runner] mut r: FuzzRunner<CounterHarness>) {
-    let (ctx, world) = counter_setup(r.seed()).await.expect("setup");
-    r.setup(ctx, world);
-    let report = r.run(25, None, 1).await;
-    assert!(report.passed(), "{:?}", report.failure);
-}
-// -> tests counter_fuzz_case_0 .. counter_fuzz_case_63, each its own setup and one fuzz sequence
+```toml
+[dev-dependencies]
+cross-vm-framework = { path = "crates/framework" }
+tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
-The case count is a compile-time choice (Rust freezes its test list before running), and case `i` is seeded by `sub_seed(seed, i)`, so a flagged case re-runs in isolation by name. `#[invariant_runner]` and `#[endurance_runner]` emit a single test each. A negative seed (`seed = -1`) picks a fresh random seed per run and prints it, so a failure stays reproducible by copying the printed value back as a fixed `seed`.
-
-In the example crate the heavier runs are opt-in so the default `cargo test` stays fast: the fuzz, invariant, and endurance harness tests sit behind the `fuzz`, `invariant`, and `endurance` cargo features respectively, while the scenario (rstest matrix) tests and the runner-mechanics self-tests always run. Enable a category with `cargo test -p cross-vm-integration-tests --test harness --features fuzz` (or the `make test-fuzz` / `test-invariant` / `test-endurance` / `test-harness-all` targets).
-
-Rule of thumb: reach for `MultiChainEnv` first. Promote to a `Harness` once you find yourself wanting to assert the same property over many different sequences, or want fuzz, soak, or replay coverage. See `examples/integration-tests/tests/harness/` for a multi chain counter, a DeFi vault, and the runner mechanics.
+Everything is `async` and the mock backends are not `Send`, so run on a current thread runtime: `#[tokio::test]` (current thread by default) or `#[tokio::main(flavor = "current_thread")]`. The library crates define `async fn`s but pull in no runtime; `tokio` is a dev dependency.
 
 ## Quickstart
 
@@ -106,30 +70,168 @@ async fn main() {
 }
 ```
 
-The same shape works for `cross_vm_solidity::chains::ETHEREUM` and `cross_vm_solana::chains::SOLANA_DEVNET`. Runnable versions live in each crate's `examples/` (`cargo run -p cross-vm-cosmwasm --example cosmwasm_quickstart`).
+The same shape works for `cross_vm_solidity::chains::ETHEREUM` and `cross_vm_solana::chains::SOLANA_DEVNET`. Runnable versions live in each crate's `examples/`:
 
-Predefined chains include `OSMOSIS`, `JUNO`, `NEUTRON`, `COSMOS_HUB` (CosmWasm); `ETHEREUM`, `ARBITRUM`, `OPTIMISM`, `BASE`, `POLYGON` (EVM); `SOLANA_MAINNET`, `SOLANA_DEVNET`, `SOLANA_TESTNET`, `SOLANA_LOCALNET` (Solana).
+```
+cargo run -p cross-vm-cosmwasm --example cosmwasm_quickstart
+cargo run -p cross-vm-solidity --example evm_quickstart
+cargo run -p cross-vm-solana   --example solana_quickstart
+```
+
+Predefined chains include `OSMOSIS`, `JUNO`, `NEUTRON`, `COSMOS_HUB`, `CW_LOCAL` (CosmWasm); `ETHEREUM`, `ARBITRUM`, `OPTIMISM`, `BASE`, `POLYGON`, `EVM_LOCAL` (EVM); `SOLANA_MAINNET`, `SOLANA_DEVNET`, `SOLANA_TESTNET`, `SOLANA_LOCALNET` (Solana). Each carries `.mock(wallets)` and `.rpc(wallets)` constructors (the RPC endpoint is part of the chain preset).
+
+## MultiChainEnv: many chains, one simulation
+
+`MultiChainEnv` models a chain simulation with two phases. During setup you inject chains and declare funding; `start()` applies the plan and enters the running phase, where only chain execution is allowed (funding and injection are gone at the type level).
+
+```rust
+use std::rc::Rc;
+use cross_vm_framework::prelude::*;
+
+let wallets = Rc::new(WalletFactory::from_roster(&[]).unwrap());
+let mut env = MultiChainEnv::new("swap-test", wallets.clone());
+env.inject("osmosis", AnyChain::from(OSMOSIS.mock(wallets.clone())));
+env.inject("eth", AnyChain::from(ETHEREUM.mock(wallets.clone())));
+
+let cw_alice  = env.cosmwasm("osmosis").unwrap().new_account("alice").await;
+let evm_alice = env.evm("eth").unwrap().new_account("alice").await;
+// Testing funds native balances only. The asset is a raw denom string (the bank denom
+// on CosmWasm; ignored on EVM/Solana, which each have a single native coin).
+env.fund("osmosis", &cw_alice, "uosmo", 1_000_000u128).unwrap();
+env.fund("eth", &evm_alice, "eth", cross_vm_solidity::U256::from(5u64)).unwrap();
+
+let mut env = env.start().await.unwrap();       // running phase
+let bal = env.cosmwasm("osmosis").unwrap().balance(&cw_alice).await.unwrap();
+// Accessing a label that was never injected returns Err(EnvError::UnknownChain):
+assert!(env.solana("sol").is_err());
+// env.fund(...);  // compile error: not available once running
+```
+
+**Funding semantics.** Native assets mock mint the shortfall. Token assets (cw20/erc20/SPL) are validated against the real on chain balance (you mint them by deploying the token during setup). On all three RPC providers, native funding validates rather than mints (a live chain cannot mint): it reads the real balance and reports a `Shortfall` if the account is underfunded. Token RPC funding paths return `Unimplemented`.
+
+## Cross VM contracts: one wrapper, three VMs
+
+The headline feature. To drive one contract across CosmWasm, EVM, and Solana from a single test, declare its logical methods in a spec trait and apply `#[cross_vm_contract(StructName)]`. The macro generates the wrapper struct, its `new` / `instance` constructors, the `on_before` / `on_after` hook forwarders, and a dispatcher per method that matches the chain's VM and calls the matching `cw_*` / `evm_*` / `svm_*` hook. You write only the per VM hooks.
+
+```rust
+use cross_vm_framework::prelude::*;
+
+// Declare logical methods once. Return types are the bare Ok type (the macro wraps each in
+// Result<_, CrossVmError>). A method returning AppResponse<_> fires before/after hooks;
+// a query like `count -> u64` is a plain dispatch.
+#[cross_vm_contract(Counter)]
+pub trait CounterSpec {
+    async fn setup(&self, wallet: &str);
+    async fn increment(&self, wallet: &str) -> AppResponse<()>;
+    async fn count(&self) -> u64;
+}
+
+// Write only the per VM hooks. The macro generated `struct Counter { base: ContractBase }`
+// and the dispatchers that call these.
+impl Counter {
+    async fn cw_increment(&self, wallet: &str) -> Result<AppResponse<()>, CrossVmError> {
+        let chain = self.base.cosmwasm()?;          // typed handle, WrongVm on mismatch
+        let addr  = self.base.cw_addr()?;           // typed deployed address
+        let raw = chain.contract(addr).increment(wallet).await?;   // typed call (see below)
+        Ok(AppResponse::cosmwasm((), raw))          // typed payload + raw per-VM result
+    }
+    // evm_increment / svm_increment own their native encoding the same way.
+}
+```
+
+A call site brings the spec trait into scope (`use ...::CounterSpec;`) to reach the dispatchers; the inherent `new` / `instance` / `on_*` need no import. Recover native types inside a hook with `self.base.cosmwasm()? / evm()? / solana()?` for the chain and `self.base.cw_addr()? / evm_addr()? / svm_addr()?` for the deployed address. A VM you do not support returns `CrossVmError::unimplemented(kind, "...")` from that arm.
+
+**Typed CosmWasm calls.** Instead of hand building `ExecuteMsg` / `query_wasm_smart`, derive `CwExecuteFns` / `CwQueryFns` on the contract's message enums (behind a `cross-vm` feature so the wasm build stays clean):
+
+```rust
+#[derive(Serialize, Deserialize, /* ... */)]
+#[cfg_attr(feature = "cross-vm", derive(cross_vm_macros::CwExecuteFns))]
+pub enum ExecuteMsg {
+    Increment {},
+    Reset {},
+}
+
+#[derive(Serialize, Deserialize, /* ... */)]
+#[cfg_attr(feature = "cross-vm", derive(cross_vm_macros::CwQueryFns))]
+pub enum QueryMsg {
+    #[cfg_attr(feature = "cross-vm", returns(CountResponse))]
+    GetCount {},
+}
+```
+
+That emits `ExecuteMsgFns` / `QueryMsgFns` traits implemented for `CwContract`, one typed `async fn` per variant: `chain.contract(addr).increment(wallet)` and `chain.contract(addr).get_count()`. Query variants need `#[returns(T)]`; a variant marked `#[payable]` gains a trailing `funds: &[Coin]` arg. EVM gets typed calls from `alloy::sol!`; Solana has no schema, so its hooks stay hand written.
+
+**Transaction hooks.** A wrapper can run side logic (an indexer, a bridge relay, an event listener) before and after each transaction. Register with `on_before` / `on_after`; the dispatcher fires them around the per VM execution. An after hook receives the uniform `AppResponse`, so it reacts to the result independent of the VM:
+
+```rust
+counter.on_after(|ctx| {
+    println!("{} on {:?} -> {:?}", ctx.label(), ctx.kind(), ctx.transaction_hash());
+    Ok(())
+});
+```
+
+Hooks are synchronous `FnMut` (the runtime is current thread, so async side effects flow through a channel or an `Rc<RefCell<_>>` the closure drains later). The first `Err` aborts: a before `Err` stops the transaction; an after `Err` becomes the method's error. Events are exposed per VM (`cosmwasm_events()` / `evm_logs()` / `solana_logs()`) because the shapes do not unify.
+
+See `examples/integration-tests/tests/support/counter.rs` for the full three VM wrapper, and `DEVELOPER.md` for the complete hook reference.
+
+## Two ways to write a test
+
+Both run on the same chains. The difference is who drives the operations.
+
+Use **`MultiChainEnv` directly** when the test is a fixed storyline you write out by hand: inject the chains, fund, `start()`, then run a known sequence of calls and assert the exact end state. This is the right tool for "does this specific cross VM flow work" (deploy here, call there, assert balances on a third chain). Every step and assertion is explicit and the failure points straight at the line that broke. See `examples/integration-tests/tests/cross_vm/`.
+
+Use the **`Harness` runner** when you want a property checked across *many* sequences you did not write by hand. See [Property testing harness](#property-testing-harness) below.
+
+Rule of thumb: reach for `MultiChainEnv` first. Promote to a `Harness` once you find yourself wanting to assert the same property over many different sequences, or want fuzz, soak, or replay coverage.
+
+A worked cross VM flow, a CosmWasm/EVM ping pong relayer driven through one `MultiChainEnv`, lives at `examples/integration-tests/tests/cross_vm/ping_pong.rs` (with a narrative in `examples/PING_PONG.md`).
+
+## Property testing harness
+
+You implement one `Harness` (a `World` of persisted bookkeeping, an `Operation` enum, an `Invariant` enum, an `OpKind` enum of the data free operation kinds, and `apply` / `generate_op` / `check`). Generation is decomposed: `generate_op(rng, world, kind)` builds a random instance of one kind, and `generate` (a provided default) picks a kind and calls it. Each test builds its own `(Ctx, World)` (deploy, prime the model, set up op preconditions) and loads it into a mode typed runner with `r.setup(ctx, world)`. The runner sits on top of the env, it does not replace it.
+
+That one harness then drives several runner types:
+
+| Runner | What it does | Reach for it when |
+| --- | --- | --- |
+| `FuzzRunner::run(ops, kinds, check_every)` | One short random sequence over the loaded world, drawing from all kinds (`None`) or a restricted subset | The input space is large and you want random exploration of operation interleavings |
+| `InvariantRunner::run(ops, None, check_every)` | One long persisted sequence, invariants checked along the way | A stateful sequence must keep a property true (model matches chain, no bad debt) |
+| `EnduranceRunner::run(EnduranceConfig)` | Random ops at random wall clock delays with block progression, then a final sweep | Soak testing for drift, time, or block height dependent bugs |
+| `ScenarioRunner::run_case` / `run_scenario` (rstest) | One concrete op or sequence | Exhaustive coverage of a small grid (chain x chain) via `#[rstest] #[values(..)]` |
+| `ScenarioRunner::replay(history)` | Re runs a recorded failing sequence deterministically | Turning a fuzz failure into a regression test |
+
+The fuzz, invariant, and endurance runs are attribute macros that inject a seeded, mode typed runner shell into a `#[runner]` argument. You write the setup, the `run(..)` call, and the asserts in the body. `#[fuzz_runner]` fans the test out into one `#[tokio::test]` per case (parallel, individually named, filterable, reproducible by seed):
+
+```rust
+#[fuzz_runner(harness = CounterHarness, seed = 7, cases = 64)]
+async fn counter_fuzz(#[runner] mut r: FuzzRunner<CounterHarness>) {
+    let (ctx, world) = counter_setup(r.seed()).await.expect("setup");
+    r.setup(ctx, world);
+    let report = r.run(25, None, 1).await;
+    assert!(report.passed(), "{:?}", report.failure);
+}
+// -> counter_fuzz_case_0 .. counter_fuzz_case_63, each its own setup and one fuzz sequence
+```
+
+Case `i` is seeded by `sub_seed(seed, i)`, so a flagged case re-runs in isolation by name. `#[invariant_runner]` and `#[endurance_runner]` emit a single test each. A negative seed (`seed = -1`) picks a fresh random seed per run and prints it, so a failure stays reproducible by copying the printed value back as a fixed `seed`.
+
+In the example crate the heavier runs are opt in so the default `cargo test` stays fast: the fuzz, invariant, and endurance tests sit behind the `fuzz`, `invariant`, and `endurance` cargo features, while the scenario (rstest matrix) tests and the runner mechanics self tests always run. See `examples/integration-tests/tests/harness/` for a multi chain counter, a DeFi vault, and the runner mechanics.
 
 ## Wallets
 
-Mnemonics are the only secret, and they live in a `.env` (gitignored). Everything else, the
-wallet roster (labels, account indices, how each wallet sources its key), is a compile-time const
-built with `define_wallet_roster!`, resolved by a single shared `WalletFactory`. Each roster row
-picks one source: `env_mnemonic("VAR")` (read a BIP-39 phrase from an env var), `auto` (generate a
-fresh random mnemonic at build time, for mock chains), or `env_private_key("VAR")` (read a raw
-VM-native key). The factory reads named variables straight from the process environment, so load
-the `.env` first (e.g. `dotenvy::from_path(".env")`); a missing variable is a hard error.
+Mnemonics are the only secret, and they live in a `.env` (gitignored). Everything else, the wallet roster (labels, account indices, how each wallet sources its key), is a compile time const built with `define_wallet_roster!`, resolved by a single shared `WalletFactory`. Each roster row picks one source:
 
-Copy `.env.example` to `.env` and fill in your mnemonics. An all-`auto` roster (or the empty
-`&[]` roster used in the quickstarts) needs no `.env` at all. See
-`crates/framework/examples/wallet_quickstart.rs` for a derive-sign-broadcast walkthrough.
+* `env_mnemonic("VAR")`: read a BIP-39 phrase from an env var.
+* `auto`: generate a fresh random mnemonic at build time (for mock chains).
+* `env_private_key("VAR")`: read a raw VM native key.
+
+The factory reads named variables straight from the process environment, so load the `.env` first (`dotenvy::from_path(".env")`); a missing variable is a hard error. Every broadcast goes through the `WalletFactory` by label under a per wallet async lock, so one wallet never sends two transactions at once and cannot collide on its nonce or account sequence. Per ecosystem HD derivation uses coin types 118 / 60 / 501 (CosmWasm / EVM / Solana).
+
+Copy `.env.example` to `.env` and fill in your mnemonics. An all `auto` roster (or the empty `&[]` roster used in the quickstarts) needs no `.env` at all. See `crates/framework/examples/wallet_quickstart.rs` for a derive, sign, broadcast walkthrough.
 
 ## Live RPC providers
 
-Alongside the mock backends, each VM crate ships an RPC provider (`CwRpcProvider`,
-`EvmRpcProvider`, `SvmRpcProvider`) that talks to a real node over a URL you supply. They serve
-the live read paths today (and EVM write paths). Construction and a read flow are shown in the
-`*_rpc_quickstart` examples:
+Alongside the mock backends, each VM crate ships an RPC provider (`CwRpcProvider`, `EvmRpcProvider`, `SvmRpcProvider`) that talks to a real node at the endpoint baked into the chain preset (`OSMOSIS_TESTNET.rpc(wallets)`, and so on). All three serve live reads; CosmWasm and EVM also sign and broadcast writes (`store_code_wasm`/`instantiate`/`execute_contract` and `deploy_create`/`call`). Solana writes are not implemented yet. CosmWasm reads block height, native balance, and smart queries; EVM reads block number, native balance, and `eth_call`; Solana reads slot, lamport balance, and `getAccountInfo`. Construction and a read flow are shown in the `*_rpc_quickstart` examples:
 
 ```
 cargo run -p cross-vm-cosmwasm --example cosmwasm_rpc_quickstart
@@ -137,48 +239,75 @@ cargo run -p cross-vm-solidity --example evm_rpc_quickstart
 cargo run -p cross-vm-solana   --example solana_rpc_quickstart
 ```
 
+## Macros at a glance
+
+| Macro | Kind | Purpose |
+| --- | --- | --- |
+| `#[cross_vm_contract(Name)]` | attribute | Turn a spec trait into a contract wrapper that dispatches each method to the matching `cw_*` / `evm_*` / `svm_*` hook |
+| `#[derive(CwExecuteFns)]` | derive | Typed per variant `async fn` execute methods from a CosmWasm `ExecuteMsg` enum (`#[payable]` adds a `funds` arg) |
+| `#[derive(CwQueryFns)]` | derive | Typed per variant `async fn` query methods from a `QueryMsg` enum (each variant needs `#[returns(T)]`) |
+| `define_wallet_roster!` | function-like | Compile time wallet roster with typed `WalletLabel` fields |
+| `#[fuzz_runner]` | attribute | Fan a fuzz test into one `#[tokio::test]` per case with a seeded `FuzzRunner` |
+| `#[invariant_runner]` | attribute | One `#[tokio::test]` with a seeded `InvariantRunner` |
+| `#[endurance_runner]` | attribute | One `#[tokio::test]` with a seeded `EnduranceRunner` |
+
+Five are re-exported from `cross_vm_framework::prelude`. The two `Cw*Fns` derives are applied on a contract's message enums (often in a separate crate compiled to wasm), so they are named directly as `cross_vm_macros::CwExecuteFns` / `CwQueryFns` behind a `cross-vm` feature. The generated code names framework types unqualified, so any invocation site needs `use cross_vm_framework::prelude::*;` in scope.
+
+## Workspace layout
+
+```
+crates/
+  core/       cross-vm-core      shared ChainProvider / ChainSpec traits, ChainKind, CrossVmError, FundError
+  cosmwasm/   cross-vm-cosmwasm  CwMockProvider (cw-multi-test), CwRpcProvider (live reads), CwChain, CwAsset
+  solidity/   cross-vm-solidity  EvmMockProvider (revm), EvmRpcProvider (live reads), EvmChain, EvmAsset
+  solana/     cross-vm-solana    SvmMockProvider (litesvm), SvmRpcProvider (live reads), SvmChain, SvmAsset
+  macros/     cross-vm-macros    proc-macros: cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, runners
+  framework/  cross-vm-framework MultiChainEnv (umbrella over all VMs), the Harness runners, prelude
+```
+
+Dependency trees are isolated per crate, so building or testing one VM does not pull the others. Each VM crate carries a `chains` module with predefined chain constants. The `cross-vm-framework` crate re-exports everything and adds the multi chain `MultiChainEnv` and the property testing harness.
+
 ## Build and test
 
 ```
 cargo build --workspace
 cargo test  --workspace
-cargo run -p cross-vm-cosmwasm --example cosmwasm_quickstart
-cargo run -p cross-vm-solidity --example evm_quickstart
-cargo run -p cross-vm-solana   --example solana_quickstart
-cargo run -p cross-vm-framework --example env_quickstart
-cargo run -p cross-vm-framework --example wallet_quickstart
 ```
 
-The integration tests embed compiled contract artifacts, so build those first with `make compile`
-(or a single ecosystem: `make compile-cosmwasm` / `compile-solidity` / `compile-solana`), then run
-`make test`. The heavier harness modes are feature-gated to keep the default `cargo test` fast:
-enable them with `make test-fuzz` / `test-invariant` / `test-endurance` / `test-harness-all` (or
-`cargo test -p cross-vm-integration-tests --test harness --features "fuzz invariant endurance"`).
+The integration tests embed compiled contract artifacts, so build those first with `make compile` (or a single ecosystem: `make compile-cosmwasm` / `compile-solidity` / `compile-solana`), then run `make test`. A fresh checkout will not compile the integration tests until the artifacts exist:
 
-A worked cross-VM flow, a CosmWasm/EVM ping-pong relayer driven through one `MultiChainEnv`, lives
-at `examples/integration-tests/tests/cross_vm/ping_pong.rs`.
+* CosmWasm: the `examples/cosmwasm-contracts/*` crates are consumed as rlibs (no artifact build strictly needed for counter, but `make compile-cosmwasm` builds the wasm).
+* EVM: `sol!` parses the forge build JSON for the ABI and creation bytecode (`forge build`).
+* Solana: `include_bytes!` loads the `cargo-build-sbf` output (`.so`).
 
-See `SPEC.md` for the architecture, `DEVELOPER.md` for per crate details, and `CHANGELOG.md` for release notes.
+The heavier harness modes are feature gated to keep the default `cargo test` fast. Enable them with `make test-fuzz` / `test-invariant` / `test-endurance` / `test-harness-all`, or directly:
+
+```
+cargo test -p cross-vm-integration-tests --test harness --features "fuzz invariant endurance"
+```
+
+Other handy targets: `make test-cross-vm` (hand written flows), `make test-harness` (scenario matrices + mechanics), `make fmt`.
 
 ## Status (Supported / Planned)
 
 | Capability | CosmWasm | EVM | Solana | Notes |
 | --- | --- | --- | --- | --- |
-| Mock provider (in-process VM) | Supported | Supported | Supported | `cw-multi-test` / `revm` / `litesvm` |
+| Mock provider (in process VM) | Supported | Supported | Supported | `cw-multi-test` / `revm` / `litesvm` |
 | Live RPC reads | Supported | Supported | Supported | validated on `osmo-test-5`, Ethereum Sepolia, Solana Devnet |
-| Live RPC writes (deploy + call) | Planned | Supported | Planned | Cosmos/Solana return `Unimplemented`; signer already plumbed through |
-| Wallet derivation (mnemonic to signer) | Supported | Supported | Supported | coin types 118 / 60 / 501, per-wallet async broadcast lock |
-| Property `Harness` (fuzz / invariant / endurance / matrix) | Supported (VM-agnostic, runs over any injected chain) ||||
-| Broader cross-VM orchestration layer | Planned ||||
+| Live RPC writes (deploy + call) | Supported | Supported | Planned | CosmWasm/EVM sign and broadcast (CosmWasm deploy via `store_code_wasm` with compiled bytes); Solana writes return `Unimplemented`. `set_balance` is `Unimplemented` on every RPC backend (a live chain cannot mint) |
+| Wallet derivation (mnemonic to signer) | Supported | Supported | Supported | coin types 118 / 60 / 501, per wallet async broadcast lock |
+| Cross VM contract wrapper (`#[cross_vm_contract]`) | Supported | Supported | Supported | typed CosmWasm/EVM calls; Solana hooks hand written |
+| Property `Harness` (fuzz / invariant / endurance / matrix) | Supported (VM agnostic, runs over any injected chain) ||||
+| Broader cross VM orchestration layer | Planned ||||
 
-**Live RPC reads.** CosmWasm reads block height, native balance, and smart queries; EVM reads
-block number, native balance, and `eth_call`; Solana reads slot, lamport balance, and
-`getAccountInfo`.
+**Planned.** Solana live RPC writes (its mock coupled return types are being decoupled) and the broader cross VM orchestration layer above `MultiChainEnv`.
 
-**Wallets.** Mnemonics load from a `.env` (the only secret); the roster is a compile-time const
-and a per-ecosystem `WalletDeriver` turns a mnemonic plus HD path into that VM's signer. Every
-broadcast goes through the `WalletFactory` by label under a per-wallet async lock, so one wallet
-never sends two transactions at once and cannot collide on its nonce or account sequence.
+## Documentation
 
-**Planned.** Cosmos and Solana live-RPC writes (their mock-coupled return types are being
-decoupled) and the broader cross-VM orchestration layer above `MultiChainEnv`.
+* `SPEC.md`: architecture and design.
+* `DEVELOPER.md`: per crate details, the full contract wrapper and hook reference, and how to add a VM or chain.
+* `CHANGELOG.md`: release notes.
+
+## License
+
+MIT. See `LICENSE`.

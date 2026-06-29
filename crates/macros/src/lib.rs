@@ -57,13 +57,13 @@ pub fn derive_cw_execute_fns(item: TokenStream) -> TokenStream {
 
 /// Define a compile-time wallet roster and typed `WalletLabel` fields.
 ///
-/// See [`wallet_roster`] for the input DSL.
+/// See the `wallet_roster` module for the input DSL.
 #[proc_macro]
 pub fn define_wallet_roster(input: TokenStream) -> TokenStream {
     wallet_roster::expand(input.into()).into()
 }
 
-/// Fan a fuzz test out into one `#[tokio::test]` per case, injecting a seeded [`FuzzRunner`] shell.
+/// Fan a fuzz test out into one `#[tokio::test]` per case, injecting a seeded `FuzzRunner` shell.
 ///
 /// ```ignore
 /// #[fuzz_runner(harness = CounterHarness, seed = 7, cases = 64)]
@@ -76,7 +76,7 @@ pub fn define_wallet_roster(input: TokenStream) -> TokenStream {
 /// ```
 ///
 /// Emits `counter_fuzz_case_0` .. `counter_fuzz_case_63`, each seeded by `sub_seed(7, i)`. The
-/// developer writes setup in the body; see [`runner_macros`] for the attribute keys and the scope
+/// developer writes setup in the body; see the `runner_macros` module for the attribute keys and the scope
 /// requirement (`use cross_vm_framework::prelude::*`).
 #[proc_macro_attribute]
 pub fn fuzz_runner(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -86,7 +86,7 @@ pub fn fuzz_runner(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Emit one `#[tokio::test]` that injects a seeded [`InvariantRunner`] shell.
+/// Emit one `#[tokio::test]` that injects a seeded `InvariantRunner` shell.
 ///
 /// ```ignore
 /// #[invariant_runner(harness = VaultHarness, seed = 42)]
@@ -105,7 +105,7 @@ pub fn invariant_runner(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Emit one `#[tokio::test]` that injects a seeded [`EnduranceRunner`] shell.
+/// Emit one `#[tokio::test]` that injects a seeded `EnduranceRunner` shell.
 ///
 /// ```ignore
 /// #[endurance_runner(harness = CounterHarness, seed = 1)]

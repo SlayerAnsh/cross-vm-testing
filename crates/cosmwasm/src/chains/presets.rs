@@ -1,6 +1,7 @@
 //! Predefined CosmWasm chains.
 //!
-//! Use them as `CwMockProvider::new(OSMOSIS)` or `OSMOSIS.mock()`.
+//! Use them as `CwMockProvider::new(OSMOSIS, wallets)` or `OSMOSIS.mock(wallets)`, where
+//! `wallets` is the shared `Rc<WalletFactory>`.
 
 use super::info::CosmosChainInfo;
 
