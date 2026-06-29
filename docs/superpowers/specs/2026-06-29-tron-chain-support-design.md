@@ -20,10 +20,13 @@ on several axes that matter for faithful testing:
   20-byte hex.
 * Resource model is energy plus bandwidth (energy comes from frozen TRX, bandwidth
   is a daily free allowance), not a single gas counter.
-* Precompiles differ: a TRC10 token system contract, ed25519 verification, and Tron
-  multisig precompiles (`validatemultisign`, `batchvalidatesign`). No `ecrecover` in
-  the Ethereum sense.
-* CREATE / CREATE2 address derivation differs from Ethereum.
+* Signatures use secp256k1 ECDSA, the same curve as Ethereum (a common point of
+  confusion: Tron does NOT use ed25519 for accounts). So `ecrecover` works as-is.
+  The real precompile deltas are the TRC-60 `validatemultisign` multisig precompile
+  at `0x0a` and the TIP-272 offset precompiles (`ripemd160` at `0x20003`, `blake2f`
+  at `0x20009`), plus TRC10 token access via Tron-specific opcodes.
+* CREATE / CREATE2 address derivation differs from Ethereum (different hash input and
+  a `0x41` prefix instead of `0xff`).
 * Token standards: TRC20 (ERC20-shaped, same `balanceOf` selector) plus TRC10
   (native multi-asset, different interface).
 * There is no in-process Rust TVM. `java-tron` is a JVM node, so there is no
@@ -130,21 +133,40 @@ while every surface that a test sees is a correct Tron address. It resolves the
 Deterministic, in-process backend. The property harness runs against this.
 
 1. **Execution.** `revm` over the inner 20-byte address, same core as the EVM mock.
-2. **Precompiles.** A custom precompile registry injected into `revm`:
-   * ed25519 signature verification (replacing Ethereum `ecrecover` semantics),
-   * the TRC10 token system contract at its fixed address,
-   * `validatemultisign` and `batchvalidatesign`.
-3. **CREATE / CREATE2.** TVM address-derivation formula, so a contract deployed on
-   the mock receives the address real Tron would assign. This makes mock addresses
-   consistent with the RPC backend and with hardcoded expectations in tests.
+2. **Precompiles.** A custom precompile registry injected into `revm`. `ecrecover`
+   is kept (Tron is secp256k1, same as Ethereum). Added / relocated:
+   * TRC-60 `validatemultisign` at `0x0a` (max 5 sigs, ECDSA recovery, 1500 energy
+     per signature),
+   * TIP-272 offset precompiles `ripemd160` at `0x20003` and `blake2f` at `0x20009`,
+   * TRC10 token access (`tokenBalance` / `transferToken`), exposed via the
+     Tron-specific opcodes `TOKENBALANCE` (0xD1) and `CALLTOKEN` (0xD0) rather than a
+     fixed-address contract.
+3. **CREATE / CREATE2.** TVM derivation, so a mock-deployed contract gets the address
+   real Tron would assign:
+   * CREATE: `0x41 || keccak256(tx_hash || nonce)[12..32]`, where nonce is a
+     per-root-call sequence starting at 1 (NOT Ethereum's
+     `keccak256(rlp(sender, nonce))`).
+   * CREATE2: `0x41 || keccak256(0x41 || caller || salt || keccak256(init_code))[12..32]`
+     (note `0x41` prefix, not EVM's `0xff`).
+   This keeps mock addresses consistent with the RPC backend and with hardcoded
+   expectations in tests.
 4. **Energy and bandwidth.** A provider-layer accounting shim, deliberately outside
    `revm`'s gas loop:
-   * freeze / unfreeze TRX to obtain energy,
-   * deduct bandwidth per transaction,
+   * freeze / unfreeze TRX (FreezeBalanceV2 / Stake 2.0) to obtain energy,
+   * deduct bandwidth per transaction (bandwidth = transaction size in bytes; 600
+     free units per account per day),
+   * use constant resource prices (energy 100 sun/unit, bandwidth 1000 sun/unit;
+     1 TRX = 1,000,000 sun) rather than the full network-pool distribution,
    * expose energy and bandwidth balances as Tron-crate methods for tests to assert.
    `revm`'s gas engine is left untouched. Determinism for fuzz, invariant, endurance,
    and replay is therefore preserved, because resource accounting does not enter the
-   execution loop.
+   execution loop. This is an approximation: per-opcode energy costs (e.g. SLOAD is
+   50 on TVM vs 800 on EVM) are NOT modeled; see Out of scope.
+5. **Block-context opcodes.** Adjust `revm` block-context results to TVM semantics:
+   `GASPRICE` / `BASEFEE` return the energy price, `DIFFICULTY` and `GASLIMIT` return
+   0, `COINBASE` returns the block proposer. The Tron-specific opcodes (`TOKENBALANCE`
+   0xD1, `CALLTOKEN` 0xD0, `FREEZE` 0xD5, `DELEGATERESOURCE` 0xDE) are added only as
+   needed for TRC10 and resource tests; the rest are out of scope for v1.
 
 ### TronRpcProvider (`provider/rpc.rs`)
 
@@ -160,12 +182,25 @@ Real `java-tron` broadcast (TransferContract, TriggerSmartContract, faucet fundi
 block polling) is an explicit later phase, tracked separately. Because writes are
 stubbed in v1, the endurance/replay limitations of an RPC backend do not bite yet.
 
+Design shape for that later phase, taken from the reference libraries (as inspiration
+only; not dependencies, see Reference implementations):
+
+* Transport gRPC-first via `java-tron` protobuf (`tonic` / `prost`), with an HTTP REST
+  fallback (TronGrid / FullNode). Both `tronic` and `tronz` are gRPC-first.
+* View reads through `TriggerConstantContract` (returns return-data plus energy
+  estimate, no state change).
+* Transaction construction via a fluent builder that fills TAPOS reference block,
+  expiration, and `fee_limit`, then signs and broadcasts. Skip the libraries' heavier
+  features (KMS / keystore, multisig flows, ABI codegen) for v1.
+
 ### TronDeriver (`wallet.rs`)
 
 * secp256k1 (same curve as EVM), so it reuses the standard BIP-44 account path
   `bip44_account_path(195, index)` from `crates/core/src/wallet.rs:184`.
 * SLIP-44 coin type 195.
-* Address encoding: `keccak256(pubkey)[12..]` -> prepend `0x41` -> base58check.
+* Address encoding: `keccak256(pubkey)[12..]` -> prepend `0x41` -> base58check, where
+  the checksum is the first 4 bytes of `sha256(sha256(0x41 || hash))`. Implemented
+  with generic crates (`bs58`, `sha2`, `sha3`, `k256`), not a Tron dependency.
 * Slots into the existing compile-time wallet roster and per-wallet broadcast lock,
   same as the other ecosystems.
 
@@ -196,11 +231,51 @@ Mainnet, Nile, Shasta.
   supported against a live node. In v1 this is academic because RPC writes are
   stubbed.
 
+## Reference implementations
+
+Two existing Rust Tron libraries were studied for the RPC and address work. Neither
+is taken as a dependency; they are inspiration and a cross-check on the protocol
+facts only.
+
+* `tronic` (https://github.com/39george/tronic): clean `TronAddress` (21-byte, base58
+  + hex duality), fluent transaction builders, gRPC provider with energy/bandwidth
+  query methods.
+* `tronz` (https://github.com/throgxyz/tronz): crate split
+  (primitives / signer / provider / contract), gRPC transport with per-call timeouts,
+  retries, and endpoint failover, Stake 2.0 support.
+
+Patterns mirrored: base58check via `bs58` + `sha2`, gRPC-first transport, builder for
+TAPOS / fee_limit, `TriggerConstantContract` for view reads. Patterns skipped for v1:
+KMS / keystore, multisig flows, ABI codegen, governance helpers.
+
+## Source citations for code comments
+
+Each mock component that reproduces real Tron behavior must carry a comment linking
+the authoritative source, so a future reader can verify the rule against the protocol.
+Required citations:
+
+| Code site | Cite in comment |
+|-----------|-----------------|
+| `TronAddress` base58check encode/decode | https://developers.tron.network/docs/account |
+| Wallet derivation (coin type 195, secp256k1) | https://github.com/tronprotocol/tips/issues/102 |
+| CREATE / CREATE2 derivation | https://github.com/tronprotocol/tips/issues/26 and https://developers.tron.network/docs/tvm |
+| `validatemultisign` precompile (0x0a) | https://github.com/tronprotocol/tips/blob/master/tip-60.md |
+| Offset precompiles (ripemd160 0x20003, blake2f 0x20009) | https://github.com/tronprotocol/tips/blob/master/tip-272.md |
+| TRC10 token opcodes / access | https://developers.tron.network/docs/trc10-transfer-in-smart-contracts |
+| Energy / bandwidth model and prices | https://developers.tron.network/docs/resource-model |
+| Block-context opcode differences (GASPRICE/BASEFEE/DIFFICULTY/GASLIMIT) | https://developers.tron.network/v4.4.0/docs/vm-vs-evm |
+| Per-opcode energy table | https://developers.tron.network/docs/opcodes |
+| RPC transport / tx builder shape | https://github.com/39george/tronic and https://github.com/throgxyz/tronz |
+
+Reference implementation for all of the above is `java-tron`
+(https://github.com/tronprotocol/java-tron).
+
 ## Testing
 
 * **Mock backend.** No network. Unit tests for: base58check round-trip, CREATE /
-  CREATE2 derivation against known Tron vectors, ed25519 precompile, energy
-  freeze/unfreeze accounting, bandwidth deduction, TRC20 deploy and `balanceOf`.
+  CREATE2 derivation against known Tron vectors, `validatemultisign` precompile
+  (secp256k1 ECDSA recovery), energy freeze/unfreeze accounting, bandwidth deduction,
+  TRC20 deploy and `balanceOf`.
   Property-harness smoke test (a short fuzz run) to confirm determinism.
 * **RPC backend.** Stub-parity tests asserting the `Unimplemented` / no-op contracts,
   mirroring the existing EVM and Solana RPC tests. No live node required in CI.
