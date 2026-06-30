@@ -2,6 +2,7 @@
 
 use crate::chain_spec::ChainSpec;
 use crate::error::CrossVmError;
+use crate::time::BlockTime;
 
 /// Chain-level simulation surface shared by every VM provider.
 ///
@@ -49,6 +50,6 @@ pub trait ChainProvider: Sized {
     /// Current block height / slot.
     async fn block_height(&self) -> u64;
 
-    /// Advance the chain by `n` blocks/slots.
-    async fn advance_blocks(&mut self, n: u64);
+    /// Advance the chain by `n` blocks/slots and set the new block timestamp per `time`.
+    async fn advance_blocks(&mut self, n: u64, time: BlockTime);
 }

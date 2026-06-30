@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use alloy_signer_local::PrivateKeySigner;
-use cross_vm_core::{ChainProvider, WalletFactory};
+use cross_vm_core::{BlockTime, ChainProvider, WalletFactory};
 use revm::context::result::{ExecutionResult, Output};
 use revm::context::{Context, TxEnv};
 use revm::context_interface::JournalTr;
@@ -56,7 +56,12 @@ impl EvmMockProvider {
         ctx.cfg.spec = info.spec_id;
         // A test harness should not fight nonce bookkeeping across many calls.
         ctx.cfg.disable_nonce_check = true;
-        let evm = ctx.with_db(InMemoryDB::default()).build_mainnet();
+        let mut evm = ctx.with_db(InMemoryDB::default()).build_mainnet();
+        // Start at block 1 (a 0 marker is indistinguishable from "unset" in contracts that record
+        // `pending[seq] = block.number`) and at the shared mock clock so cross-VM packet timeouts
+        // compare correctly against the cosmos chain.
+        evm.ctx.block.number = U256::from(1u64);
+        evm.ctx.block.timestamp = U256::from(cross_vm_core::MOCK_BLOCK_TIMESTAMP);
         Self {
             evm: Rc::new(RefCell::new(evm)),
             info,
@@ -111,10 +116,33 @@ impl EvmMockProvider {
         calldata: impl AsRef<[u8]>,
         from: &Address,
     ) -> Result<EvmExecution, EvmError> {
+        self.call_value(to, calldata, from, U256::ZERO).await
+    }
+
+    /// Execute a state-mutating call against `to` carrying `value` wei (a payable call), returning
+    /// its output plus emitted logs. The caller's balance is topped up to cover `value` first (the
+    /// mock mints native funds on demand, like [`ChainProvider::new_account`]).
+    pub async fn call_value(
+        &self,
+        to: &Address,
+        calldata: impl AsRef<[u8]>,
+        from: &Address,
+        value: U256,
+    ) -> Result<EvmExecution, EvmError> {
+        if !value.is_zero() {
+            let mut evm = self.evm.borrow_mut();
+            let db = evm.ctx.journaled_state.db_mut();
+            let mut info = db.basic_ref(*from).ok().flatten().unwrap_or_default();
+            if info.balance < value {
+                info.balance = value;
+                db.insert_account_info(*from, info);
+            }
+        }
         let tx = TxEnv::builder()
             .caller(*from)
             .chain_id(None)
             .call(*to)
+            .value(value)
             .data(Bytes::copy_from_slice(calldata.as_ref()))
             .gas_limit(TX_GAS_LIMIT)
             .build_fill();
@@ -233,7 +261,10 @@ impl ChainProvider for EvmMockProvider {
         self.evm.borrow().ctx.block.number.saturating_to::<u64>()
     }
 
-    async fn advance_blocks(&mut self, n: u64) {
-        self.evm.borrow_mut().ctx.block.number += U256::from(n);
+    async fn advance_blocks(&mut self, n: u64, time: BlockTime) {
+        let mut evm = self.evm.borrow_mut();
+        evm.ctx.block.number += U256::from(n);
+        let current = evm.ctx.block.timestamp.saturating_to::<u64>();
+        evm.ctx.block.timestamp = U256::from(time.apply(current));
     }
 }

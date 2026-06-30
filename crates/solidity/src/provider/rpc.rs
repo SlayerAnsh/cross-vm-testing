@@ -22,7 +22,7 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_signer_local::PrivateKeySigner;
-use cross_vm_core::{ChainProvider, FundError, WalletFactory};
+use cross_vm_core::{BlockTime, ChainProvider, FundError, WalletFactory};
 
 use crate::asset::EvmAsset;
 use crate::chains::EvmChainInfo;
@@ -169,9 +169,22 @@ impl EvmRpcProvider {
         calldata: impl AsRef<[u8]>,
         signer: &PrivateKeySigner,
     ) -> Result<EvmExecution, EvmError> {
+        self.call_value(to, calldata, signer, U256::ZERO).await
+    }
+
+    /// Execute a state-mutating call against `to` carrying `value` wei (a payable call), signed by
+    /// `signer`. On a live chain the signer must already hold the value (no minting).
+    pub async fn call_value(
+        &self,
+        to: &Address,
+        calldata: impl AsRef<[u8]>,
+        signer: &PrivateKeySigner,
+        value: U256,
+    ) -> Result<EvmExecution, EvmError> {
         let provider = self.signing_provider(signer)?;
         let tx = TransactionRequest::default()
             .to(*to)
+            .value(value)
             .input(Bytes::copy_from_slice(calldata.as_ref()).into());
         let receipt = provider
             .send_transaction(tx)
@@ -242,7 +255,7 @@ impl ChainProvider for EvmRpcProvider {
         self.try_block_height().await.unwrap_or(0)
     }
 
-    async fn advance_blocks(&mut self, _n: u64) {
+    async fn advance_blocks(&mut self, _n: u64, _time: BlockTime) {
         // No-op: a real chain advances on its own; tests poll instead of forcing blocks.
     }
 }

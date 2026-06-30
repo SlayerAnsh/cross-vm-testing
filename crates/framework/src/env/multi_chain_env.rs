@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use cross_vm_core::WalletFactory;
+use cross_vm_core::{BlockTime, WalletFactory};
 use cross_vm_cosmwasm::CwChain;
 use cross_vm_solana::SvmChain;
 use cross_vm_solidity::EvmChain;
@@ -63,14 +63,15 @@ impl<S> MultiChainEnv<S> {
     }
 
     /// Advance every injected chain by `n` blocks/slots between endurance operations so block
-    /// height progresses across the whole world.
+    /// height progresses across the whole world. The block timestamp advances by `n` seconds on
+    /// every VM, so all chains stay on the same clock and cross-VM packet timeouts compare correctly.
     ///
     /// On mock backends this forces `n` blocks; on RPC backends `advance_blocks` is a no-op (a
     /// live chain advances on its own), so the endurance loop simply paces against real block
     /// production instead of forcing it.
     pub async fn advance_all(&mut self, n: u64) {
         for chain in self.chains.values_mut() {
-            chain.advance_blocks(n).await;
+            chain.advance_blocks(n, BlockTime::Increment(n)).await;
         }
     }
 

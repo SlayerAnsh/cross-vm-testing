@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use crate::chains::{ETHEREUM, LOCAL};
 use alloy_primitives::U256;
-use cross_vm_core::{ChainProvider, ChainSpec, WalletFactory};
+use cross_vm_core::{BlockTime, ChainProvider, ChainSpec, WalletFactory};
 
 fn empty_wallets() -> Rc<WalletFactory> {
     Rc::new(WalletFactory::from_roster(&[]).unwrap())
@@ -39,7 +39,7 @@ async fn set_and_read_balance() {
 async fn blocks_advance() {
     let mut chain = LOCAL.mock(empty_wallets());
     let h0 = chain.block_height().await;
-    chain.advance_blocks(5).await;
+    chain.advance_blocks(5, BlockTime::Increment(1)).await;
     assert_eq!(chain.block_height().await, h0 + 5);
 }
 

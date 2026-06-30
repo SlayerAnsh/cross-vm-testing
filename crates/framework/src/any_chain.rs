@@ -1,6 +1,6 @@
 //! Heterogeneous storage for chains of different VMs.
 
-use cross_vm_core::{ChainKind, ChainProvider};
+use cross_vm_core::{BlockTime, ChainKind, ChainProvider};
 use cross_vm_cosmwasm::{CwChain, CwMockProvider, CwRpcProvider};
 use cross_vm_solana::{SvmChain, SvmMockProvider, SvmRpcProvider};
 use cross_vm_solidity::{EvmChain, EvmMockProvider, EvmRpcProvider};
@@ -67,12 +67,12 @@ impl AnyChain {
     ///
     /// Forwards to the VM provider's [`ChainProvider::advance_blocks`]. The harness `advance`
     /// hook calls this on every chain it holds so time progresses uniformly.
-    pub async fn advance_blocks(&mut self, n: u64) {
+    pub async fn advance_blocks(&mut self, n: u64, time: BlockTime) {
         match self {
-            AnyChain::CosmWasm(c) => c.advance_blocks(n).await,
-            AnyChain::Evm(c) => c.advance_blocks(n).await,
-            AnyChain::Svm(c) => c.advance_blocks(n).await,
-            AnyChain::Tron(c) => c.advance_blocks(n).await,
+            AnyChain::CosmWasm(c) => c.advance_blocks(n, time).await,
+            AnyChain::Evm(c) => c.advance_blocks(n, time).await,
+            AnyChain::Svm(c) => c.advance_blocks(n, time).await,
+            AnyChain::Tron(c) => c.advance_blocks(n, time).await,
         }
     }
 }

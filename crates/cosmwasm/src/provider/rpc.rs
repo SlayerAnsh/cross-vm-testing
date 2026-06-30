@@ -30,7 +30,7 @@ use cosmrs::tendermint::abci::Event as TmEvent;
 use cosmrs::tx::{Body, Fee, Msg, SignDoc, SignerInfo};
 use cosmrs::{AccountId, Coin as CosmrsCoin, Denom};
 use cosmwasm_std::{Addr, Coin, Event};
-use cross_vm_core::{ChainProvider, FundError, WalletFactory};
+use cross_vm_core::{BlockTime, ChainProvider, FundError, WalletFactory};
 use cw_multi_test::IntoBech32;
 use prost::Message;
 
@@ -444,7 +444,7 @@ impl ChainProvider for CwRpcProvider {
         self.try_block_height().await.unwrap_or(0)
     }
 
-    async fn advance_blocks(&mut self, _n: u64) {
+    async fn advance_blocks(&mut self, _n: u64, _time: BlockTime) {
         // No-op: a real chain advances on its own; tests poll instead of forcing blocks.
     }
 }
