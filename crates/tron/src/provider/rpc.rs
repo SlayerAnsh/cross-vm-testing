@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use alloy_primitives::{Address, Bytes, Log, LogData, B256};
 use alloy_signer_local::PrivateKeySigner;
-use cross_vm_core::{ChainProvider, WalletFactory};
+use cross_vm_core::{BlockTime, ChainProvider, WalletFactory};
 use serde_json::{json, Value};
 
 use crate::chains::TronChainInfo;
@@ -411,7 +411,7 @@ impl ChainProvider for TronRpcProvider {
         self.try_block_height().await.unwrap_or(0)
     }
 
-    async fn advance_blocks(&mut self, _n: u64) {
+    async fn advance_blocks(&mut self, _n: u64, _time: BlockTime) {
         // No-op: a real chain advances on its own; tests poll instead of forcing blocks.
     }
 }

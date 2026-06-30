@@ -24,7 +24,7 @@ use std::sync::OnceLock;
 
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_signer_local::PrivateKeySigner;
-use cross_vm_core::{ChainProvider, WalletFactory};
+use cross_vm_core::{BlockTime, ChainProvider, WalletFactory};
 use revm::context::result::{ExecutionResult, Output};
 use revm::context::{Context, TxEnv};
 use revm::context_interface::JournalTr;
@@ -316,8 +316,11 @@ impl ChainProvider for TronMockProvider {
         self.evm.borrow().ctx.block.number.saturating_to::<u64>()
     }
 
-    async fn advance_blocks(&mut self, n: u64) {
-        self.evm.borrow_mut().ctx.block.number += U256::from(n);
+    async fn advance_blocks(&mut self, n: u64, time: BlockTime) {
+        let mut evm = self.evm.borrow_mut();
+        evm.ctx.block.number += U256::from(n);
+        let current = evm.ctx.block.timestamp.saturating_to::<u64>();
+        evm.ctx.block.timestamp = U256::from(time.apply(current));
     }
 }
 
@@ -394,7 +397,7 @@ mod tests {
     async fn advance_blocks_moves_height() {
         let mut c = provider();
         let start = c.block_height().await;
-        c.advance_blocks(5).await;
+        c.advance_blocks(5, BlockTime::Increment(1)).await;
         assert_eq!(c.block_height().await, start + 5);
     }
 }

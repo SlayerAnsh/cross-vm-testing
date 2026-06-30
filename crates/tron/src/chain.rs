@@ -12,7 +12,8 @@ use std::rc::Rc;
 use alloy_primitives::{Bytes, U256};
 use alloy_signer_local::PrivateKeySigner;
 use cross_vm_core::{
-    wallet_lock, ChainProvider, ChainSpec, FundError, WalletDeriver, WalletFactory, WalletLabel,
+    wallet_lock, BlockTime, ChainProvider, ChainSpec, FundError, WalletDeriver, WalletFactory,
+    WalletLabel,
 };
 use tokio::sync::OwnedMutexGuard;
 
@@ -275,10 +276,10 @@ impl ChainProvider for TronChain {
         }
     }
 
-    async fn advance_blocks(&mut self, n: u64) {
+    async fn advance_blocks(&mut self, n: u64, time: BlockTime) {
         match self {
-            TronChain::Mock(p) => p.advance_blocks(n).await,
-            TronChain::Rpc(p) => p.advance_blocks(n).await,
+            TronChain::Mock(p) => p.advance_blocks(n, time).await,
+            TronChain::Rpc(p) => p.advance_blocks(n, time).await,
         }
     }
 }
