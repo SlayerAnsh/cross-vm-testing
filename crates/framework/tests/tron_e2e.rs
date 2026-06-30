@@ -4,6 +4,7 @@
 
 use std::rc::Rc;
 
+use cross_vm_core::BlockTime;
 use cross_vm_framework::prelude::*;
 
 /// A trivial cross-VM contract whose per-VM hooks return a VM-distinct sentinel, so the value
@@ -46,6 +47,6 @@ async fn tron_mock_funds_and_advances_deterministically() {
     let acct = chain.new_account("alice").await;
     assert_eq!(acct.kind(), ChainKind::Tron);
     let h0 = chain.block_height().await;
-    chain.advance_blocks(5).await;
+    chain.advance_blocks(5, BlockTime::Increment(1)).await;
     assert_eq!(chain.block_height().await, h0 + 5);
 }

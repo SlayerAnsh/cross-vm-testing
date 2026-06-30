@@ -44,6 +44,9 @@ test-solidity:
 
 test-solana:
 	cargo test -p cross-vm-solana $(ARGS)
+	
+test-tron:
+	cargo test -p cross-vm-tron $(ARGS)
 
 # Example integration tests (cross-VM flows + the property-testing harness).
 test-examples:
