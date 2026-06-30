@@ -17,7 +17,7 @@ use std::str::FromStr;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use cross_vm_core::{ChainProvider, FundError, WalletFactory};
+use cross_vm_core::{BlockTime, ChainProvider, FundError, WalletFactory};
 use litesvm::types::TransactionMetadata;
 use serde_json::{json, Value};
 use solana_account::Account;
@@ -237,7 +237,7 @@ impl ChainProvider for SvmRpcProvider {
         self.try_block_height().await.unwrap_or(0)
     }
 
-    async fn advance_blocks(&mut self, _n: u64) {
+    async fn advance_blocks(&mut self, _n: u64, _time: BlockTime) {
         // No-op: a real cluster advances on its own; tests poll instead of forcing slots.
     }
 }

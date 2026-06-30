@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use cross_vm_core::{
-    wallet_lock, ChainProvider, ChainSpec, FundError, WalletDeriver, WalletFactory, WalletLabel,
+    wallet_lock, BlockTime, ChainProvider, ChainSpec, FundError, WalletDeriver, WalletFactory,
+    WalletLabel,
 };
 use litesvm::types::TransactionMetadata;
 use solana_account::Account;
@@ -249,10 +250,10 @@ impl ChainProvider for SvmChain {
         }
     }
 
-    async fn advance_blocks(&mut self, n: u64) {
+    async fn advance_blocks(&mut self, n: u64, time: BlockTime) {
         match self {
-            SvmChain::Mock(p) => p.advance_blocks(n).await,
-            SvmChain::Rpc(p) => p.advance_blocks(n).await,
+            SvmChain::Mock(p) => p.advance_blocks(n, time).await,
+            SvmChain::Rpc(p) => p.advance_blocks(n, time).await,
         }
     }
 }

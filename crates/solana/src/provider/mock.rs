@@ -8,11 +8,12 @@ use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use cross_vm_core::{ChainProvider, WalletFactory};
+use cross_vm_core::{BlockTime, ChainProvider, WalletFactory};
 use litesvm::types::TransactionMetadata;
 use litesvm::LiteSVM;
 use solana_account::Account;
 use solana_address::Address;
+use solana_clock::Clock;
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
 use solana_native_token::LAMPORTS_PER_SOL;
@@ -46,8 +47,14 @@ pub struct SvmMockProvider {
 impl SvmMockProvider {
     /// Build a fresh mock chain from a predefined [`SolanaChainInfo`].
     pub fn new(info: SolanaChainInfo, wallets: Rc<WalletFactory>) -> Self {
+        let mut svm = LiteSVM::new();
+        // Seed the shared mock clock so Solana agrees with the EVM and cosmos chains on time, so a
+        // cross-VM packet's timeout (stamped on one VM, checked on another) compares correctly.
+        let mut clock = svm.get_sysvar::<Clock>();
+        clock.unix_timestamp = cross_vm_core::MOCK_BLOCK_TIMESTAMP as i64;
+        svm.set_sysvar(&clock);
         Self {
-            svm: Rc::new(RefCell::new(LiteSVM::new())),
+            svm: Rc::new(RefCell::new(svm)),
             info,
             slot: Rc::new(Cell::new(0)),
             wallets,
@@ -158,9 +165,16 @@ impl ChainProvider for SvmMockProvider {
         self.slot.get()
     }
 
-    async fn advance_blocks(&mut self, n: u64) {
+    async fn advance_blocks(&mut self, n: u64, time: BlockTime) {
         let new_slot = self.slot.get() + n;
         self.slot.set(new_slot);
-        self.svm.borrow_mut().warp_to_slot(new_slot);
+        let mut svm = self.svm.borrow_mut();
+        // `warp_to_slot` rewrites the `Clock`, so advance the slot first, then override the
+        // timestamp per `time`.
+        svm.warp_to_slot(new_slot);
+        let mut clock = svm.get_sysvar::<Clock>();
+        let current = clock.unix_timestamp as u64;
+        clock.unix_timestamp = time.apply(current) as i64;
+        svm.set_sysvar(&clock);
     }
 }

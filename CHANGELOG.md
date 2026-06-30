@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added (native value calls, shared mock clock, timestamp-aware block advance)
+
+* `cross-vm-solidity`: `call_value(to, calldata, wallet, value)` on the EVM mock provider, RPC provider, and `EvmChain`. `call` now delegates with value `0`. On the mock the caller's balance is topped up to cover `value` (native funds are minted on demand), so a payable call needs no explicit funding step. On a live chain the signer must already hold the value.
+* `cross-vm-core`: `MOCK_BLOCK_TIMESTAMP` (1_767_225_600, 2026-01-01T00:00:00Z), the fixed block timestamp every mock VM starts at. The CosmWasm, EVM, and Solana mocks all seed their clock to it, so a cross-VM packet whose timeout is stamped on one chain and checked on another compares correctly (previously revm started near epoch 0 while cw-multi-test used a 2019-era default, so any timeout looked already expired across VMs). The EVM mock also starts at `block.number = 1` so a `0` height is distinguishable from "unset" in contracts that record `pending[seq] = block.number`.
+* `cross-vm-core`: `BlockTime` enum (`Custom(u64)`, `Now`, `Increment(u64)`) governing how a block advance sets the new block timestamp. `ChainProvider::advance_blocks` now takes `(n, time)`: `n` advances height/slot as before, and `time` sets the clock (`Custom` to an exact unix-seconds value, `Now` to wall-clock time, `Increment` by N seconds from the current timestamp). All three mocks apply it uniformly, so the harness can move every chain's clock in lockstep. RPC backends ignore both arguments (a live chain advances on its own).
+
 ### Changed (endurance: RPC-safe block advance, base + jitter inter-op delay)
 
 * `cross-vm-framework`: `EnduranceConfig` gains a `base_delay` knob (builder `base_delay(d)`). The inter-op wall-clock delay is now `base_delay + rand(0..=max_delay)`, so a test can guarantee a minimum spacing between operations instead of only a `0..=max` jitter. This makes the endurance mode usable against a live RPC cluster, where `advance_blocks` is a no-op (a real chain advances on its own) and pacing must come from the inter-op delay rather than forced blocks. Defaults to `Duration::ZERO`, preserving existing behavior.

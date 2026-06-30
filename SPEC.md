@@ -26,7 +26,7 @@ pub trait ChainSpec {
 }
 ```
 
-`ChainProvider` is the uniform **chain-level** provider surface. Associated types (`Address`, `Account`, `Balance`, `Error`) let each VM specialize while sharing account, balance, and block operations. Methods: `chain_info`, `new_account`, `balance`, `set_balance`, `block_height`, `advance_blocks`. `advance_blocks` forces blocks on mock backends and is a no-op on RPC backends (a live chain advances on its own).
+`ChainProvider` is the uniform **chain-level** provider surface. Associated types (`Address`, `Account`, `Balance`, `Error`) let each VM specialize while sharing account, balance, and block operations. Methods: `chain_info`, `new_account`, `balance`, `set_balance`, `block_height`, `advance_blocks`. `advance_blocks(n, time)` advances height/slot by `n` and sets the new block timestamp per the `BlockTime` policy (`Custom` for an exact unix-seconds value, `Now` for wall-clock time, `Increment` to add seconds to the current timestamp). It forces blocks on mock backends and is a no-op on RPC backends (a live chain advances on its own). Every mock seeds its clock to `MOCK_BLOCK_TIMESTAMP` so cross-VM packet timeouts compare correctly across VMs.
 
 Contract and program operations are **not** on `ChainProvider`. Each VM crate exposes idiomatic methods on its mock/RPC providers and chain enums:
 
