@@ -33,6 +33,16 @@ mod evm_vault {
     );
 }
 
+// ----- Tron: the same contract compiled by tronc (tronbox). The mock TVM runs this TVM-native
+// creation bytecode; the ABI matches the EVM build, so only BYTECODE is taken from here. -----
+mod tron_vault {
+    alloy::sol!(
+        #[sol(abi)]
+        Vault,
+        "../tron-contracts/build/Vault.json"
+    );
+}
+
 const VAULT_PROGRAM_ID: &str = "GFNizKSbcjBH7aTwPyyA3vnqfksjWEfci6fgWeCJ34GB";
 const VDISC_INITIALIZE: [u8; 8] = [175, 175, 109, 31, 13, 152, 155, 237];
 const VDISC_DEPOSIT: [u8; 8] = [242, 35, 198, 137, 82, 225, 242, 182];
@@ -103,6 +113,18 @@ impl Vault {
                 self.base.set_address(Account::Evm(addr));
                 Ok(())
             }
+            ChainKind::Tron => {
+                let chain = self.base.tron()?;
+                let addr = chain
+                    .deploy_create(
+                        tron_vault::Vault::BYTECODE.clone(),
+                        Bytes::new(),
+                        WalletLabel::wrap(wallet),
+                    )
+                    .await?;
+                self.base.set_address(Account::Tron(addr));
+                Ok(())
+            }
             ChainKind::Svm => {
                 let chain = self.base.solana()?;
                 let program_id = SvmAddress::from_str_const(VAULT_PROGRAM_ID);
@@ -131,6 +153,7 @@ impl Vault {
                 .await
             }
             ChainKind::Evm => self.evm_exec(wallet, evm_deposit(amount)).await,
+            ChainKind::Tron => self.tron_exec(wallet, evm_deposit(amount)).await,
             ChainKind::Svm => {
                 self.svm_ensure_init(wallet).await?;
                 self.svm_exec(wallet, &VDISC_DEPOSIT, amount).await
@@ -155,6 +178,7 @@ impl Vault {
                 .await
             }
             ChainKind::Evm => self.evm_exec(wallet, evm_withdraw(amount)).await,
+            ChainKind::Tron => self.tron_exec(wallet, evm_withdraw(amount)).await,
             ChainKind::Svm => self.svm_exec(wallet, &VDISC_WITHDRAW, amount).await,
         }
     }
@@ -176,6 +200,7 @@ impl Vault {
                 .await
             }
             ChainKind::Evm => self.evm_exec(wallet, evm_borrow(amount)).await,
+            ChainKind::Tron => self.tron_exec(wallet, evm_borrow(amount)).await,
             ChainKind::Svm => self.svm_exec(wallet, &VDISC_BORROW, amount).await,
         }
     }
@@ -193,6 +218,7 @@ impl Vault {
                 .await
             }
             ChainKind::Evm => self.evm_exec(wallet, evm_repay(amount)).await,
+            ChainKind::Tron => self.tron_exec(wallet, evm_repay(amount)).await,
             ChainKind::Svm => self.svm_exec(wallet, &VDISC_REPAY, amount).await,
         }
     }
@@ -202,6 +228,7 @@ impl Vault {
         match self.base.kind() {
             ChainKind::CosmWasm => self.cw_query_amount(wallet, true).await,
             ChainKind::Evm => self.evm_view_user(wallet, true).await,
+            ChainKind::Tron => self.tron_view_user(wallet, true).await,
             ChainKind::Svm => Ok(self.svm_read(wallet).await?.0),
         }
     }
@@ -211,6 +238,7 @@ impl Vault {
         match self.base.kind() {
             ChainKind::CosmWasm => self.cw_query_amount(wallet, false).await,
             ChainKind::Evm => self.evm_view_user(wallet, false).await,
+            ChainKind::Tron => self.tron_view_user(wallet, false).await,
             ChainKind::Svm => Ok(self.svm_read(wallet).await?.1),
         }
     }
@@ -275,6 +303,44 @@ impl Vault {
             let out = chain.static_call(&addr, cd).await?;
             Ok(evm_vault::Vault::debtOfCall::abi_decode_returns(&out)
                 .map_err(decode_err)?
+                .saturating_to::<u128>())
+        }
+    }
+
+    // ----- Tron (TVM runs EVM bytecode; reuse EVM bindings) -----
+    async fn tron_exec(
+        &self,
+        wallet: &str,
+        calldata: Bytes,
+    ) -> Result<AppResponse<()>, CrossVmError> {
+        let chain = self.base.tron()?;
+        let addr = self.base.tron_addr()?;
+        let exec = chain
+            .call(&addr, calldata, WalletLabel::wrap(wallet))
+            .await?;
+        Ok(AppResponse::tron((), exec.output, exec.logs))
+    }
+
+    async fn tron_view_user(&self, wallet: &str, collateral: bool) -> Result<u128, CrossVmError> {
+        use alloy::sol_types::SolCall;
+        let chain = self.base.tron()?;
+        let addr = self.base.tron_addr()?;
+        // The TVM mock runs EVM bytecode; the ABI call wants the inner 20-byte (EVM) address.
+        let who = chain
+            .wallet_address(WalletLabel::wrap(wallet))
+            .await?
+            .as_evm();
+        if collateral {
+            let cd = Bytes::from(evm_vault::Vault::collateralOfCall { who }.abi_encode());
+            let out = chain.static_call(&addr, cd).await?;
+            Ok(evm_vault::Vault::collateralOfCall::abi_decode_returns(&out)
+                .map_err(tron_decode_err)?
+                .saturating_to::<u128>())
+        } else {
+            let cd = Bytes::from(evm_vault::Vault::debtOfCall { who }.abi_encode());
+            let out = chain.static_call(&addr, cd).await?;
+            Ok(evm_vault::Vault::debtOfCall::abi_decode_returns(&out)
+                .map_err(tron_decode_err)?
                 .saturating_to::<u128>())
         }
     }
@@ -405,6 +471,13 @@ fn le_u64(data: &[u8], offset: usize) -> Result<u64, CrossVmError> {
 fn decode_err(e: impl core::fmt::Display) -> CrossVmError {
     CrossVmError::Query {
         kind: ChainKind::Evm,
+        reason: e.to_string(),
+    }
+}
+
+fn tron_decode_err(e: impl core::fmt::Display) -> CrossVmError {
+    CrossVmError::Query {
+        kind: ChainKind::Tron,
         reason: e.to_string(),
     }
 }

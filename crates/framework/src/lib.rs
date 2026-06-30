@@ -54,3 +54,4 @@ pub use cross_vm_core;
 pub use cross_vm_cosmwasm;
 pub use cross_vm_solana;
 pub use cross_vm_solidity;
+pub use cross_vm_tron;

@@ -16,6 +16,11 @@ examples/solana-contracts/.anchor/
 examples/cosmwasm-contracts/counter/target/
 examples/cosmwasm-contracts/vault/target/
 
+# Tron (Tronbox)
+examples/tron-contracts/generated/
+examples/tron-contracts/build/
+examples/tron-contracts/node_modules/
+
 # Example scripts (Rust build output)
 examples/scripts/target/
 

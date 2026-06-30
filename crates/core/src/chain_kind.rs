@@ -9,6 +9,8 @@ pub enum ChainKind {
     Evm,
     /// Solana (SVM) chains driven by `litesvm`.
     Svm,
+    /// Tron chains driven by a revm-based mock (TVM) or a java-tron RPC backend.
+    Tron,
 }
 
 impl core::fmt::Display for ChainKind {
@@ -17,6 +19,7 @@ impl core::fmt::Display for ChainKind {
             ChainKind::CosmWasm => "cosmwasm",
             ChainKind::Evm => "evm",
             ChainKind::Svm => "svm",
+            ChainKind::Tron => "tron",
         };
         f.write_str(s)
     }
@@ -31,5 +34,6 @@ mod tests {
         assert_eq!(ChainKind::CosmWasm.to_string(), "cosmwasm");
         assert_eq!(ChainKind::Evm.to_string(), "evm");
         assert_eq!(ChainKind::Svm.to_string(), "svm");
+        assert_eq!(ChainKind::Tron.to_string(), "tron");
     }
 }

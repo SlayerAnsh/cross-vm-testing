@@ -37,3 +37,11 @@ pub use cross_vm_solidity::{
 // Solana
 pub use cross_vm_solana::chains::{SOLANA_DEVNET, SOLANA_LOCALNET, SOLANA_MAINNET, SOLANA_TESTNET};
 pub use cross_vm_solana::{SvmAsset, SvmChain, SvmMockProvider, SvmRpcProvider};
+
+// Tron
+pub use cross_vm_tron::chains::{
+    LOCAL as TRON_LOCAL, MAINNET as TRON_MAINNET, NILE as TRON_NILE, SHASTA as TRON_SHASTA,
+};
+pub use cross_vm_tron::{
+    TronAddress, TronAsset, TronChain, TronExecution, TronMockProvider, TronRpcProvider,
+};

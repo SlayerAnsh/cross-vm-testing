@@ -1,8 +1,8 @@
-.PHONY: compile compile-solidity compile-solana compile-cosmwasm setup-solidity fmt \
+.PHONY: compile compile-solidity compile-solana compile-cosmwasm compile-tron setup-solidity setup-tron fmt \
 	test test-cosmwasm test-solidity test-solana test-examples test-harness test-cross-vm \
 	test-fuzz test-invariant test-endurance test-rpc-endurance test-harness-all
 
-compile: compile-solidity compile-solana compile-cosmwasm
+compile: compile-solidity compile-solana compile-cosmwasm compile-tron
 
 compile-solidity:
 	$(MAKE) -C examples/solidity-contracts build
@@ -15,8 +15,14 @@ compile-cosmwasm:
 	$(MAKE) -C examples/cosmwasm-contracts/vault build
 	$(MAKE) -C examples/cosmwasm-contracts/ping-pong build
 
+compile-tron:
+	$(MAKE) -C examples/tron-contracts build
+
 setup-solidity:
 	cd examples/solidity-contracts && forge install foundry-rs/forge-std
+
+setup-tron:
+	$(MAKE) -C examples/tron-contracts setup
 
 # FORMAT
 fmt:
@@ -38,6 +44,9 @@ test-solidity:
 
 test-solana:
 	cargo test -p cross-vm-solana $(ARGS)
+	
+test-tron:
+	cargo test -p cross-vm-tron $(ARGS)
 
 # Example integration tests (cross-VM flows + the property-testing harness).
 test-examples:

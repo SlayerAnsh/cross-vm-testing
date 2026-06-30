@@ -53,5 +53,9 @@ pub async fn fund_user(chain: &mut AnyChain, label: WalletLabel<'_>) {
             let a = c.wallet_address(label).await.unwrap();
             let _ = c.set_balance(&a, 1_000_000_000_000).await;
         }
+        AnyChain::Tron(c) => {
+            let a = c.wallet_address(label).await.unwrap();
+            c.set_balance(&a, 100_000_000_000_000).await.unwrap(); // 100M TRX in sun
+        }
     }
 }

@@ -12,6 +12,7 @@ use cross_vm_core::{ChainKind, CrossVmError};
 use cross_vm_cosmwasm::Addr;
 use cross_vm_solana::Address as SvmAddress;
 use cross_vm_solidity::Address as EvmAddress;
+use cross_vm_tron::TronAddress;
 
 /// A VM-agnostic address: an account a test signs with, or a deployed contract address.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +23,8 @@ pub enum Account {
     Evm(EvmAddress),
     /// A Solana address (pubkey).
     Svm(SvmAddress),
+    /// A Tron address.
+    Tron(TronAddress),
 }
 
 impl Account {
@@ -31,6 +34,7 @@ impl Account {
             Account::CosmWasm(_) => ChainKind::CosmWasm,
             Account::Evm(_) => ChainKind::Evm,
             Account::Svm(_) => ChainKind::Svm,
+            Account::Tron(_) => ChainKind::Tron,
         }
     }
 
@@ -57,6 +61,14 @@ impl Account {
             _ => Err(CrossVmError::wrong_vm(ChainKind::Svm, self.kind())),
         }
     }
+
+    /// Recover the Tron address, or [`CrossVmError::WrongVm`] if this is another VM.
+    pub fn tron(&self) -> Result<&TronAddress, CrossVmError> {
+        match self {
+            Account::Tron(a) => Ok(a),
+            _ => Err(CrossVmError::wrong_vm(ChainKind::Tron, self.kind())),
+        }
+    }
 }
 
 impl From<Addr> for Account {
@@ -74,6 +86,12 @@ impl From<EvmAddress> for Account {
 impl From<SvmAddress> for Account {
     fn from(a: SvmAddress) -> Self {
         Account::Svm(a)
+    }
+}
+
+impl From<TronAddress> for Account {
+    fn from(a: TronAddress) -> Self {
+        Account::Tron(a)
     }
 }
 

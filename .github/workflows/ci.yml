@@ -138,6 +138,44 @@ jobs:
           retention-days: 1
 
   # ---------------------------------------------------------------------------
+  # Tron artifacts: Node + pnpm + tronbox (TRON's solc fork, "tronc"). Mirrors the
+  # solidity-contracts src/*.sol into a gitignored generated/ (prepare-contracts.sh)
+  # and compiles them to build/*.json. The 3 JSON are embedded by sol! in the
+  # integration-tests support files (only the TVM creation BYTECODE is taken; the
+  # ABI matches the EVM build). pnpm fetches tronbox + the tron solc binary on a
+  # cold cache, so this job needs network. Upload the whole build/ dir to preserve
+  # the flat Name.json layout sol! expects.
+  # ---------------------------------------------------------------------------
+  tron-artifacts:
+    name: Tron artifacts (tronbox compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: examples/tron-contracts/pnpm-lock.yaml
+      - name: tronbox compile
+        run: make compile-tron
+      - name: Verify JSON exist
+        run: |
+          for c in Counter PingPong Vault; do
+            test -f "examples/tron-contracts/build/$c.json" \
+              || { echo "missing $c.json after compile-tron"; exit 1; }
+          done
+      - name: Upload Tron artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tron-build
+          path: examples/tron-contracts/build
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
   # Test: download both contract artifacts into their EXACT embed paths, then run
   # the full test suite. The only job that compiles the full workspace for tests;
   # rust-cache (shared-key with lint) warms the dependency graph. Artifacts are
@@ -147,7 +185,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    needs: [solana-artifacts, solidity-artifacts]
+    needs: [solana-artifacts, solidity-artifacts, tron-artifacts]
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -170,6 +208,13 @@ jobs:
         with:
           name: solidity-out
           path: examples/solidity-contracts/out
+      # Tron .json -> examples/tron-contracts/build/  (sol!, consumed by the
+      # integration-tests support files for the TVM creation bytecode).
+      - name: Download Tron artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: tron-build
+          path: examples/tron-contracts/build
       - name: Verify embedded artifacts are in place
         run: |
           for so in counter ping_pong vault; do
@@ -179,6 +224,10 @@ jobs:
           for c in Counter PingPong Vault; do
             test -f "examples/solidity-contracts/out/$c.sol/$c.json" \
               || { echo "missing $c.json"; exit 1; }
+          done
+          for c in Counter PingPong Vault; do
+            test -f "examples/tron-contracts/build/$c.json" \
+              || { echo "missing tron $c.json"; exit 1; }
           done
       # Everything except cross-vm-cosmwasm, whose tests/onchain.rs embeds a
       # compiled counter.wasm built only by the Docker CosmWasm optimizer (not in

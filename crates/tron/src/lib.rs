@@ -1,0 +1,31 @@
+//! Tron (TVM) chain provider for the cross-vm testing suite.
+//!
+//! Two backends behind the shared [`cross_vm_core::ChainProvider`] trait:
+//!
+//! * **Mock** ([`TronMockProvider`]): in-process `revm` with Tron-accurate addresses,
+//!   precompiles, CREATE/CREATE2 derivation, and an energy/bandwidth accounting shim. This is
+//!   the deterministic target for the property-testing harness.
+//! * **RPC** ([`TronRpcProvider`]): java-tron stub parity for v1. Reads and address derivation
+//!   work; writes return [`TronError::Unimplemented`] (there is no in-process TVM and no
+//!   alloy-equivalent java-tron client yet).
+//!
+//! Design and protocol-fact citations live in
+//! `docs/superpowers/specs/2026-06-29-tron-chain-support-design.md`.
+
+mod asset;
+mod chain;
+pub mod chains;
+mod error;
+pub mod provider;
+pub mod tvm;
+mod wallet;
+
+pub use alloy_primitives::{Bytes, Log, U256};
+pub use asset::TronAsset;
+pub use chain::TronChain;
+pub use chains::TronChainInfo;
+pub use error::TronError;
+pub use provider::{
+    address_from_pubkey, TronAddress, TronExecution, TronMockProvider, TronRpcProvider,
+    DEFAULT_FUNDING_SUN,
+};

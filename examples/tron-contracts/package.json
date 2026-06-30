@@ -1,0 +1,13 @@
+{
+    "name": "tron-contracts",
+    "version": "0.1.0",
+    "private": true,
+    "description": "Compile the Solidity example contracts with TRON's tronc (tronbox).",
+    "scripts": {
+        "prepare-contracts": "bash scripts/prepare-contracts.sh",
+        "compile": "pnpm prepare-contracts && tronbox compile --all"
+    },
+    "devDependencies": {
+        "tronbox": "^4.6.0"
+    }
+}

@@ -44,6 +44,16 @@ mod evm_counter {
     );
 }
 
+// ----- Tron: the same contract compiled by tronc (tronbox). The mock TVM runs this TVM-native
+// creation bytecode; the ABI matches the EVM build, so only BYTECODE is taken from here. -----
+mod tron_counter {
+    alloy::sol!(
+        #[sol(abi)]
+        Counter,
+        "../tron-contracts/build/Counter.json"
+    );
+}
+
 // ----- Solana: Anchor counter program, its declared id, and instruction discriminators -----
 const SOLANA_PROGRAM_ID: &str = "7TSiNYMVrY4CtSzE4MjAWzhNGpYWs9m2kdaFPuR8ZhJK";
 /// `sha256("global:initialize")[..8]`.
@@ -152,6 +162,50 @@ impl Counter {
         let n = evm_counter::Counter::countCall::abi_decode_returns(&out).map_err(|e| {
             CrossVmError::Query {
                 kind: ChainKind::Evm,
+                reason: e.to_string(),
+            }
+        })?;
+        Ok(n.saturating_to::<u64>())
+    }
+
+    // ----- Tron hooks (deploys tronc-compiled bytecode; ABI bindings reuse the EVM build) -----
+    async fn tron_setup(&self, wallet: &str) -> Result<(), CrossVmError> {
+        let chain = self.base.tron()?;
+        let addr = chain
+            .deploy_create(
+                tron_counter::Counter::BYTECODE.clone(),
+                Bytes::new(),
+                WalletLabel::wrap(wallet),
+            )
+            .await?;
+        self.base.set_address(Account::Tron(addr));
+        Ok(())
+    }
+
+    async fn tron_increment(&self, wallet: &str) -> Result<AppResponse<()>, CrossVmError> {
+        use alloy::sol_types::SolCall;
+        let chain = self.base.tron()?;
+        let addr = self.base.tron_addr()?;
+        let calldata = Bytes::from(evm_counter::Counter::incrementCall {}.abi_encode());
+        let exec = chain
+            .call(&addr, calldata, WalletLabel::wrap(wallet))
+            .await?;
+        Ok(AppResponse::tron((), exec.output, exec.logs))
+    }
+
+    async fn tron_count(&self) -> Result<u64, CrossVmError> {
+        use alloy::sol_types::SolCall;
+        let chain = self.base.tron()?;
+        let addr = self.base.tron_addr()?;
+        let out = chain
+            .static_call(
+                &addr,
+                Bytes::from(evm_counter::Counter::countCall {}.abi_encode()),
+            )
+            .await?;
+        let n = evm_counter::Counter::countCall::abi_decode_returns(&out).map_err(|e| {
+            CrossVmError::Query {
+                kind: ChainKind::Tron,
                 reason: e.to_string(),
             }
         })?;

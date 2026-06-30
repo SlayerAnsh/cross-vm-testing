@@ -6,6 +6,7 @@ use cross_vm_core::ChainKind;
 use cross_vm_cosmwasm::{Addr, CwAsset};
 use cross_vm_solana::{Address as SvmAddr, SvmAsset};
 use cross_vm_solidity::{Address as EvmAddr, EvmAsset, U256};
+use cross_vm_tron::{TronAddress, TronAsset};
 
 use crate::any_chain::AnyChain;
 use crate::error::EnvError;
@@ -44,6 +45,17 @@ pub enum Pending {
         who: SvmAddr,
         /// Asset.
         asset: SvmAsset,
+        /// Minimum amount.
+        amount: u64,
+    },
+    /// A Tron funding requirement.
+    Tron {
+        /// Chain label.
+        label: String,
+        /// Account.
+        who: TronAddress,
+        /// Asset.
+        asset: TronAsset,
         /// Minimum amount.
         amount: u64,
     },
@@ -101,6 +113,22 @@ impl Pending {
                         .await
                         .map_err(|fe| EnvError::from_fund(label, who_str, fe)),
                     Some(other) => Err(wrong_vm(label, ChainKind::Svm, other.kind())),
+                    None => Err(EnvError::UnknownChain(label)),
+                }
+            }
+            Pending::Tron {
+                label,
+                who,
+                asset,
+                amount,
+            } => {
+                let who_str = who.to_string();
+                match chains.get_mut(&label) {
+                    Some(AnyChain::Tron(c)) => c
+                        .ensure_asset(&who, asset, amount)
+                        .await
+                        .map_err(|fe| EnvError::from_fund(label, who_str, fe)),
+                    Some(other) => Err(wrong_vm(label, ChainKind::Tron, other.kind())),
                     None => Err(EnvError::UnknownChain(label)),
                 }
             }

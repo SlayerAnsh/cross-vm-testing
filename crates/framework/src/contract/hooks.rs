@@ -90,6 +90,12 @@ impl<'a> HookContext<'a> {
     pub fn solana_logs(&self) -> Result<&[String], CrossVmError> {
         self.raw.solana_logs()
     }
+
+    /// The logs (events) emitted by a Tron call, or [`CrossVmError::WrongVm`] for another VM.
+    /// Tron logs are EVM-shaped (`address`/`topics`/`data`).
+    pub fn tron_logs(&self) -> Result<&[Log], CrossVmError> {
+        self.raw.tron_logs()
+    }
 }
 
 type BeforeHook = Box<dyn FnMut(&BeforeContext) -> Result<(), CrossVmError>>;

@@ -13,13 +13,14 @@ fn chain_for(kind: ChainKind, wallets: Rc<WalletFactory>) -> AnyChain {
         ChainKind::CosmWasm => OSMOSIS.mock(wallets.clone()).into(),
         ChainKind::Evm => ETHEREUM.mock(wallets.clone()).into(),
         ChainKind::Svm => SOLANA_DEVNET.mock(wallets).into(),
+        ChainKind::Tron => TRON_LOCAL.mock(wallets).into(),
     }
 }
 
 #[rstest::rstest]
 #[tokio::test]
 async fn counter_increments_across_vms(
-    #[values(ChainKind::CosmWasm, ChainKind::Evm, ChainKind::Svm)] kind: ChainKind,
+    #[values(ChainKind::CosmWasm, ChainKind::Evm, ChainKind::Svm, ChainKind::Tron)] kind: ChainKind,
 ) {
     let wallets = test_wallets();
     let mut chain = chain_for(kind, wallets);
@@ -44,6 +45,12 @@ async fn counter_increments_across_vms(
                 assert!(ctx.transaction_hash().is_ok());
                 assert!(!ctx.solana_logs().expect("svm logs").is_empty());
                 assert!(ctx.evm_logs().is_err());
+            }
+            ChainKind::Tron => {
+                // Tron logs are EVM-shaped but carried on the Tron response variant.
+                ctx.tron_logs().expect("tron logs");
+                assert!(ctx.evm_logs().is_err());
+                assert!(ctx.cosmwasm_events().is_err());
             }
         }
         sink.borrow_mut().push(ctx.kind());

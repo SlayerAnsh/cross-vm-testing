@@ -206,6 +206,7 @@ fn expand(struct_name: Ident, input: ItemTrait) -> syn::Result<proc_macro2::Toke
         let cw = Ident::new(&format!("cw_{name}"), name.span());
         let evm = Ident::new(&format!("evm_{name}"), name.span());
         let svm = Ident::new(&format!("svm_{name}"), name.span());
+        let tron = Ident::new(&format!("tron_{name}"), name.span());
         let label = name.to_string();
 
         trait_methods.push(quote! {
@@ -220,6 +221,7 @@ fn expand(struct_name: Ident, input: ItemTrait) -> syn::Result<proc_macro2::Toke
                     ChainKind::CosmWasm => self.#cw(#(#arg_names),*).await?,
                     ChainKind::Evm => self.#evm(#(#arg_names),*).await?,
                     ChainKind::Svm => self.#svm(#(#arg_names),*).await?,
+                    ChainKind::Tron => self.#tron(#(#arg_names),*).await?,
                 };
                 self.base.run_after(#label, resp)
             }
@@ -229,6 +231,7 @@ fn expand(struct_name: Ident, input: ItemTrait) -> syn::Result<proc_macro2::Toke
                     ChainKind::CosmWasm => self.#cw(#(#arg_names),*).await,
                     ChainKind::Evm => self.#evm(#(#arg_names),*).await,
                     ChainKind::Svm => self.#svm(#(#arg_names),*).await,
+                    ChainKind::Tron => self.#tron(#(#arg_names),*).await,
                 }
             }
         };
@@ -333,6 +336,7 @@ mod tests {
         assert!(out.contains("cw_count"));
         assert!(out.contains("evm_count"));
         assert!(out.contains("svm_count"));
+        assert!(out.contains("tron_count"));
     }
 
     #[test]

@@ -2,15 +2,15 @@
 
 # cross-vm-testing
 
-**Write one test. Run it on CosmWasm, EVM, and Solana.**
+**Write one test. Run it on CosmWasm, EVM, Solana, and Tron.**
 
-A Rust testing suite for cross VM work. It puts three execution environments behind a single async trait, so the same test code drives an in process CosmWasm chain (`cw-multi-test`), an EVM (`revm`), and Solana (`litesvm`) without changing shape.
+A Rust testing suite for cross VM work. It puts four execution environments behind a single async trait, so the same test code drives an in process CosmWasm chain (`cw-multi-test`), an EVM (`revm`), Solana (`litesvm`), and Tron (a `revm` core with TVM-accurate layers) without changing shape.
 
 ![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)
 ![Edition](https://img.shields.io/badge/edition-2021-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Version](https://img.shields.io/badge/version-0.1.0-lightgrey)
-![VMs](https://img.shields.io/badge/VMs-CosmWasm%20%7C%20EVM%20%7C%20Solana-purple)
+![VMs](https://img.shields.io/badge/VMs-CosmWasm%20%7C%20EVM%20%7C%20Solana%20%7C%20Tron-purple)
 
 </div>
 
@@ -31,11 +31,12 @@ On top of that base, three things make full cross VM tests practical:
 * [Install](#install)
 * [Quickstart](#quickstart)
 * [MultiChainEnv: many chains, one simulation](#multichainenv-many-chains-one-simulation)
-* [Cross VM contracts: one wrapper, three VMs](#cross-vm-contracts-one-wrapper-three-vms)
+* [Cross VM contracts: one wrapper, four VMs](#cross-vm-contracts-one-wrapper-four-vms)
 * [Two ways to write a test](#two-ways-to-write-a-test)
 * [Property testing harness](#property-testing-harness)
 * [Wallets](#wallets)
 * [Live RPC providers](#live-rpc-providers)
+* [Tron (TVM)](#tron-tvm)
 * [Macros at a glance](#macros-at-a-glance)
 * [Workspace layout](#workspace-layout)
 * [Build and test](#build-and-test)
@@ -78,7 +79,7 @@ cargo run -p cross-vm-solidity --example evm_quickstart
 cargo run -p cross-vm-solana   --example solana_quickstart
 ```
 
-Predefined chains include `OSMOSIS`, `JUNO`, `NEUTRON`, `COSMOS_HUB`, `CW_LOCAL` (CosmWasm); `ETHEREUM`, `ARBITRUM`, `OPTIMISM`, `BASE`, `POLYGON`, `EVM_LOCAL` (EVM); `SOLANA_MAINNET`, `SOLANA_DEVNET`, `SOLANA_TESTNET`, `SOLANA_LOCALNET` (Solana). Each carries `.mock(wallets)` and `.rpc(wallets)` constructors (the RPC endpoint is part of the chain preset).
+Predefined chains include `OSMOSIS`, `JUNO`, `NEUTRON`, `COSMOS_HUB`, `CW_LOCAL` (CosmWasm); `ETHEREUM`, `ARBITRUM`, `OPTIMISM`, `BASE`, `POLYGON`, `EVM_LOCAL` (EVM); `SOLANA_MAINNET`, `SOLANA_DEVNET`, `SOLANA_TESTNET`, `SOLANA_LOCALNET` (Solana); and `TRON_MAINNET`, `TRON_NILE`, `TRON_SHASTA`, `TRON_LOCAL` (Tron). Each carries `.mock(wallets)` and `.rpc(wallets)` constructors (the RPC endpoint is part of the chain preset).
 
 ## MultiChainEnv: many chains, one simulation
 
@@ -109,9 +110,9 @@ assert!(env.solana("sol").is_err());
 
 **Funding semantics.** Native assets mock mint the shortfall. Token assets (cw20/erc20/SPL) are validated against the real on chain balance (you mint them by deploying the token during setup). On all three RPC providers, native funding validates rather than mints (a live chain cannot mint): it reads the real balance and reports a `Shortfall` if the account is underfunded. Token RPC funding paths return `Unimplemented`.
 
-## Cross VM contracts: one wrapper, three VMs
+## Cross VM contracts: one wrapper, four VMs
 
-The headline feature. To drive one contract across CosmWasm, EVM, and Solana from a single test, declare its logical methods in a spec trait and apply `#[cross_vm_contract(StructName)]`. The macro generates the wrapper struct, its `new` / `instance` constructors, the `on_before` / `on_after` hook forwarders, and a dispatcher per method that matches the chain's VM and calls the matching `cw_*` / `evm_*` / `svm_*` hook. You write only the per VM hooks.
+The headline feature. To drive one contract across CosmWasm, EVM, Solana, and Tron from a single test, declare its logical methods in a spec trait and apply `#[cross_vm_contract(StructName)]`. The macro generates the wrapper struct, its `new` / `instance` constructors, the `on_before` / `on_after` hook forwarders, and a dispatcher per method that matches the chain's VM and calls the matching `cw_*` / `evm_*` / `svm_*` / `tron_*` hook. You write only the per VM hooks.
 
 ```rust
 use cross_vm_framework::prelude::*;
@@ -239,11 +240,21 @@ cargo run -p cross-vm-solidity --example evm_rpc_quickstart
 cargo run -p cross-vm-solana   --example solana_rpc_quickstart
 ```
 
+A fourth provider, `TronRpcProvider`, talks to a live java-tron node over the TronGrid HTTP REST API (`/wallet/*` endpoints, via `reqwest` plus `serde_json`). It serves live reads (`balance`, `block_height`, `static_call`) and signs and broadcasts writes (`deploy_create` and `call` build the unsigned transaction at the node, sign its `txID` locally with the wallet's secp256k1 key, then `broadcasttransaction`). Only `set_balance` returns `Unimplemented` (a live chain cannot mint). See [Tron (TVM)](#tron-tvm) for the details.
+
+## Tron (TVM)
+
+Tron is the fourth ecosystem, behind the same `ChainProvider` trait as the other three. It ships two backends mirroring the EVM crate: `TronChain` is either `Mock(TronMockProvider)` or `Rpc(TronRpcProvider)`. The TVM is an EVM derivative, so the mock reuses a `revm` core and adds the layers where Tron diverges from Ethereum.
+
+The mock runs that `revm` core with TVM-accurate layers on top: a base58check `TronAddress` (the `0x41` version prefix over a secp256k1 key, whose inner 20 bytes equal the matching EVM address), the Tron precompiles injected into revm (the TIP-272 relocations, `ripemd160` at `0x20003` and `blake2f` at `0x20009`, plus `validatemultisign` at `0x0a`, all over secp256k1, not ed25519), a provider-layer energy and bandwidth accounting shim that sits outside revm's gas loop, and u64 sun balances (1 TRX = 1,000,000 sun). Wallets derive over secp256k1 at SLIP-44 coin type 195 (path `m/44'/195'/<index>'/0/0`). Tron logs are EVM-shaped, so the mock surfaces revm logs directly.
+
+Two honest v1 limits remain in the mock. The mock's `CREATE` / `CREATE2` use revm's EVM address derivation, not Tron's tx-id-based formula. The real formula ships as the pure functions `tron_create_address` / `tron_create2_address` for tooling, because revm 41 does not allow cleanly overriding the in-VM derivation. The energy shim is coarse account-level accounting, not per-opcode costs. The RPC backend is no longer a stub: it drives a live java-tron node over TronGrid HTTP for reads and signed writes, and `call` polls `gettransactioninfobyid` after broadcast so it returns the transaction's return data and EVM-shaped logs (a reverted tx surfaces as an error). The only remaining gap is range and topic log search (`eth_getLogs`, TronGrid `/v1/contracts/{addr}/events`), which is not yet wired.
+
 ## Macros at a glance
 
 | Macro | Kind | Purpose |
 | --- | --- | --- |
-| `#[cross_vm_contract(Name)]` | attribute | Turn a spec trait into a contract wrapper that dispatches each method to the matching `cw_*` / `evm_*` / `svm_*` hook |
+| `#[cross_vm_contract(Name)]` | attribute | Turn a spec trait into a contract wrapper that dispatches each method to the matching `cw_*` / `evm_*` / `svm_*` / `tron_*` hook |
 | `#[derive(CwExecuteFns)]` | derive | Typed per variant `async fn` execute methods from a CosmWasm `ExecuteMsg` enum (`#[payable]` adds a `funds` arg) |
 | `#[derive(CwQueryFns)]` | derive | Typed per variant `async fn` query methods from a `QueryMsg` enum (each variant needs `#[returns(T)]`) |
 | `define_wallet_roster!` | function-like | Compile time wallet roster with typed `WalletLabel` fields |
@@ -261,6 +272,7 @@ crates/
   cosmwasm/   cross-vm-cosmwasm  CwMockProvider (cw-multi-test), CwRpcProvider (live reads), CwChain, CwAsset
   solidity/   cross-vm-solidity  EvmMockProvider (revm), EvmRpcProvider (live reads), EvmChain, EvmAsset
   solana/     cross-vm-solana    SvmMockProvider (litesvm), SvmRpcProvider (live reads), SvmChain, SvmAsset
+  tron/       cross-vm-tron      TronMockProvider (revm + TVM layers), TronRpcProvider (live java-tron over TronGrid HTTP), TronChain, TronAsset
   macros/     cross-vm-macros    proc-macros: cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, runners
   framework/  cross-vm-framework MultiChainEnv (umbrella over all VMs), the Harness runners, prelude
 ```
@@ -290,17 +302,19 @@ cargo test -p cross-vm-integration-tests --test harness --features "fuzz invaria
 
 ## Status (Supported / Planned)
 
-| Capability | CosmWasm | EVM | Solana | Notes |
-| --- | --- | --- | --- | --- |
-| Mock provider (in process VM) | Supported | Supported | Supported | `cw-multi-test` / `revm` / `litesvm` |
-| Live RPC reads | Supported | Supported | Supported | validated on `osmo-test-5`, Ethereum Sepolia, Solana Devnet |
-| Live RPC writes (deploy + call) | Supported | Supported | Planned | CosmWasm/EVM sign and broadcast (CosmWasm deploy via `store_code_wasm` with compiled bytes); Solana writes return `Unimplemented`. `set_balance` is `Unimplemented` on every RPC backend (a live chain cannot mint) |
-| Wallet derivation (mnemonic to signer) | Supported | Supported | Supported | coin types 118 / 60 / 501, global (chain, address) broadcast lock on the RPC path |
-| Cross VM contract wrapper (`#[cross_vm_contract]`) | Supported | Supported | Supported | typed CosmWasm/EVM calls; Solana hooks hand written |
-| Property `Harness` (fuzz / invariant / endurance / matrix) | Supported (VM agnostic, runs over any injected chain) ||||
-| Broader cross VM orchestration layer | Planned ||||
+| Capability | CosmWasm | EVM | Solana | Tron | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Mock provider (in process VM) | Supported | Supported | Supported | Supported | `cw-multi-test` / `revm` / `litesvm`; Tron is a `revm` core with TVM-accurate layers |
+| Live RPC reads | Supported | Supported | Supported | Supported | validated on `osmo-test-5`, Ethereum Sepolia, Solana Devnet; Tron RPC reads over TronGrid HTTP (block height, native balance, `triggerconstantcontract`), exercised against Nile |
+| Live RPC writes (deploy + call) | Supported | Supported | Planned | Supported | CosmWasm/EVM/Tron sign and broadcast (CosmWasm deploy via `store_code_wasm` with compiled bytes; Tron signs the `txID` and broadcasts over TronGrid HTTP); Solana writes return `Unimplemented`. `set_balance` is `Unimplemented` on every RPC backend (a live chain cannot mint) |
+| Wallet derivation (mnemonic to signer) | Supported | Supported | Supported | Supported | coin types 118 / 60 / 501 / 195, global (chain, address) broadcast lock on the RPC path |
+| Cross VM contract wrapper (`#[cross_vm_contract]`) | Supported | Supported | Supported | Supported | typed CosmWasm/EVM calls; Solana and Tron hooks hand written |
+| Property `Harness` (fuzz / invariant / endurance / matrix) | Supported (VM agnostic, runs over any injected chain) |||||
+| Broader cross VM orchestration layer | Planned |||||
 
-**Planned.** Solana live RPC writes (its mock coupled return types are being decoupled) and the broader cross VM orchestration layer above `MultiChainEnv`.
+**Planned.** Solana live RPC writes (its mock coupled return types are being decoupled), and the broader cross VM orchestration layer above `MultiChainEnv`.
+
+**Known Tron mock divergences.** `CREATE` / `CREATE2` follow revm's EVM address derivation rather than Tron's tx-id-based formula (the real formula is exposed as the pure functions `tron_create_address` / `tron_create2_address`), and the energy/bandwidth shim is coarse account-level accounting, not per-opcode energy costs.
 
 ## Documentation
 

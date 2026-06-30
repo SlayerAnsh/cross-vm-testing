@@ -42,6 +42,16 @@ pub mod evm_pp {
     );
 }
 
+// ----- Tron: the same contract compiled by tronc (tronbox). The mock TVM runs this TVM-native
+// creation bytecode; the ABI matches the EVM build, so only BYTECODE is taken from here. -----
+mod tron_pp {
+    alloy::sol!(
+        #[sol(abi)]
+        PingPong,
+        "../tron-contracts/build/PingPong.json"
+    );
+}
+
 // ----- Solana: the Anchor ping-pong program, its id, and instruction discriminators. -----
 const SOLANA_PROGRAM_ID: &str = "54ex8sgs6H3Y2NssU3CWdBhySk9q5Gqc4MMtPYTtJzC5";
 /// `sha256("global:initialize")[..8]`.
@@ -350,6 +360,145 @@ impl PingPong {
             .await?;
         evm_pp::PingPong::selfPortCall::abi_decode_returns(&out).map_err(|e| CrossVmError::Query {
             kind: ChainKind::Evm,
+            reason: e.to_string(),
+        })
+    }
+
+    // ----- Tron hooks (deploys tronc-compiled bytecode; ABI bindings reuse the EVM build) -----
+    async fn tron_setup(&self, wallet: &str, chain_id: &str) -> Result<(), CrossVmError> {
+        use alloy::sol_types::SolConstructor;
+        let chain = self.base.tron()?;
+        let args = evm_pp::PingPong::constructorCall {
+            _chainId: chain_id.to_string(),
+        }
+        .abi_encode();
+        let addr = chain
+            .deploy_create(
+                tron_pp::PingPong::BYTECODE.clone(),
+                args,
+                WalletLabel::wrap(wallet),
+            )
+            .await?;
+        self.base.set_address(Account::Tron(addr));
+        Ok(())
+    }
+
+    async fn tron_ping(
+        &self,
+        wallet: &str,
+        destination_port: String,
+    ) -> Result<AppResponse<()>, CrossVmError> {
+        use alloy::sol_types::SolCall;
+        let chain = self.base.tron()?;
+        let calldata = Bytes::from(
+            evm_pp::PingPong::pingCall {
+                destinationPort: destination_port,
+            }
+            .abi_encode(),
+        );
+        let exec = chain
+            .call(&self.base.tron_addr()?, calldata, WalletLabel::wrap(wallet))
+            .await?;
+        Ok(AppResponse::tron((), exec.output, exec.logs))
+    }
+
+    async fn tron_receive_packet(
+        &self,
+        wallet: &str,
+        source_port: String,
+        destination_port: String,
+        sequence: u64,
+        msg: String,
+    ) -> Result<AppResponse<()>, CrossVmError> {
+        use alloy::sol_types::SolCall;
+        let chain = self.base.tron()?;
+        let calldata = Bytes::from(
+            evm_pp::PingPong::receivePacketCall {
+                sourcePort: source_port,
+                destinationPort: destination_port,
+                sequence,
+                packetMsg: Bytes::from(msg.into_bytes()),
+            }
+            .abi_encode(),
+        );
+        let exec = chain
+            .call(&self.base.tron_addr()?, calldata, WalletLabel::wrap(wallet))
+            .await?;
+        Ok(AppResponse::tron((), exec.output, exec.logs))
+    }
+
+    async fn tron_acknowledge_packet(
+        &self,
+        wallet: &str,
+        source_port: String,
+        destination_port: String,
+        sequence: u64,
+    ) -> Result<AppResponse<()>, CrossVmError> {
+        use alloy::sol_types::SolCall;
+        let chain = self.base.tron()?;
+        let calldata = Bytes::from(
+            evm_pp::PingPong::acknowledgePacketCall {
+                sourcePort: source_port,
+                destinationPort: destination_port,
+                sequence,
+            }
+            .abi_encode(),
+        );
+        let exec = chain
+            .call(&self.base.tron_addr()?, calldata, WalletLabel::wrap(wallet))
+            .await?;
+        Ok(AppResponse::tron((), exec.output, exec.logs))
+    }
+
+    async fn tron_stats(&self) -> Result<StatsView, CrossVmError> {
+        use alloy::sol_types::SolCall;
+        let chain = self.base.tron()?;
+        let addr = self.base.tron_addr()?;
+        let read_u64 = |out: &[u8]| -> Result<u64, CrossVmError> {
+            // All three getters return a single `uint64`.
+            evm_pp::PingPong::pingsSentCall::abi_decode_returns(out).map_err(|e| {
+                CrossVmError::Query {
+                    kind: ChainKind::Tron,
+                    reason: e.to_string(),
+                }
+            })
+        };
+        let pings = chain
+            .static_call(
+                &addr,
+                Bytes::from(evm_pp::PingPong::pingsSentCall {}.abi_encode()),
+            )
+            .await?;
+        let pongs = chain
+            .static_call(
+                &addr,
+                Bytes::from(evm_pp::PingPong::pongsReceivedCall {}.abi_encode()),
+            )
+            .await?;
+        let next = chain
+            .static_call(
+                &addr,
+                Bytes::from(evm_pp::PingPong::nextSequenceCall {}.abi_encode()),
+            )
+            .await?;
+        Ok(StatsView {
+            pings_sent: read_u64(&pings)?,
+            pongs_received: read_u64(&pongs)?,
+            next_sequence: read_u64(&next)?,
+        })
+    }
+
+    async fn tron_port(&self) -> Result<String, CrossVmError> {
+        use alloy::sol_types::SolCall;
+        let chain = self.base.tron()?;
+        let out = chain
+            .static_call(
+                &self.base.tron_addr()?,
+                Bytes::from(evm_pp::PingPong::selfPortCall {}.abi_encode()),
+            )
+            .await?;
+        evm_pp::PingPong::selfPortCall::abi_decode_returns(&out).map_err(|e| CrossVmError::Query {
+            kind: ChainKind::Tron,
             reason: e.to_string(),
         })
     }

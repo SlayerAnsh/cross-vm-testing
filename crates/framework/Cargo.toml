@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Cross-VM testing framework: hold and drive CosmWasm, EVM, and Solana chains in one simulation"
+description = "Cross-VM testing framework: hold and drive CosmWasm, EVM, and Solana chains in one simulation, and Tron"
 
 [dependencies]
 cross-vm-core.workspace = true
@@ -12,6 +12,7 @@ cross-vm-macros.workspace = true
 cross-vm-cosmwasm = { path = "../cosmwasm" }
 cross-vm-solidity = { path = "../solidity" }
 cross-vm-solana = { path = "../solana" }
+cross-vm-tron = { path = "../tron" }
 thiserror.workspace = true
 tokio.workspace = true
 # Emit per-operation / per-invariant debug logs through the tracing facade.

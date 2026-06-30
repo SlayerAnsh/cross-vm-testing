@@ -2258,6 +2258,7 @@ dependencies = [
  "cross-vm-macros",
  "cross-vm-solana",
  "cross-vm-solidity",
+ "cross-vm-tron",
  "rand 0.8.6",
  "rand_chacha 0.3.1",
  "solana-system-interface 2.0.0",
@@ -2335,6 +2336,27 @@ dependencies = [
  "cross-vm-macros",
  "dotenvy",
  "revm",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "cross-vm-tron"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-signer-local",
+ "bs58",
+ "cross-vm-core",
+ "cross-vm-macros",
+ "dotenvy",
+ "hex",
+ "k256",
+ "reqwest 0.12.28",
+ "revm",
+ "serde_json",
+ "sha2 0.10.9",
+ "sha3 0.10.9",
  "thiserror 2.0.18",
  "tokio",
 ]

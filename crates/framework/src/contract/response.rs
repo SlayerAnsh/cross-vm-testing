@@ -28,6 +28,13 @@ pub enum RawResponse {
     },
     /// A `litesvm` transaction result.
     Svm(TransactionMetadata),
+    /// The return data and emitted logs of a Tron call.
+    Tron {
+        /// ABI-encoded return data.
+        output: Bytes,
+        /// Logs (events) emitted during execution.
+        logs: Vec<Log>,
+    },
 }
 
 impl RawResponse {
@@ -37,6 +44,7 @@ impl RawResponse {
             RawResponse::CosmWasm(_) => ChainKind::CosmWasm,
             RawResponse::Evm { .. } => ChainKind::Evm,
             RawResponse::Svm(_) => ChainKind::Svm,
+            RawResponse::Tron { .. } => ChainKind::Tron,
         }
     }
 
@@ -55,6 +63,10 @@ impl RawResponse {
                 ChainKind::Evm,
                 "transaction hash",
             )),
+            RawResponse::Tron { .. } => Err(CrossVmError::unsupported(
+                ChainKind::Tron,
+                "transaction hash",
+            )),
         }
     }
 
@@ -63,7 +75,7 @@ impl RawResponse {
         match self {
             RawResponse::Svm(m) => Some(m.compute_units_consumed as u128),
             // The current EVM and CosmWasm mock paths do not surface a gas figure.
-            RawResponse::Evm { .. } | RawResponse::CosmWasm(_) => None,
+            RawResponse::Evm { .. } | RawResponse::CosmWasm(_) | RawResponse::Tron { .. } => None,
         }
     }
 
@@ -86,6 +98,17 @@ impl RawResponse {
         match self {
             RawResponse::Evm { logs, .. } => Ok(logs),
             other => Err(CrossVmError::wrong_vm(ChainKind::Evm, other.kind())),
+        }
+    }
+
+    /// The logs (events) emitted by a Tron call, or [`CrossVmError::WrongVm`] for another VM.
+    ///
+    /// Tron logs are EVM-shaped: each [`Log`] carries an emitting address, indexed topics, and
+    /// data.
+    pub fn tron_logs(&self) -> Result<&[Log], CrossVmError> {
+        match self {
+            RawResponse::Tron { logs, .. } => Ok(logs),
+            other => Err(CrossVmError::wrong_vm(ChainKind::Tron, other.kind())),
         }
     }
 
@@ -129,6 +152,14 @@ impl<T> AppResponse<T> {
         Self {
             value,
             raw: RawResponse::Svm(raw),
+        }
+    }
+
+    /// Build a Tron response from the call's return data and emitted logs.
+    pub fn tron(value: T, output: Bytes, logs: Vec<Log>) -> Self {
+        Self {
+            value,
+            raw: RawResponse::Tron { output, logs },
         }
     }
 
@@ -189,6 +220,19 @@ impl<T> AppResponse<T> {
     /// The logs (events) emitted by an EVM call, or [`CrossVmError::WrongVm`] for another VM.
     pub fn raw_evm_logs(&self) -> Result<&[Log], CrossVmError> {
         self.raw.evm_logs()
+    }
+
+    /// The raw Tron return data, or [`CrossVmError::WrongVm`] for another VM.
+    pub fn raw_tron(&self) -> Result<&Bytes, CrossVmError> {
+        match &self.raw {
+            RawResponse::Tron { output, .. } => Ok(output),
+            other => Err(CrossVmError::wrong_vm(ChainKind::Tron, other.kind())),
+        }
+    }
+
+    /// The logs (events) emitted by a Tron call, or [`CrossVmError::WrongVm`] for another VM.
+    pub fn raw_tron_logs(&self) -> Result<&[Log], CrossVmError> {
+        self.raw.tron_logs()
     }
 
     /// The program log lines from a Solana execution, or [`CrossVmError::WrongVm`] for another VM.
