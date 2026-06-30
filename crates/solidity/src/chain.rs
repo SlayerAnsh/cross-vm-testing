@@ -12,7 +12,8 @@ use std::rc::Rc;
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_signer_local::PrivateKeySigner;
 use cross_vm_core::{
-    wallet_lock, ChainProvider, ChainSpec, FundError, WalletDeriver, WalletFactory, WalletLabel,
+    wallet_lock, BlockTime, ChainProvider, ChainSpec, FundError, WalletDeriver, WalletFactory,
+    WalletLabel,
 };
 
 use crate::asset::EvmAsset;
@@ -131,13 +132,25 @@ impl EvmChain {
         calldata: impl AsRef<[u8]>,
         wallet: WalletLabel<'_>,
     ) -> Result<EvmExecution, EvmError> {
+        self.call_value(to, calldata, wallet, U256::ZERO).await
+    }
+
+    /// Execute a state-mutating call against `to` carrying `value` wei (a payable call), signed by
+    /// wallet `wallet`. On the mock the caller's balance is topped up to cover `value`.
+    pub async fn call_value(
+        &self,
+        to: &Address,
+        calldata: impl AsRef<[u8]>,
+        wallet: WalletLabel<'_>,
+        value: U256,
+    ) -> Result<EvmExecution, EvmError> {
         let signer = self.acquire(wallet).await?;
         let addr = self.signer_address(&signer);
         match self {
-            EvmChain::Mock(p) => p.call(to, calldata, &addr).await,
+            EvmChain::Mock(p) => p.call_value(to, calldata, &addr, value).await,
             EvmChain::Rpc(p) => {
                 let _g = Self::broadcast_guard(p, &addr).await;
-                p.call(to, calldata, &signer).await
+                p.call_value(to, calldata, &signer, value).await
             }
         }
     }
@@ -254,10 +267,10 @@ impl ChainProvider for EvmChain {
         }
     }
 
-    async fn advance_blocks(&mut self, n: u64) {
+    async fn advance_blocks(&mut self, n: u64, time: BlockTime) {
         match self {
-            EvmChain::Mock(p) => p.advance_blocks(n).await,
-            EvmChain::Rpc(p) => p.advance_blocks(n).await,
+            EvmChain::Mock(p) => p.advance_blocks(n, time).await,
+            EvmChain::Rpc(p) => p.advance_blocks(n, time).await,
         }
     }
 }

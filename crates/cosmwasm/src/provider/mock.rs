@@ -9,9 +9,9 @@ use std::rc::Rc;
 
 use cosmwasm_std::testing::MockStorage;
 use cosmwasm_std::{coins, Addr, Coin, Empty};
-use cross_vm_core::{ChainProvider, WalletFactory};
+use cross_vm_core::{BlockTime, ChainProvider, WalletFactory};
 use cw_multi_test::{
-    next_block, App, AppBuilder, BankKeeper, Contract, DistributionKeeper, Executor, FailingModule,
+    App, AppBuilder, BankKeeper, Contract, DistributionKeeper, Executor, FailingModule,
     GovFailingModule, IbcFailingModule, IntoBech32, MockApiBech32, StakeKeeper, StargateFailing,
     WasmKeeper,
 };
@@ -60,9 +60,14 @@ pub struct CwMockProvider {
 impl CwMockProvider {
     /// Build a fresh mock chain from a predefined [`CosmosChainInfo`].
     pub fn new(info: CosmosChainInfo, wallets: Rc<WalletFactory>) -> Self {
-        let app = AppBuilder::new()
+        let mut app = AppBuilder::new()
             .with_api(MockApiBech32::new(info.bech32_prefix))
             .build(|_router, _api, _storage| {});
+        // Override cw-multi-test's 2019-era default block time with the shared mock clock so a
+        // cross-VM packet's timeout (stamped on one VM, checked on another) compares correctly.
+        app.update_block(|block| {
+            block.time = cosmwasm_std::Timestamp::from_seconds(cross_vm_core::MOCK_BLOCK_TIMESTAMP);
+        });
         Self {
             app: Rc::new(RefCell::new(app)),
             info,
@@ -177,9 +182,10 @@ impl ChainProvider for CwMockProvider {
         self.app.borrow().block_info().height
     }
 
-    async fn advance_blocks(&mut self, n: u64) {
-        for _ in 0..n {
-            self.app.borrow_mut().update_block(next_block);
-        }
+    async fn advance_blocks(&mut self, n: u64, time: BlockTime) {
+        self.app.borrow_mut().update_block(|b| {
+            b.height += n;
+            b.time = cosmwasm_std::Timestamp::from_seconds(time.apply(b.time.seconds()));
+        });
     }
 }

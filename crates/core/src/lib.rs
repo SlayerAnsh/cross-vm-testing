@@ -15,6 +15,7 @@ mod chain_provider;
 mod chain_spec;
 mod error;
 mod fund_error;
+mod time;
 mod wallet;
 pub mod wallet_lock;
 
@@ -23,6 +24,7 @@ pub use chain_provider::ChainProvider;
 pub use chain_spec::ChainSpec;
 pub use error::CrossVmError;
 pub use fund_error::FundError;
+pub use time::{BlockTime, MOCK_BLOCK_TIMESTAMP};
 pub use wallet::{
     bip44_account_path, WalletDef, WalletDeriver, WalletFactory, WalletLabel, WalletSource,
     WalletSpec,

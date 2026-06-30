@@ -4,7 +4,7 @@
 
 use std::rc::Rc;
 
-use cross_vm_core::{ChainProvider, ChainSpec, WalletFactory};
+use cross_vm_core::{BlockTime, ChainProvider, ChainSpec, WalletFactory};
 use cross_vm_cosmwasm::chains::OSMOSIS;
 
 #[tokio::main(flavor = "current_thread")]
@@ -32,6 +32,6 @@ async fn main() {
     );
 
     let h = chain.block_height().await;
-    chain.advance_blocks(10).await;
+    chain.advance_blocks(10, BlockTime::Increment(1)).await;
     println!("block height: {h} -> {}", chain.block_height().await);
 }
