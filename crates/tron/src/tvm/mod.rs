@@ -2,6 +2,7 @@
 //! energy/bandwidth accounting shim.
 
 pub mod create;
+pub mod opcodes;
 pub mod precompiles;
 pub mod resources;
 

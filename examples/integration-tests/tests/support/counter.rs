@@ -44,6 +44,16 @@ mod evm_counter {
     );
 }
 
+// ----- Tron: the same contract compiled by tronc (tronbox). The mock TVM runs this TVM-native
+// creation bytecode; the ABI matches the EVM build, so only BYTECODE is taken from here. -----
+mod tron_counter {
+    alloy::sol!(
+        #[sol(abi)]
+        Counter,
+        "../tron-contracts/build/Counter.json"
+    );
+}
+
 // ----- Solana: Anchor counter program, its declared id, and instruction discriminators -----
 const SOLANA_PROGRAM_ID: &str = "7TSiNYMVrY4CtSzE4MjAWzhNGpYWs9m2kdaFPuR8ZhJK";
 /// `sha256("global:initialize")[..8]`.
@@ -158,12 +168,12 @@ impl Counter {
         Ok(n.saturating_to::<u64>())
     }
 
-    // ----- Tron hooks (TVM runs EVM bytecode; reuse EVM bindings) -----
+    // ----- Tron hooks (deploys tronc-compiled bytecode; ABI bindings reuse the EVM build) -----
     async fn tron_setup(&self, wallet: &str) -> Result<(), CrossVmError> {
         let chain = self.base.tron()?;
         let addr = chain
             .deploy_create(
-                evm_counter::Counter::BYTECODE.clone(),
+                tron_counter::Counter::BYTECODE.clone(),
                 Bytes::new(),
                 WalletLabel::wrap(wallet),
             )

@@ -42,6 +42,16 @@ pub mod evm_pp {
     );
 }
 
+// ----- Tron: the same contract compiled by tronc (tronbox). The mock TVM runs this TVM-native
+// creation bytecode; the ABI matches the EVM build, so only BYTECODE is taken from here. -----
+mod tron_pp {
+    alloy::sol!(
+        #[sol(abi)]
+        PingPong,
+        "../tron-contracts/build/PingPong.json"
+    );
+}
+
 // ----- Solana: the Anchor ping-pong program, its id, and instruction discriminators. -----
 const SOLANA_PROGRAM_ID: &str = "54ex8sgs6H3Y2NssU3CWdBhySk9q5Gqc4MMtPYTtJzC5";
 /// `sha256("global:initialize")[..8]`.
@@ -354,7 +364,7 @@ impl PingPong {
         })
     }
 
-    // ----- Tron hooks (TVM runs EVM bytecode; reuse EVM bindings) -----
+    // ----- Tron hooks (deploys tronc-compiled bytecode; ABI bindings reuse the EVM build) -----
     async fn tron_setup(&self, wallet: &str, chain_id: &str) -> Result<(), CrossVmError> {
         use alloy::sol_types::SolConstructor;
         let chain = self.base.tron()?;
@@ -364,7 +374,7 @@ impl PingPong {
         .abi_encode();
         let addr = chain
             .deploy_create(
-                evm_pp::PingPong::BYTECODE.clone(),
+                tron_pp::PingPong::BYTECODE.clone(),
                 args,
                 WalletLabel::wrap(wallet),
             )

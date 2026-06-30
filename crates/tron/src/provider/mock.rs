@@ -37,8 +37,10 @@ use crate::chains::TronChainInfo;
 use crate::error::TronError;
 use crate::provider::address::{address_from_label, TronAddress};
 use crate::provider::execution::TronExecution;
+use crate::tvm::opcodes;
 use crate::tvm::precompiles::tron_precompiles;
 use crate::tvm::resources::{ResourceTracker, SUN_PER_TRX};
+use revm::interpreter::Instruction;
 
 /// Default funding handed to accounts created via [`ChainProvider::new_account`]:
 /// 10_000 TRX in sun.
@@ -95,6 +97,30 @@ impl TronMockProvider {
         // unchanged spec on the first transaction and will NOT overwrite this injection.
         // Source: <https://github.com/tronprotocol/tips/blob/master/tip-272.md>
         evm.precompiles.precompiles = tron_precompiles_static();
+        // tronc emits TRON-native opcodes (TRC-10 token ops + ISCONTRACT) that stock revm does not
+        // decode, so tronc-compiled bytecode otherwise halts with OpcodeNotFound. Inject minimal
+        // implementations. Like the precompile swap above, the spec is fixed, so the per-tx
+        // `set_spec` sees no change and leaves these in place.
+        evm.instruction.insert_instruction(
+            opcodes::TOKENBALANCE,
+            Instruction::new(opcodes::token_balance),
+            opcodes::TVM_OPCODE_GAS,
+        );
+        evm.instruction.insert_instruction(
+            opcodes::CALLTOKENVALUE,
+            Instruction::new(opcodes::call_token_value),
+            opcodes::TVM_OPCODE_GAS,
+        );
+        evm.instruction.insert_instruction(
+            opcodes::CALLTOKENID,
+            Instruction::new(opcodes::call_token_id),
+            opcodes::TVM_OPCODE_GAS,
+        );
+        evm.instruction.insert_instruction(
+            opcodes::ISCONTRACT,
+            Instruction::new(opcodes::is_contract),
+            opcodes::TVM_OPCODE_GAS,
+        );
         Self {
             evm: Rc::new(RefCell::new(evm)),
             info,
@@ -345,6 +371,23 @@ mod tests {
         assert!(addr.to_base58().starts_with('T'));
         // The deployed (empty) account has no balance.
         assert_eq!(c.balance(&addr).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn tvm_token_opcodes_are_decoded() {
+        // Stock revm halts with OpcodeNotFound on TRON's token opcodes; the mock injects them.
+        // Exercise all four, checking arity, then deploy an empty runtime:
+        //   CALLTOKENID (0xd3) -> [0]; CALLTOKENVALUE (0xd2) -> [0, 0];
+        //   TOKENBALANCE (0xd1) pops 2, pushes 0 -> [0]; ISCONTRACT (0xd4) pops 1, pushes 0 -> [0];
+        //   PUSH1 0 -> [0, 0]; RETURN pops (offset, len) = (0, 0) -> empty runtime.
+        let initcode = Bytes::from(vec![0xd3, 0xd2, 0xd1, 0xd4, 0x60, 0x00, 0xf3]);
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+        let addr = c
+            .deploy_create(initcode, [], &deployer)
+            .await
+            .expect("tronc token-guard opcodes decode and deploy succeeds");
+        assert!(addr.to_base58().starts_with('T'));
     }
 
     #[tokio::test]

@@ -33,6 +33,16 @@ mod evm_vault {
     );
 }
 
+// ----- Tron: the same contract compiled by tronc (tronbox). The mock TVM runs this TVM-native
+// creation bytecode; the ABI matches the EVM build, so only BYTECODE is taken from here. -----
+mod tron_vault {
+    alloy::sol!(
+        #[sol(abi)]
+        Vault,
+        "../tron-contracts/build/Vault.json"
+    );
+}
+
 const VAULT_PROGRAM_ID: &str = "GFNizKSbcjBH7aTwPyyA3vnqfksjWEfci6fgWeCJ34GB";
 const VDISC_INITIALIZE: [u8; 8] = [175, 175, 109, 31, 13, 152, 155, 237];
 const VDISC_DEPOSIT: [u8; 8] = [242, 35, 198, 137, 82, 225, 242, 182];
@@ -107,7 +117,7 @@ impl Vault {
                 let chain = self.base.tron()?;
                 let addr = chain
                     .deploy_create(
-                        evm_vault::Vault::BYTECODE.clone(),
+                        tron_vault::Vault::BYTECODE.clone(),
                         Bytes::new(),
                         WalletLabel::wrap(wallet),
                     )
