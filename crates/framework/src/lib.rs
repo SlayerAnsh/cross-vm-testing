@@ -51,7 +51,11 @@ pub use wallets::{EmptyWallets, TestWallets, EMPTY_WALLETS, TEST_WALLETS};
 
 // Re-export the building blocks so users need only depend on this crate.
 pub use cross_vm_core;
+#[cfg(feature = "cw")]
 pub use cross_vm_cosmwasm;
+#[cfg(feature = "solana")]
 pub use cross_vm_solana;
+#[cfg(feature = "evm")]
 pub use cross_vm_solidity;
+#[cfg(feature = "tron")]
 pub use cross_vm_tron;

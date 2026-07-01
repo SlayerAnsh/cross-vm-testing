@@ -5,9 +5,13 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use cross_vm_core::{BlockTime, WalletFactory};
+#[cfg(feature = "cw")]
 use cross_vm_cosmwasm::CwChain;
+#[cfg(feature = "solana")]
 use cross_vm_solana::SvmChain;
+#[cfg(feature = "evm")]
 use cross_vm_solidity::EvmChain;
+#[cfg(feature = "tron")]
 use cross_vm_tron::TronChain;
 
 use crate::any_chain::AnyChain;
@@ -76,6 +80,8 @@ impl<S> MultiChainEnv<S> {
     }
 
     /// Borrow a CosmWasm chain by label.
+    #[cfg(feature = "cw")]
+    #[allow(unreachable_patterns)]
     pub fn cosmwasm(&mut self, label: &str) -> Result<&mut CwChain, EnvError> {
         match self.chains.get_mut(label) {
             Some(AnyChain::CosmWasm(c)) => Ok(c),
@@ -89,6 +95,8 @@ impl<S> MultiChainEnv<S> {
     }
 
     /// Borrow an EVM chain by label.
+    #[cfg(feature = "evm")]
+    #[allow(unreachable_patterns)]
     pub fn evm(&mut self, label: &str) -> Result<&mut EvmChain, EnvError> {
         match self.chains.get_mut(label) {
             Some(AnyChain::Evm(c)) => Ok(c),
@@ -102,6 +110,8 @@ impl<S> MultiChainEnv<S> {
     }
 
     /// Borrow a Solana chain by label.
+    #[cfg(feature = "solana")]
+    #[allow(unreachable_patterns)]
     pub fn solana(&mut self, label: &str) -> Result<&mut SvmChain, EnvError> {
         match self.chains.get_mut(label) {
             Some(AnyChain::Svm(c)) => Ok(c),
@@ -115,6 +125,8 @@ impl<S> MultiChainEnv<S> {
     }
 
     /// Borrow a Tron chain by label.
+    #[cfg(feature = "tron")]
+    #[allow(unreachable_patterns)]
     pub fn tron(&mut self, label: &str) -> Result<&mut TronChain, EnvError> {
         match self.chains.get_mut(label) {
             Some(AnyChain::Tron(c)) => Ok(c),

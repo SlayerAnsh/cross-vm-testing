@@ -9,9 +9,13 @@
 use std::cell::RefCell;
 
 use cross_vm_core::{ChainKind, CrossVmError};
+#[cfg(feature = "cw")]
 use cross_vm_cosmwasm::{Addr, CwChain};
+#[cfg(feature = "solana")]
 use cross_vm_solana::{Address as SvmAddress, SvmChain};
+#[cfg(feature = "evm")]
 use cross_vm_solidity::{Address as EvmAddress, EvmChain};
+#[cfg(feature = "tron")]
 use cross_vm_tron::{TronAddress, TronChain};
 
 use super::account::Account;
@@ -75,6 +79,8 @@ impl ContractBase {
     }
 
     /// Borrow the CosmWasm chain, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "cw")]
+    #[allow(unreachable_patterns)]
     pub fn cosmwasm(&self) -> Result<&CwChain, CrossVmError> {
         match &self.chain {
             AnyChain::CosmWasm(c) => Ok(c),
@@ -83,6 +89,8 @@ impl ContractBase {
     }
 
     /// Borrow the EVM chain, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "evm")]
+    #[allow(unreachable_patterns)]
     pub fn evm(&self) -> Result<&EvmChain, CrossVmError> {
         match &self.chain {
             AnyChain::Evm(c) => Ok(c),
@@ -91,6 +99,8 @@ impl ContractBase {
     }
 
     /// Borrow the Solana chain, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "solana")]
+    #[allow(unreachable_patterns)]
     pub fn solana(&self) -> Result<&SvmChain, CrossVmError> {
         match &self.chain {
             AnyChain::Svm(c) => Ok(c),
@@ -99,6 +109,8 @@ impl ContractBase {
     }
 
     /// Borrow the Tron chain, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "tron")]
+    #[allow(unreachable_patterns)]
     pub fn tron(&self) -> Result<&TronChain, CrossVmError> {
         match &self.chain {
             AnyChain::Tron(c) => Ok(c),
@@ -107,6 +119,8 @@ impl ContractBase {
     }
 
     /// The deployed CosmWasm contract address, or an error if undeployed / another VM.
+    #[cfg(feature = "cw")]
+    #[allow(unreachable_patterns)]
     pub fn cw_addr(&self) -> Result<Addr, CrossVmError> {
         match self.require_address()? {
             Account::CosmWasm(a) => Ok(a),
@@ -115,6 +129,8 @@ impl ContractBase {
     }
 
     /// The deployed EVM contract address, or an error if undeployed / another VM.
+    #[cfg(feature = "evm")]
+    #[allow(unreachable_patterns)]
     pub fn evm_addr(&self) -> Result<EvmAddress, CrossVmError> {
         match self.require_address()? {
             Account::Evm(a) => Ok(a),
@@ -123,6 +139,8 @@ impl ContractBase {
     }
 
     /// The deployed Solana program/account address, or an error if undeployed / another VM.
+    #[cfg(feature = "solana")]
+    #[allow(unreachable_patterns)]
     pub fn svm_addr(&self) -> Result<SvmAddress, CrossVmError> {
         match self.require_address()? {
             Account::Svm(a) => Ok(a),
@@ -131,6 +149,8 @@ impl ContractBase {
     }
 
     /// The deployed Tron contract address, or an error if undeployed / another VM.
+    #[cfg(feature = "tron")]
+    #[allow(unreachable_patterns)]
     pub fn tron_addr(&self) -> Result<TronAddress, CrossVmError> {
         match self.require_address()? {
             Account::Tron(a) => Ok(a),

@@ -13,8 +13,13 @@
 //! transaction from running; an after-`Err` becomes the method's error.
 
 use cross_vm_core::{ChainKind, CrossVmError};
+#[cfg(feature = "cw")]
 use cross_vm_cosmwasm::Event;
+// `Log` is the same alloy-primitives type in the EVM and Tron crates; take it from whichever is on.
+#[cfg(feature = "evm")]
 use cross_vm_solidity::Log;
+#[cfg(all(feature = "tron", not(feature = "evm")))]
+use cross_vm_tron::Log;
 
 use super::response::RawResponse;
 
@@ -77,22 +82,26 @@ impl<'a> HookContext<'a> {
     }
 
     /// The events emitted by a CosmWasm execution, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "cw")]
     pub fn cosmwasm_events(&self) -> Result<&[Event], CrossVmError> {
         self.raw.cosmwasm_events()
     }
 
     /// The logs (events) emitted by an EVM call, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "evm")]
     pub fn evm_logs(&self) -> Result<&[Log], CrossVmError> {
         self.raw.evm_logs()
     }
 
     /// The program log lines from a Solana execution, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "solana")]
     pub fn solana_logs(&self) -> Result<&[String], CrossVmError> {
         self.raw.solana_logs()
     }
 
     /// The logs (events) emitted by a Tron call, or [`CrossVmError::WrongVm`] for another VM.
     /// Tron logs are EVM-shaped (`address`/`topics`/`data`).
+    #[cfg(feature = "tron")]
     pub fn tron_logs(&self) -> Result<&[Log], CrossVmError> {
         self.raw.tron_logs()
     }

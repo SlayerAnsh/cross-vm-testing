@@ -144,6 +144,7 @@ fn expand(struct_name: Ident, input: ItemTrait) -> syn::Result<proc_macro2::Toke
 
     let mut trait_methods = Vec::new();
     let mut dispatchers = Vec::new();
+    let mut hook_methods = Vec::new();
 
     for it in &input.items {
         let m = match it {
@@ -214,6 +215,17 @@ fn expand(struct_name: Ident, input: ItemTrait) -> syn::Result<proc_macro2::Toke
             async fn #name(&self #(, #typed_args)*) -> Result<#ok_ty, CrossVmError>;
         });
 
+        // Each per-VM hook gets a default body that panics if the VM is actually dispatched.
+        // A hand-written inherent `cw_*`/`evm_*`/`svm_*`/`tron_*` shadows the default (inherent
+        // methods win over trait methods), so a contract only needs to implement the VMs it runs.
+        for hook in [&cw, &evm, &svm, &tron] {
+            hook_methods.push(quote! {
+                async fn #hook(&self #(, #typed_args)*) -> Result<#ok_ty, CrossVmError> {
+                    unimplemented!(concat!(stringify!(#hook), " is not implemented for this contract"))
+                }
+            });
+        }
+
         let body = if hooked {
             quote! {
                 self.base.run_before(#label)?;
@@ -243,11 +255,25 @@ fn expand(struct_name: Ident, input: ItemTrait) -> syn::Result<proc_macro2::Toke
         });
     }
 
+    let hooks_name = Ident::new(&format!("{struct_name}Hooks"), struct_name.span());
+
     Ok(quote! {
         #[allow(async_fn_in_trait)]
         #vis trait #trait_name {
             #(#trait_methods)*
         }
+
+        /// Per-VM hooks for the wrapper, each defaulting to `unimplemented!()`.
+        ///
+        /// The developer overrides the VMs they target with inherent `cw_*`/`evm_*`/`svm_*`/
+        /// `tron_*` methods (inherent methods shadow these defaults); any VM left unimplemented
+        /// panics only if that chain is actually dispatched.
+        #[allow(async_fn_in_trait, unused_variables)]
+        #vis trait #hooks_name {
+            #(#hook_methods)*
+        }
+
+        impl #hooks_name for #struct_name {}
 
         #vis struct #struct_name {
             base: ContractBase,
@@ -337,6 +363,31 @@ mod tests {
         assert!(out.contains("evm_count"));
         assert!(out.contains("svm_count"));
         assert!(out.contains("tron_count"));
+    }
+
+    #[test]
+    fn emits_hooks_trait_with_unimplemented_defaults() {
+        let out = expand_str(
+            "Counter",
+            r#"
+            pub trait CounterSpec {
+                async fn increment(&self, wallet: &str) -> AppResponse<()>;
+                async fn count(&self) -> u64;
+            }
+            "#,
+        )
+        .expect("expand");
+
+        // A default-hook trait plus a blanket impl are emitted next to the wrapper.
+        assert!(out.contains("trait CounterHooks"));
+        assert!(out.contains("impl CounterHooks for Counter"));
+        // Every hook defaults to `unimplemented!()` so partial impls still compile.
+        assert!(out.contains("unimplemented"));
+        // Four VMs x two methods = eight default hook bodies, each with the panic message.
+        assert_eq!(
+            out.matches("is not implemented for this contract").count(),
+            8
+        );
     }
 
     #[test]

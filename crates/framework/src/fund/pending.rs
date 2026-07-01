@@ -3,9 +3,13 @@
 use std::collections::HashMap;
 
 use cross_vm_core::ChainKind;
+#[cfg(feature = "cw")]
 use cross_vm_cosmwasm::{Addr, CwAsset};
+#[cfg(feature = "solana")]
 use cross_vm_solana::{Address as SvmAddr, SvmAsset};
+#[cfg(feature = "evm")]
 use cross_vm_solidity::{Address as EvmAddr, EvmAsset, U256};
+#[cfg(feature = "tron")]
 use cross_vm_tron::{TronAddress, TronAsset};
 
 use crate::any_chain::AnyChain;
@@ -16,6 +20,7 @@ use crate::error::EnvError;
 /// One variant per VM so the typed `who`/asset/amount are stored without erasure.
 pub enum Pending {
     /// A CosmWasm funding requirement.
+    #[cfg(feature = "cw")]
     Cw {
         /// Chain label.
         label: String,
@@ -27,6 +32,7 @@ pub enum Pending {
         amount: u128,
     },
     /// An EVM funding requirement.
+    #[cfg(feature = "evm")]
     Evm {
         /// Chain label.
         label: String,
@@ -38,6 +44,7 @@ pub enum Pending {
         amount: U256,
     },
     /// A Solana funding requirement.
+    #[cfg(feature = "solana")]
     Svm {
         /// Chain label.
         label: String,
@@ -49,6 +56,7 @@ pub enum Pending {
         amount: u64,
     },
     /// A Tron funding requirement.
+    #[cfg(feature = "tron")]
     Tron {
         /// Chain label.
         label: String,
@@ -63,11 +71,13 @@ pub enum Pending {
 
 impl Pending {
     /// Apply this requirement against the chain store.
+    #[allow(unreachable_patterns)]
     pub(crate) async fn apply(
         self,
         chains: &mut HashMap<String, AnyChain>,
     ) -> Result<(), EnvError> {
         match self {
+            #[cfg(feature = "cw")]
             Pending::Cw {
                 label,
                 who,
@@ -84,6 +94,7 @@ impl Pending {
                     None => Err(EnvError::UnknownChain(label)),
                 }
             }
+            #[cfg(feature = "evm")]
             Pending::Evm {
                 label,
                 who,
@@ -100,6 +111,7 @@ impl Pending {
                     None => Err(EnvError::UnknownChain(label)),
                 }
             }
+            #[cfg(feature = "solana")]
             Pending::Svm {
                 label,
                 who,
@@ -116,6 +128,7 @@ impl Pending {
                     None => Err(EnvError::UnknownChain(label)),
                 }
             }
+            #[cfg(feature = "tron")]
             Pending::Tron {
                 label,
                 who,

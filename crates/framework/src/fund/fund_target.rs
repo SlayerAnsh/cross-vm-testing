@@ -8,9 +8,13 @@
 //! into a `Pending` requirement that [`crate::MultiChainEnv::start`] applies asynchronously.
 
 use cross_vm_core::ChainKind;
+#[cfg(feature = "cw")]
 use cross_vm_cosmwasm::{Addr, CwAsset};
+#[cfg(feature = "solana")]
 use cross_vm_solana::{Address as SvmAddr, SvmAsset};
+#[cfg(feature = "evm")]
 use cross_vm_solidity::{Address as EvmAddr, EvmAsset, U256};
+#[cfg(feature = "tron")]
 use cross_vm_tron::{TronAddress, TronAsset};
 
 use super::pending::Pending;
@@ -29,6 +33,7 @@ pub trait FundTarget: Clone + 'static {
     fn into_pending(label: String, who: Self, denom: String, amount: Self::Amount) -> Pending;
 }
 
+#[cfg(feature = "cw")]
 impl FundTarget for Addr {
     type Amount = u128;
     const KIND: ChainKind = ChainKind::CosmWasm;
@@ -43,6 +48,7 @@ impl FundTarget for Addr {
     }
 }
 
+#[cfg(feature = "evm")]
 impl FundTarget for EvmAddr {
     type Amount = U256;
     const KIND: ChainKind = ChainKind::Evm;
@@ -57,6 +63,7 @@ impl FundTarget for EvmAddr {
     }
 }
 
+#[cfg(feature = "solana")]
 impl FundTarget for SvmAddr {
     type Amount = u64;
     const KIND: ChainKind = ChainKind::Svm;
@@ -71,6 +78,7 @@ impl FundTarget for SvmAddr {
     }
 }
 
+#[cfg(feature = "tron")]
 impl FundTarget for TronAddress {
     type Amount = u64;
     const KIND: ChainKind = ChainKind::Tron;
