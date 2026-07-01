@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added (contribution scaffolding) / Changed (documentation refresh)
+
+* `CONTRIBUTING.md` (setup, the pre-PR command list mirroring CI, and the ground rules: mock-first default suite, feature subsets must build, seeded reproducibility, deliberate major pins), `.github/ISSUE_TEMPLATE/` (the bug template requires seed + mode + minimized history for harness failures) and a PR template with a CHANGELOG/docs/feature-subset checklist.
+* `docs/adding-a-vm.md`: the file-by-file checklist for adding a fifth chain ecosystem, derived from the Tron commit's actual blast radius (provider crate layout, the framework's enum dispatch touch points, macro hook, example wrappers, Makefile and CI wiring), each row naming which existing VM to crib from.
+* `DEVELOPER.md` swept for post-Tron staleness: the CI section describes all eight jobs plus the live-smoke workflow, the test inventory covers four VM crates (Tron's live tests live in `tests/onchain.rs`), the wrapper section documents the `tron_*` hook and the default-`unimplemented!` per-VM hooks, the events list gains `tron_logs()`, "Adding a predefined chain" gains `TronChainInfo`, and "Adding a new VM" drops the stale "RPC stub" framing and links the new checklist.
+* `README.md`: MSRV badge and install note, a "Reproducing a failure" paragraph (seed + `replay` are the whole workflow), and links to the new contribution docs.
+
 ### Added (CI hardening: MSRV, supply chain, feature matrix, live smoke)
 
 * Declared the workspace MSRV: `rust-version = "1.91"` in `[workspace.package]`, inherited by every crate (floor set by the locked `revm-state` 41). `DEVELOPER.md` now points at the manifest instead of hard-coding a compiler version. A new `msrv` CI job runs `cargo check --workspace` on exactly that toolchain.

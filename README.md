@@ -7,6 +7,7 @@
 A Rust testing suite for cross VM work. It puts four execution environments behind a single async trait, so the same test code drives an in process CosmWasm chain (`cw-multi-test`), an EVM (`revm`), Solana (`litesvm`), and Tron (a `revm` core with TVM-accurate layers) without changing shape.
 
 ![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)
+![MSRV](https://img.shields.io/badge/MSRV-1.91-orange?logo=rust)
 ![Edition](https://img.shields.io/badge/edition-2021-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Version](https://img.shields.io/badge/version-0.1.0-lightgrey)
@@ -53,6 +54,8 @@ tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
 Everything is `async` and the mock backends are not `Send`, so run on a current thread runtime: `#[tokio::test]` (current thread by default) or `#[tokio::main(flavor = "current_thread")]`. The library crates define `async fn`s but pull in no runtime; `tokio` is a dev dependency.
+
+The minimum supported Rust version is declared as `rust-version` in the workspace `Cargo.toml` and enforced by CI; any stable toolchain at or above it works.
 
 ## Quickstart
 
@@ -216,6 +219,8 @@ async fn counter_fuzz(#[runner] mut r: FuzzRunner<CounterHarness>) {
 
 Case `i` is seeded by `sub_seed(seed, i)`, so a flagged case re-runs in isolation by name. `#[invariant_runner]` and `#[endurance_runner]` emit a single test each. A negative seed (`seed = -1`) picks a fresh random seed per run and prints it, so a failure stays reproducible by copying the printed value back as a fixed `seed`.
 
+**Reproducing a failure.** Every failed run reports its seed and the exact operation history. Feed the seed back as the macro's `seed =`, or turn the history into a deterministic regression test with `ScenarioRunner::replay(history)`; both re-drive the identical sequence. When filing a bug, the seed plus mode (and the failing invariant name) are all a maintainer needs.
+
 In the example crate the heavier runs are opt in so the default `cargo test` stays fast: the fuzz, invariant, and endurance tests sit behind the `fuzz`, `invariant`, and `endurance` cargo features, while the scenario (rstest matrix) tests and the runner mechanics self tests always run. See `examples/integration-tests/tests/harness/` for a multi chain counter, a DeFi vault, and the runner mechanics.
 
 ## Wallets
@@ -320,6 +325,8 @@ cargo test -p cross-vm-integration-tests --test harness --features "fuzz invaria
 
 * `SPEC.md`: architecture and design.
 * `DEVELOPER.md`: per crate details, the full contract wrapper and hook reference, and how to add a VM or chain.
+* `docs/adding-a-vm.md`: the file-by-file checklist for a new chain ecosystem.
+* `CONTRIBUTING.md`: setup, the pre-PR command list, and ground rules.
 * `CHANGELOG.md`: release notes.
 
 ## License

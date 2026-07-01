@@ -1,0 +1,20 @@
+name: Feature request
+description: Propose a capability, a new chain ecosystem, or an API improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can you not do (or not do cleanly) today? A concrete test you could not write is the best motivation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: Rough API sketch or workflow. For a new VM, see docs/adding-a-vm.md first; note which backends (mock / RPC) you need.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
