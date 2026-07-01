@@ -11,15 +11,24 @@
 //!   (e.g. `cw-multi-test` has no transaction hash). Right path, missing data.
 
 use cross_vm_core::{ChainKind, CrossVmError};
+#[cfg(feature = "cw")]
 use cross_vm_cosmwasm::{CwAppResponse, Event};
+#[cfg(feature = "solana")]
 use cross_vm_solana::TransactionMetadata;
+// `Bytes`/`Log` are alloy-primitives types shared by the EVM and Tron variants. Source them from
+// whichever provider crate is compiled in (they are the same underlying types).
+#[cfg(feature = "evm")]
 use cross_vm_solidity::{Bytes, Log};
+#[cfg(all(feature = "tron", not(feature = "evm")))]
+use cross_vm_tron::{Bytes, Log};
 
 /// The raw, VM-specific result of an execution.
 pub enum RawResponse {
     /// A `cw-multi-test` execution response.
+    #[cfg(feature = "cw")]
     CosmWasm(CwAppResponse),
     /// The return data and emitted logs of an EVM call.
+    #[cfg(feature = "evm")]
     Evm {
         /// ABI-encoded return data.
         output: Bytes,
@@ -27,8 +36,10 @@ pub enum RawResponse {
         logs: Vec<Log>,
     },
     /// A `litesvm` transaction result.
+    #[cfg(feature = "solana")]
     Svm(TransactionMetadata),
     /// The return data and emitted logs of a Tron call.
+    #[cfg(feature = "tron")]
     Tron {
         /// ABI-encoded return data.
         output: Bytes,
@@ -41,9 +52,13 @@ impl RawResponse {
     /// Which VM produced this result.
     pub fn kind(&self) -> ChainKind {
         match self {
+            #[cfg(feature = "cw")]
             RawResponse::CosmWasm(_) => ChainKind::CosmWasm,
+            #[cfg(feature = "evm")]
             RawResponse::Evm { .. } => ChainKind::Evm,
+            #[cfg(feature = "solana")]
             RawResponse::Svm(_) => ChainKind::Svm,
+            #[cfg(feature = "tron")]
             RawResponse::Tron { .. } => ChainKind::Tron,
         }
     }
@@ -54,15 +69,19 @@ impl RawResponse {
     /// and CosmWasm mock backends, which do not expose a hash for an in-process execution.
     pub fn transaction_hash(&self) -> Result<String, CrossVmError> {
         match self {
+            #[cfg(feature = "solana")]
             RawResponse::Svm(m) => Ok(m.signature.to_string()),
+            #[cfg(feature = "cw")]
             RawResponse::CosmWasm(_) => Err(CrossVmError::unsupported(
                 ChainKind::CosmWasm,
                 "transaction hash",
             )),
+            #[cfg(feature = "evm")]
             RawResponse::Evm { .. } => Err(CrossVmError::unsupported(
                 ChainKind::Evm,
                 "transaction hash",
             )),
+            #[cfg(feature = "tron")]
             RawResponse::Tron { .. } => Err(CrossVmError::unsupported(
                 ChainKind::Tron,
                 "transaction hash",
@@ -73,9 +92,12 @@ impl RawResponse {
     /// Gas / compute units consumed, when the backend reports it.
     pub fn gas_used(&self) -> Option<u128> {
         match self {
+            // Solana reports compute units; the EVM, CosmWasm, and Tron mock paths do not surface
+            // a gas figure.
+            #[cfg(feature = "solana")]
             RawResponse::Svm(m) => Some(m.compute_units_consumed as u128),
-            // The current EVM and CosmWasm mock paths do not surface a gas figure.
-            RawResponse::Evm { .. } | RawResponse::CosmWasm(_) | RawResponse::Tron { .. } => None,
+            #[allow(unreachable_patterns)]
+            _ => None,
         }
     }
 
@@ -83,6 +105,8 @@ impl RawResponse {
     ///
     /// CosmWasm events are typed key/value attributes. See [`evm_logs`](Self::evm_logs) and
     /// [`solana_logs`](Self::solana_logs) for the other VMs' (differently shaped) event data.
+    #[cfg(feature = "cw")]
+    #[allow(unreachable_patterns)]
     pub fn cosmwasm_events(&self) -> Result<&[Event], CrossVmError> {
         match self {
             RawResponse::CosmWasm(r) => Ok(&r.events),
@@ -94,6 +118,8 @@ impl RawResponse {
     ///
     /// Each [`Log`] carries an emitting address, indexed topics, and data. Solidity `event`s are
     /// ABI-encoded into this shape.
+    #[cfg(feature = "evm")]
+    #[allow(unreachable_patterns)]
     pub fn evm_logs(&self) -> Result<&[Log], CrossVmError> {
         match self {
             RawResponse::Evm { logs, .. } => Ok(logs),
@@ -105,6 +131,8 @@ impl RawResponse {
     ///
     /// Tron logs are EVM-shaped: each [`Log`] carries an emitting address, indexed topics, and
     /// data.
+    #[cfg(feature = "tron")]
+    #[allow(unreachable_patterns)]
     pub fn tron_logs(&self) -> Result<&[Log], CrossVmError> {
         match self {
             RawResponse::Tron { logs, .. } => Ok(logs),
@@ -116,6 +144,8 @@ impl RawResponse {
     ///
     /// These are the raw `msg!` / `sol_log` lines. Anchor `emit!` events are base64-encoded inside
     /// them (`Program data: <base64>`); decoding to a typed event is left to the caller.
+    #[cfg(feature = "solana")]
+    #[allow(unreachable_patterns)]
     pub fn solana_logs(&self) -> Result<&[String], CrossVmError> {
         match self {
             RawResponse::Svm(m) => Ok(&m.logs),
@@ -132,6 +162,7 @@ pub struct AppResponse<T> {
 
 impl<T> AppResponse<T> {
     /// Build a CosmWasm response.
+    #[cfg(feature = "cw")]
     pub fn cosmwasm(value: T, raw: CwAppResponse) -> Self {
         Self {
             value,
@@ -140,6 +171,7 @@ impl<T> AppResponse<T> {
     }
 
     /// Build an EVM response from the call's return data and emitted logs.
+    #[cfg(feature = "evm")]
     pub fn evm(value: T, output: Bytes, logs: Vec<Log>) -> Self {
         Self {
             value,
@@ -148,6 +180,7 @@ impl<T> AppResponse<T> {
     }
 
     /// Build a Solana response.
+    #[cfg(feature = "solana")]
     pub fn solana(value: T, raw: TransactionMetadata) -> Self {
         Self {
             value,
@@ -156,6 +189,7 @@ impl<T> AppResponse<T> {
     }
 
     /// Build a Tron response from the call's return data and emitted logs.
+    #[cfg(feature = "tron")]
     pub fn tron(value: T, output: Bytes, logs: Vec<Log>) -> Self {
         Self {
             value,
@@ -197,6 +231,8 @@ impl<T> AppResponse<T> {
     }
 
     /// The raw `cw-multi-test` response, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "cw")]
+    #[allow(unreachable_patterns)]
     pub fn raw_cosmwasm(&self) -> Result<&CwAppResponse, CrossVmError> {
         match &self.raw {
             RawResponse::CosmWasm(r) => Ok(r),
@@ -205,11 +241,14 @@ impl<T> AppResponse<T> {
     }
 
     /// The events emitted by a CosmWasm execution, or [`CrossVmError::WrongVm`].
+    #[cfg(feature = "cw")]
     pub fn raw_cosmwasm_events(&self) -> Result<&[Event], CrossVmError> {
         self.raw.cosmwasm_events()
     }
 
     /// The raw EVM return data, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "evm")]
+    #[allow(unreachable_patterns)]
     pub fn raw_evm(&self) -> Result<&Bytes, CrossVmError> {
         match &self.raw {
             RawResponse::Evm { output, .. } => Ok(output),
@@ -218,11 +257,14 @@ impl<T> AppResponse<T> {
     }
 
     /// The logs (events) emitted by an EVM call, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "evm")]
     pub fn raw_evm_logs(&self) -> Result<&[Log], CrossVmError> {
         self.raw.evm_logs()
     }
 
     /// The raw Tron return data, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "tron")]
+    #[allow(unreachable_patterns)]
     pub fn raw_tron(&self) -> Result<&Bytes, CrossVmError> {
         match &self.raw {
             RawResponse::Tron { output, .. } => Ok(output),
@@ -231,16 +273,20 @@ impl<T> AppResponse<T> {
     }
 
     /// The logs (events) emitted by a Tron call, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "tron")]
     pub fn raw_tron_logs(&self) -> Result<&[Log], CrossVmError> {
         self.raw.tron_logs()
     }
 
     /// The program log lines from a Solana execution, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "solana")]
     pub fn raw_solana_logs(&self) -> Result<&[String], CrossVmError> {
         self.raw.solana_logs()
     }
 
     /// The raw `litesvm` transaction result, or [`CrossVmError::WrongVm`] for another VM.
+    #[cfg(feature = "solana")]
+    #[allow(unreachable_patterns)]
     pub fn raw_solana(&self) -> Result<&TransactionMetadata, CrossVmError> {
         match &self.raw {
             RawResponse::Svm(m) => Ok(m),
@@ -249,7 +295,7 @@ impl<T> AppResponse<T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "evm", feature = "cw"))]
 mod tests {
     use super::*;
 

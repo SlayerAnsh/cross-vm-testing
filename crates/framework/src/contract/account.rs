@@ -9,21 +9,29 @@
 //! address), which is what [`ContractBase`](crate::contract::ContractBase) holds.
 
 use cross_vm_core::{ChainKind, CrossVmError};
+#[cfg(feature = "cw")]
 use cross_vm_cosmwasm::Addr;
+#[cfg(feature = "solana")]
 use cross_vm_solana::Address as SvmAddress;
+#[cfg(feature = "evm")]
 use cross_vm_solidity::Address as EvmAddress;
+#[cfg(feature = "tron")]
 use cross_vm_tron::TronAddress;
 
 /// A VM-agnostic address: an account a test signs with, or a deployed contract address.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Account {
     /// A CosmWasm bech32 address.
+    #[cfg(feature = "cw")]
     CosmWasm(Addr),
     /// An EVM 20-byte address.
+    #[cfg(feature = "evm")]
     Evm(EvmAddress),
     /// A Solana address (pubkey).
+    #[cfg(feature = "solana")]
     Svm(SvmAddress),
     /// A Tron address.
+    #[cfg(feature = "tron")]
     Tron(TronAddress),
 }
 
@@ -31,14 +39,20 @@ impl Account {
     /// Which VM this address belongs to.
     pub fn kind(&self) -> ChainKind {
         match self {
+            #[cfg(feature = "cw")]
             Account::CosmWasm(_) => ChainKind::CosmWasm,
+            #[cfg(feature = "evm")]
             Account::Evm(_) => ChainKind::Evm,
+            #[cfg(feature = "solana")]
             Account::Svm(_) => ChainKind::Svm,
+            #[cfg(feature = "tron")]
             Account::Tron(_) => ChainKind::Tron,
         }
     }
 
     /// Recover the CosmWasm address, or [`CrossVmError::WrongVm`] if this is another VM.
+    #[cfg(feature = "cw")]
+    #[allow(unreachable_patterns)]
     pub fn cw(&self) -> Result<&Addr, CrossVmError> {
         match self {
             Account::CosmWasm(a) => Ok(a),
@@ -47,6 +61,8 @@ impl Account {
     }
 
     /// Recover the EVM address, or [`CrossVmError::WrongVm`] if this is another VM.
+    #[cfg(feature = "evm")]
+    #[allow(unreachable_patterns)]
     pub fn evm(&self) -> Result<&EvmAddress, CrossVmError> {
         match self {
             Account::Evm(a) => Ok(a),
@@ -55,6 +71,8 @@ impl Account {
     }
 
     /// Recover the Solana address, or [`CrossVmError::WrongVm`] if this is another VM.
+    #[cfg(feature = "solana")]
+    #[allow(unreachable_patterns)]
     pub fn svm(&self) -> Result<&SvmAddress, CrossVmError> {
         match self {
             Account::Svm(a) => Ok(a),
@@ -63,6 +81,8 @@ impl Account {
     }
 
     /// Recover the Tron address, or [`CrossVmError::WrongVm`] if this is another VM.
+    #[cfg(feature = "tron")]
+    #[allow(unreachable_patterns)]
     pub fn tron(&self) -> Result<&TronAddress, CrossVmError> {
         match self {
             Account::Tron(a) => Ok(a),
@@ -71,31 +91,35 @@ impl Account {
     }
 }
 
+#[cfg(feature = "cw")]
 impl From<Addr> for Account {
     fn from(a: Addr) -> Self {
         Account::CosmWasm(a)
     }
 }
 
+#[cfg(feature = "evm")]
 impl From<EvmAddress> for Account {
     fn from(a: EvmAddress) -> Self {
         Account::Evm(a)
     }
 }
 
+#[cfg(feature = "solana")]
 impl From<SvmAddress> for Account {
     fn from(a: SvmAddress) -> Self {
         Account::Svm(a)
     }
 }
 
+#[cfg(feature = "tron")]
 impl From<TronAddress> for Account {
     fn from(a: TronAddress) -> Self {
         Account::Tron(a)
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cw", feature = "evm"))]
 mod tests {
     use super::*;
 

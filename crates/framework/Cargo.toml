@@ -9,10 +9,10 @@ description = "Cross-VM testing framework: hold and drive CosmWasm, EVM, and Sol
 [dependencies]
 cross-vm-core.workspace = true
 cross-vm-macros.workspace = true
-cross-vm-cosmwasm = { path = "../cosmwasm" }
-cross-vm-solidity = { path = "../solidity" }
-cross-vm-solana = { path = "../solana" }
-cross-vm-tron = { path = "../tron" }
+cross-vm-cosmwasm = { path = "../cosmwasm", optional = true }
+cross-vm-solidity = { path = "../solidity", optional = true }
+cross-vm-solana = { path = "../solana", optional = true }
+cross-vm-tron = { path = "../tron", optional = true }
 thiserror.workspace = true
 tokio.workspace = true
 # Emit per-operation / per-invariant debug logs through the tracing facade.
@@ -24,6 +24,14 @@ rand_chacha = "0.3"
 arbitrary = { version = "1", features = ["derive"], optional = true }
 
 [features]
+default = ["cw", "evm", "solana", "tron"]
+# Per-ecosystem gates. Each pulls in its provider crate and enables that VM's variants,
+# accessors, and match arms across the framework. Drop the ones you do not test to trim the
+# dependency tree (revm, litesvm, cw-multi-test, tron TVM) and compile time.
+cw = ["dep:cross-vm-cosmwasm"]
+evm = ["dep:cross-vm-solidity"]
+solana = ["dep:cross-vm-solana"]
+tron = ["dep:cross-vm-tron"]
 # Enables `sample_arbitrary` + the `arbitrary` derive path for stateless op generation.
 fuzz = ["dep:arbitrary"]
 

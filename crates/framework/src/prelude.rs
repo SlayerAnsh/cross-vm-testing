@@ -23,25 +23,33 @@ pub use cross_vm_macros::{
 };
 
 // CosmWasm
+#[cfg(feature = "cw")]
 pub use cross_vm_cosmwasm::chains::{COSMOS_HUB, JUNO, LOCAL as CW_LOCAL, NEUTRON, OSMOSIS};
+#[cfg(feature = "cw")]
 pub use cross_vm_cosmwasm::{CwAsset, CwChain, CwContract, CwMockProvider, CwRpcProvider, CwSerde};
 
 // EVM
+#[cfg(feature = "evm")]
 pub use cross_vm_solidity::chains::{
     ARBITRUM, BASE, ETHEREUM, LOCAL as EVM_LOCAL, OPTIMISM, POLYGON,
 };
+#[cfg(feature = "evm")]
 pub use cross_vm_solidity::{
     EvmAsset, EvmChain, EvmExecution, EvmMockProvider, EvmRpcProvider, Log,
 };
 
 // Solana
+#[cfg(feature = "solana")]
 pub use cross_vm_solana::chains::{SOLANA_DEVNET, SOLANA_LOCALNET, SOLANA_MAINNET, SOLANA_TESTNET};
+#[cfg(feature = "solana")]
 pub use cross_vm_solana::{SvmAsset, SvmChain, SvmMockProvider, SvmRpcProvider};
 
 // Tron
+#[cfg(feature = "tron")]
 pub use cross_vm_tron::chains::{
     LOCAL as TRON_LOCAL, MAINNET as TRON_MAINNET, NILE as TRON_NILE, SHASTA as TRON_SHASTA,
 };
+#[cfg(feature = "tron")]
 pub use cross_vm_tron::{
     TronAddress, TronAsset, TronChain, TronExecution, TronMockProvider, TronRpcProvider,
 };

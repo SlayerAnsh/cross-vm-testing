@@ -6,8 +6,11 @@
 //! work: `apply` discovers the child's address, records it in the `World`, and a later step
 //! rebuilds a handle for it from this context with [`Ctx::chain`].
 
+#[cfg(feature = "cw")]
 use cross_vm_cosmwasm::CwChain;
+#[cfg(feature = "solana")]
 use cross_vm_solana::SvmChain;
+#[cfg(feature = "evm")]
 use cross_vm_solidity::EvmChain;
 
 use crate::any_chain::AnyChain;
@@ -33,16 +36,19 @@ impl Ctx {
     }
 
     /// Borrow the CosmWasm chain under `label`.
+    #[cfg(feature = "cw")]
     pub fn cosmwasm(&mut self, label: &str) -> Result<&mut CwChain, EnvError> {
         self.env.cosmwasm(label)
     }
 
     /// Borrow the EVM chain under `label`.
+    #[cfg(feature = "evm")]
     pub fn evm(&mut self, label: &str) -> Result<&mut EvmChain, EnvError> {
         self.env.evm(label)
     }
 
     /// Borrow the Solana chain under `label`.
+    #[cfg(feature = "solana")]
     pub fn solana(&mut self, label: &str) -> Result<&mut SvmChain, EnvError> {
         self.env.solana(label)
     }
