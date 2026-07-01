@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added (CI hardening: MSRV, supply chain, feature matrix, live smoke)
+
+* Declared the workspace MSRV: `rust-version = "1.91"` in `[workspace.package]`, inherited by every crate (floor set by the locked `revm-state` 41). `DEVELOPER.md` now points at the manifest instead of hard-coding a compiler version. A new `msrv` CI job runs `cargo check --workspace` on exactly that toolchain.
+* `deny.toml` + a `cargo deny` CI job: RustSec advisories (with three documented `rustls-webpki` ignores reachable only through the pinned `cosmrs` live-RPC path), a license allowlist, duplicate-version warnings, and a registry/git source lockdown. `unmaintained = "workspace"` scopes unmaintained-crate errors to direct dependencies (the solana/cosmos trees carry several transitively).
+* `.github/dependabot.yml`: weekly grouped minor/patch cargo updates (majors stay individual PRs so the pinned-major rationale in `DEVELOPER.md` is revisited consciously) and GitHub Actions updates.
+* A `features` CI job (`cargo hack --feature-powerset --depth 2 --at-least-one-of cw,evm,solana,tron`) checking every VM feature subset the framework supports; `cross-vm-framework` now emits a clear `compile_error!` when built with no VM feature at all (the per-VM enums would be empty).
+* Clippy now covers test and example targets: the `test` CI job (which has the contract artifacts) runs `cargo clippy --all-targets -- -D warnings` with the same cosmwasm target split as the test steps. The artifact-free `lint` job is unchanged.
+* `.github/workflows/live-smoke.yml`: a weekly + manually dispatchable, secrets-gated, non-blocking job running the `#[ignore]`d live RPC tests (`tests/rpc.rs` in the VM crates, `tests/onchain.rs` in tron) that otherwise have zero automated coverage. Skips cleanly when `MNEMONIC_TEST` is not configured, so forks stay green.
+* The pinned Agave toolchain version moved to a single `SOLANA_VERSION` workflow env used by the install URL and both caches, so the next bump is one line.
+
 ### Added (Tron (TVM) chain support)
 
 * New `cross-vm-tron` crate (`crates/tron`): a fourth ecosystem behind the same `ChainProvider` trait, alongside CosmWasm (`cw-multi-test`), EVM (`revm`), and Solana (`litesvm`). Two backends, `TronChain` = `Mock(TronMockProvider)` or `Rpc(TronRpcProvider)`, mirroring the EVM crate (the TVM is an EVM derivative, so the mock reuses a `revm` core and layers the Tron-specific behavior on top).

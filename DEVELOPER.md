@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-* Rust stable (developed against 1.96, edition 2021).
+* Rust stable, edition 2021. The MSRV is declared as `rust-version` in the workspace `Cargo.toml` (the manifest is the source of truth; CI enforces it with a dedicated `msrv` job).
 * Building the integration-test contract artifacts (all git-ignored): Foundry (`forge`) for the EVM Counter, `cargo-build-sbf` for the Solana program, and the CosmWasm wasm builds. Run `make compile` (or a single ecosystem target) before `cargo test -p cross-vm-integration-tests`. The pure unit tests in each VM crate need none of this.
 
 ## Continuous integration

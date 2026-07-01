@@ -2,6 +2,7 @@
 name = "cross-vm-integration-tests"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Cross-VM multi-chain integration & example tests (counter, vault, harness)"

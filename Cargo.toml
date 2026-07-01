@@ -21,6 +21,9 @@ exclude = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# Floor set by the locked dependency tree (revm-state 41 requires 1.91); verified in CI by the
+# msrv job. Bump alongside dependency upgrades that raise the floor.
+rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/Anshudhar/cross-vm-testing"
 

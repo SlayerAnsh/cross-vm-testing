@@ -1,0 +1,67 @@
+name: Live RPC smoke
+
+# The default CI suite is 100% in-process mocks; the live RPC providers
+# (tests/rpc.rs in the VM crates, tests/onchain.rs in tron) otherwise have zero
+# automated coverage. This workflow gives them a weekly heartbeat plus a manual
+# trigger. It is NON-BLOCKING by design: never a required check, failures mean
+# "a provider or a public endpoint drifted", not "the PR is broken".
+#
+# Secrets: MNEMONIC_TEST (throwaway testnet mnemonic) and ON_CHAIN_WALLET
+# (funded testnet mnemonic) as repository secrets. The wallet rosters resolve
+# them lazily from the process env (dotenvy falls through to real env vars), so
+# exporting them is enough; no .env file is written. If the secrets are absent
+# the run skips instead of failing, so forks stay green.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays 06:17 UTC; odd minute to dodge the top-of-hour cron stampede.
+    - cron: "17 6 * * 1"
+
+concurrency:
+  group: live-smoke
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  live-smoke:
+    name: Live RPC smoke (ignored tests)
+    runs-on: ubuntu-latest
+    # Scheduled runs only make sense on the canonical repo, not forks.
+    if: github.event_name == 'workflow_dispatch' || github.repository_owner == 'Anshudhar'
+    env:
+      MNEMONIC_TEST: ${{ secrets.MNEMONIC_TEST }}
+      ON_CHAIN_WALLET: ${{ secrets.ON_CHAIN_WALLET }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check secrets
+        id: secrets
+        run: |
+          if [ -z "$MNEMONIC_TEST" ]; then
+            echo "MNEMONIC_TEST not configured; skipping live smoke."
+            echo "have_secrets=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_secrets=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: steps.secrets.outputs.have_secrets == 'true'
+        with:
+          rustflags: ""
+      - uses: Swatinem/rust-cache@v2
+        if: steps.secrets.outputs.have_secrets == 'true'
+        with:
+          shared-key: cross-vm-live-smoke
+          cache-on-failure: true
+      # Only the artifact-free live targets: the rpc.rs suites embed nothing, and
+      # tron's onchain.rs carries its own bytecode. solidity/cosmwasm onchain.rs
+      # (artifact-embedding) stay manual-only.
+      - name: Live RPC tests
+        if: steps.secrets.outputs.have_secrets == 'true'
+        run: |
+          cargo test -p cross-vm-solidity --test rpc -- --ignored --nocapture
+          cargo test -p cross-vm-solana   --test rpc -- --ignored --nocapture
+          cargo test -p cross-vm-cosmwasm --test rpc -- --ignored --nocapture
+          cargo test -p cross-vm-tron --test onchain -- --ignored --nocapture

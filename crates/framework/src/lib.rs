@@ -25,6 +25,15 @@
 //! # }
 //! ```
 
+// The whole crate dispatches over the per-VM enums (`AnyChain`, `Account`, ...); with every VM
+// feature off those enums are empty and nothing can be constructed. Fail fast with a clear
+// message instead of dozens of non-exhaustive-match errors.
+#[cfg(not(any(feature = "cw", feature = "evm", feature = "solana", feature = "tron")))]
+compile_error!(
+    "cross-vm-framework requires at least one VM feature: enable one or more of \
+     `cw`, `evm`, `solana`, `tron` (all are on by default)"
+);
+
 mod any_chain;
 mod contract;
 mod env;
