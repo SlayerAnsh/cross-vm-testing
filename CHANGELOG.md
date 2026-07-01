@@ -17,6 +17,10 @@ All notable changes to this project are documented here. The format follows Keep
   ```
 * `cross-vm-framework`: documented that transition-style invariants (comparing state before vs after one op) belong in `apply` (async, holds `Ctx`), stashing the snapshot in `World`, rather than in the sync `ContractBase` hooks (which hold no chain handle and cannot query state). The vault harness example gains a `DepositTransition` invariant that snapshots on-chain collateral before a deposit and diffs the live post-state.
 
+### Changed (runner internals factored; no behavior change)
+
+* `cross-vm-framework`: the runner's three drivers now share one machinery layer. A private `ReportBuilder` is the single `RunReport` construction path (replacing six hand-built literals, and keeping `skipped == coverage.total_skipped()` and `Failure::step == steps` in one place); an `OpSource` enum (generated vs fixed ops) folds the Fuzz/Invariant driver and the Scenario `run_fixed` into one shared `drive` loop; and the endurance final invariant sweep and `step`'s per-op check loop are one `sweep` helper. Endurance keeps its own wall-clock loop. Verified behavior-preserving three ways: a new golden-seed test pins the exact op sequence `seed = 42` generates (the rng draw order is a compatibility surface; recorded seeds must keep reproducing), the whole harness suite passes untouched, and the `RUST_LOG` debug output of a full run is byte-identical before and after (timestamps aside). `ReportBuilder::fail` is also the natural interception point for a future failure-corpus feature. One intended nit: the endurance final sweep now emits the same per-invariant `debug` lines the mid-run checks always had.
+
 ### Changed (harness diagnostics hardening)
 
 * `cross-vm-framework`: `Stats` are now strictly per-run. Every driver resets the collected stats at entry, and `shrink` / `run_and_shrink` park them for the duration of the shrink (candidate replays neither tally into the caller's data nor print per-op summary blocks), so a report's stats always describe exactly the run that produced it. Previously stats accumulated across every run and shrink replay on the same runner.

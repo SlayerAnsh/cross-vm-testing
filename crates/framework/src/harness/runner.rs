@@ -265,77 +265,37 @@ impl<H: Harness, M: Sequential> Runner<H, M> {
         if let Some(s) = stats.as_mut() {
             *s = Stats::default();
         }
-        let mut coverage = Coverage::seed(harness.invariants().iter().map(|i| format!("{i:?}")));
+        let builder = ReportBuilder::new(*seed, M::LABEL, harness);
 
         // An empty kind slice can generate nothing: surface an infra failure instead of panicking
         // inside the rng (`None` is the "draw from every kind" spelling).
         if kinds.is_some_and(|ks| ks.is_empty()) {
-            let report = RunReport {
-                seed: *seed,
-                mode: M::LABEL,
-                steps: 0,
-                skipped: coverage.total_skipped(),
-                coverage,
-                failure: Some(Failure {
-                    step: 0,
-                    op: None,
-                    history: Vec::new(),
-                    kind: FailureKind::Infra(
-                        "empty op-kind slice (pass None to draw from every kind)".into(),
-                    ),
-                }),
-            };
+            let report = builder.fail(
+                0,
+                None,
+                FailureKind::Infra(
+                    "empty op-kind slice (pass None to draw from every kind)".into(),
+                ),
+            );
             log_summary(&report, stats.as_ref());
             return report;
         }
 
-        let report = 'run: {
-            let mut history = Vec::new();
-            for i in 0..ops {
-                let op = match kinds {
-                    None => harness.generate(rng, world),
-                    Some(ks) => {
-                        let kind = ks[rng.index(ks.len())];
-                        harness.generate_op(rng, world, kind)
-                    }
-                };
-                history.push(op.clone());
-                let do_check = check_every > 0 && (i + 1).is_multiple_of(check_every);
-                if let Err(kind) = step(
-                    harness,
-                    ctx,
-                    world,
-                    &op,
-                    do_check,
-                    &mut coverage,
-                    stats.as_mut(),
-                )
-                .await
-                {
-                    break 'run RunReport {
-                        seed: *seed,
-                        mode: M::LABEL,
-                        steps: i + 1,
-                        skipped: coverage.total_skipped(),
-                        coverage,
-                        failure: Some(Failure {
-                            step: i + 1,
-                            op: Some(op),
-                            history,
-                            kind,
-                        }),
-                    };
-                }
-            }
-            RunReport {
-                seed: *seed,
-                mode: M::LABEL,
-                steps: history.len(),
-                skipped: coverage.total_skipped(),
-                coverage,
-                failure: None,
-            }
+        let source = OpSource::Generated {
+            kinds,
+            remaining: ops,
         };
+        let report = drive(
+            harness,
+            ctx,
+            world,
+            rng,
+            source,
+            check_every,
+            builder,
+            stats.as_mut(),
+        )
+        .await;
         log_summary(&report, stats.as_ref());
         report
     }
@@ -372,16 +332,15 @@ impl<H: Harness> Runner<H, Endurance> {
         if let Some(s) = stats.as_mut() {
             *s = Stats::default();
         }
-        let mut coverage = Coverage::seed(harness.invariants().iter().map(|i| format!("{i:?}")));
+        let mut builder = ReportBuilder::new(seed, Endurance::LABEL, harness);
 
         let report = 'run: {
-            let mut history = Vec::new();
             let deadline = Instant::now() + duration;
             let mut steps = 0usize;
 
             while Instant::now() < deadline {
                 let op = harness.generate(rng, world);
-                history.push(op.clone());
+                builder.history.push(op.clone());
                 steps += 1;
                 let do_check = check_every > 0 && steps.is_multiple_of(check_every);
                 if let Err(kind) = step(
@@ -390,24 +349,12 @@ impl<H: Harness> Runner<H, Endurance> {
                     world,
                     &op,
                     do_check,
-                    &mut coverage,
+                    &mut builder.coverage,
                     stats.as_mut(),
                 )
                 .await
                 {
-                    break 'run RunReport {
-                        seed,
-                        mode: Endurance::LABEL,
-                        steps,
-                        skipped: coverage.total_skipped(),
-                        coverage,
-                        failure: Some(Failure {
-                            step: steps,
-                            op: Some(op),
-                            history,
-                            kind,
-                        }),
-                    };
+                    break 'run builder.fail(steps, Some(op), kind);
                 }
 
                 if let Some(base) = advance_blocks {
@@ -417,14 +364,8 @@ impl<H: Harness> Runner<H, Endurance> {
                         0
                     };
                     if let Err(e) = harness.advance(ctx, base + extra).await {
-                        break 'run infra_report(
-                            seed,
-                            Endurance::LABEL,
-                            steps,
-                            coverage,
-                            history,
-                            e,
-                        );
+                        let last = builder.history.last().cloned();
+                        break 'run builder.fail(steps, last, FailureKind::Infra(e.to_string()));
                     }
                 }
 
@@ -440,41 +381,12 @@ impl<H: Harness> Runner<H, Endurance> {
             }
 
             // Final invariant sweep: catches drift accumulated since the last mid-run check.
-            for inv in harness.invariants() {
-                let name = format!("{inv:?}");
-                match harness.check(ctx, world, &inv).await {
-                    CheckOutcome::Held => coverage.record_held(&name),
-                    CheckOutcome::Skipped(_) => coverage.record_skipped(&name),
-                    CheckOutcome::Violated(v) => {
-                        coverage.record_violated(&name);
-                        break 'run RunReport {
-                            seed,
-                            mode: Endurance::LABEL,
-                            steps,
-                            skipped: coverage.total_skipped(),
-                            coverage,
-                            failure: Some(Failure {
-                                step: steps,
-                                op: history.last().cloned(),
-                                history,
-                                kind: FailureKind::Invariant {
-                                    name,
-                                    detail: v.detail,
-                                },
-                            }),
-                        };
-                    }
-                }
+            if let Err(kind) = sweep(harness, ctx, world, &mut builder.coverage).await {
+                let last = builder.history.last().cloned();
+                break 'run builder.fail(steps, last, kind);
             }
 
-            RunReport {
-                seed,
-                mode: Endurance::LABEL,
-                steps,
-                skipped: coverage.total_skipped(),
-                coverage,
-                failure: None,
-            }
+            builder.pass(steps)
         };
         log_summary(&report, stats.as_ref());
         report
@@ -727,61 +639,191 @@ impl<H: Harness> Runner<H, Scenario> {
             ctx,
             world,
             seed,
+            rng,
             stats,
             ..
         } = self;
-        let seed = *seed;
         let ctx = ctx.as_mut().expect(NOT_SET_UP);
         let world = world.as_mut().expect(NOT_SET_UP);
         // Fresh tallies per run: a report's stats always describe exactly this run.
         if let Some(s) = stats.as_mut() {
             *s = Stats::default();
         }
-        let mut coverage = Coverage::seed(harness.invariants().iter().map(|i| format!("{i:?}")));
-
-        let report = 'run: {
-            let mut history = Vec::new();
-            for (i, op) in ops.into_iter().enumerate() {
-                history.push(op.clone());
-                let do_check = check_every > 0 && (i + 1).is_multiple_of(check_every);
-                if let Err(kind) = step(
-                    harness,
-                    ctx,
-                    world,
-                    &op,
-                    do_check,
-                    &mut coverage,
-                    stats.as_mut(),
-                )
-                .await
-                {
-                    break 'run RunReport {
-                        seed,
-                        mode,
-                        steps: i + 1,
-                        skipped: coverage.total_skipped(),
-                        coverage,
-                        failure: Some(Failure {
-                            step: i + 1,
-                            op: Some(op),
-                            history,
-                            kind,
-                        }),
-                    };
-                }
-            }
-            RunReport {
-                seed,
-                mode,
-                steps: history.len(),
-                skipped: coverage.total_skipped(),
-                coverage,
-                failure: None,
-            }
-        };
+        let builder = ReportBuilder::new(*seed, mode, harness);
+        let report = drive(
+            harness,
+            ctx,
+            world,
+            rng,
+            OpSource::Fixed(ops.into_iter()),
+            check_every,
+            builder,
+            stats.as_mut(),
+        )
+        .await;
         log_summary(&report, stats.as_ref());
         report
     }
+}
+
+// ----- shared driver machinery -----
+
+/// Accumulates the pieces every driver builds a [`RunReport`] from (seed, mode label, coverage,
+/// history), with exactly two exits: [`pass`](ReportBuilder::pass) and
+/// [`fail`](ReportBuilder::fail). The single construction path keeps the `skipped ==
+/// coverage.total_skipped()` and `Failure::step == steps` invariants in one place instead of at
+/// every driver's every exit.
+struct ReportBuilder<Op> {
+    seed: u64,
+    mode: &'static str,
+    coverage: Coverage,
+    history: Vec<Op>,
+}
+
+impl<Op: Clone> ReportBuilder<Op> {
+    /// A builder with coverage pre-seeded from the harness's invariants (so a never-checked
+    /// invariant still shows an all-zero total) and an empty history.
+    fn new<H: Harness>(seed: u64, mode: &'static str, harness: &H) -> Self {
+        Self {
+            seed,
+            mode,
+            coverage: Coverage::seed(harness.invariants().iter().map(|i| format!("{i:?}"))),
+            history: Vec::new(),
+        }
+    }
+
+    /// The passing report after `steps` applied operations.
+    fn pass(self, steps: usize) -> RunReport<Op> {
+        RunReport {
+            seed: self.seed,
+            mode: self.mode,
+            steps,
+            skipped: self.coverage.total_skipped(),
+            coverage: self.coverage,
+            failure: None,
+        }
+    }
+
+    /// The failing report: failed at step `steps` on `op` (if one was in flight) with `kind`,
+    /// carrying the full replayable history.
+    fn fail(self, steps: usize, op: Option<Op>, kind: FailureKind) -> RunReport<Op> {
+        RunReport {
+            seed: self.seed,
+            mode: self.mode,
+            steps,
+            skipped: self.coverage.total_skipped(),
+            coverage: self.coverage,
+            failure: Some(Failure {
+                step: steps,
+                op,
+                history: self.history,
+                kind,
+            }),
+        }
+    }
+}
+
+/// Where a driver's next operation comes from: freshly generated (fuzz / invariant) or a fixed
+/// list (scenario / replay / shrink candidates). Generated draws preserve the exact rng order the
+/// modes have always used (kind index first when restricted, then op data), which is what keeps
+/// recorded seeds reproducing across releases (pinned by the golden-seed test in mechanics.rs).
+enum OpSource<'a, H: Harness> {
+    Generated {
+        kinds: Option<&'a [H::OpKind]>,
+        remaining: usize,
+    },
+    Fixed(std::vec::IntoIter<H::Operation>),
+}
+
+impl<H: Harness> OpSource<'_, H> {
+    fn next(&mut self, harness: &H, rng: &mut Prng, world: &H::World) -> Option<H::Operation> {
+        match self {
+            OpSource::Generated { kinds, remaining } => {
+                if *remaining == 0 {
+                    return None;
+                }
+                *remaining -= 1;
+                Some(match kinds {
+                    None => harness.generate(rng, world),
+                    Some(ks) => {
+                        let kind = ks[rng.index(ks.len())];
+                        harness.generate_op(rng, world, kind)
+                    }
+                })
+            }
+            OpSource::Fixed(iter) => iter.next(),
+        }
+    }
+}
+
+/// The shared sequence driver behind the Fuzz/Invariant `run` and the Scenario `run_fixed`:
+/// pull ops from `source`, apply each via [`step`] under the `check_every` cadence, and exit
+/// through the builder on the first failure. Endurance keeps its own loop (wall-clock deadline,
+/// inter-op delays, block advance) but shares [`ReportBuilder`], [`step`], and [`sweep`].
+#[allow(clippy::too_many_arguments)]
+async fn drive<H: Harness>(
+    harness: &H,
+    ctx: &mut Ctx,
+    world: &mut H::World,
+    rng: &mut Prng,
+    mut source: OpSource<'_, H>,
+    check_every: usize,
+    mut builder: ReportBuilder<H::Operation>,
+    mut stats: Option<&mut Stats>,
+) -> RunReport<H::Operation> {
+    let mut steps = 0usize;
+    while let Some(op) = source.next(harness, rng, world) {
+        builder.history.push(op.clone());
+        steps += 1;
+        let do_check = check_every > 0 && steps.is_multiple_of(check_every);
+        if let Err(kind) = step(
+            harness,
+            ctx,
+            world,
+            &op,
+            do_check,
+            &mut builder.coverage,
+            stats.as_deref_mut(),
+        )
+        .await
+        {
+            return builder.fail(steps, Some(op), kind);
+        }
+    }
+    builder.pass(steps)
+}
+
+/// Check every invariant against the current state, recording each outcome into `coverage`.
+/// The first violation is the error. Shared by [`step`]'s per-op checking and the endurance
+/// final sweep.
+async fn sweep<H: Harness>(
+    harness: &H,
+    ctx: &mut Ctx,
+    world: &mut H::World,
+    coverage: &mut Coverage,
+) -> Result<(), FailureKind> {
+    for inv in harness.invariants() {
+        let name = format!("{inv:?}");
+        match harness.check(ctx, world, &inv).await {
+            CheckOutcome::Held => {
+                coverage.record_held(&name);
+                tracing::debug!(invariant = ?inv, "invariant held");
+            }
+            CheckOutcome::Skipped(why) => {
+                coverage.record_skipped(&name);
+                tracing::debug!(invariant = ?inv, reason = %why, "invariant skipped");
+            }
+            CheckOutcome::Violated(v) => {
+                coverage.record_violated(&name);
+                tracing::debug!(invariant = ?inv, detail = %v.detail, "invariant violated");
+                return Err(FailureKind::Invariant {
+                    name,
+                    detail: v.detail,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 // ----- shared per-operation step -----
@@ -834,27 +876,7 @@ async fn step<H: Harness>(
         }
     }
     if check {
-        for inv in harness.invariants() {
-            let name = format!("{inv:?}");
-            match harness.check(ctx, world, &inv).await {
-                CheckOutcome::Held => {
-                    coverage.record_held(&name);
-                    tracing::debug!(invariant = ?inv, "invariant held");
-                }
-                CheckOutcome::Skipped(why) => {
-                    coverage.record_skipped(&name);
-                    tracing::debug!(invariant = ?inv, reason = %why, "invariant skipped");
-                }
-                CheckOutcome::Violated(v) => {
-                    coverage.record_violated(&name);
-                    tracing::debug!(invariant = ?inv, detail = %v.detail, "invariant violated");
-                    return Err(FailureKind::Invariant {
-                        name,
-                        detail: v.detail,
-                    });
-                }
-            }
-        }
+        sweep(harness, ctx, world, coverage).await?;
     }
     Ok(())
 }
@@ -897,33 +919,6 @@ fn log_summary<Op>(report: &RunReport<Op>, stats: Option<&Stats>) {
         if !s.is_empty() {
             s.log_summary();
         }
-    }
-}
-
-/// Build a [`RunReport`] for an infrastructure failure raised mid-run (endurance `advance`).
-fn infra_report<Op>(
-    seed: u64,
-    mode: &'static str,
-    steps: usize,
-    coverage: Coverage,
-    history: Vec<Op>,
-    e: HarnessError,
-) -> RunReport<Op>
-where
-    Op: Clone,
-{
-    RunReport {
-        seed,
-        mode,
-        steps,
-        skipped: coverage.total_skipped(),
-        coverage,
-        failure: Some(Failure {
-            step: steps,
-            op: history.last().cloned(),
-            history,
-            kind: FailureKind::Infra(e.to_string()),
-        }),
     }
 }
 

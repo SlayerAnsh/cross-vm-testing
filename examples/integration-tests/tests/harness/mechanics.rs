@@ -698,3 +698,47 @@ async fn replay_reproduces_the_same_failure() {
     assert_eq!(f.step, f2.step, "replay failed at a different step");
     assert_eq!(f.history.len(), f2.history.len());
 }
+/// Golden-seed pin: the exact op sequence `seed = 42` produces. The runner's RNG draw order
+/// (kind choice, then op data, in generation order) is a compatibility surface: if this test
+/// changes, every recorded seed in every bug report and regression test stops reproducing.
+/// A refactor must keep this sequence identical; only an intentional, CHANGELOG-documented
+/// generation change may update the literal.
+#[tokio::test]
+async fn golden_seed_sequence_is_stable() {
+    let (bank, log) = Bank::new(2, Behavior::Good);
+    let (ctx, world) = bank_env(2).await.unwrap();
+    let mut r = Runner::fuzz(bank, 42);
+    r.setup(ctx, world);
+    let rep = r.run(6, None, 1).await;
+    assert!(rep.passed(), "{:?}", rep.failure);
+    assert_eq!(
+        *log.borrow(),
+        vec![
+            Op::Withdraw {
+                user: 1,
+                amount: 301
+            },
+            Op::Deposit {
+                user: 1,
+                amount: 95
+            },
+            Op::Withdraw {
+                user: 1,
+                amount: 915
+            },
+            Op::Deposit {
+                user: 0,
+                amount: 32
+            },
+            Op::Withdraw {
+                user: 0,
+                amount: 1569
+            },
+            Op::Withdraw {
+                user: 1,
+                amount: 159
+            },
+        ],
+        "seed 42 must reproduce the recorded sequence exactly"
+    );
+}
