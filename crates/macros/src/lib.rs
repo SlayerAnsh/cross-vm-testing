@@ -384,7 +384,10 @@ mod tests {
         // Every hook defaults to `unimplemented!()` so partial impls still compile.
         assert!(out.contains("unimplemented"));
         // Four VMs x two methods = eight default hook bodies, each with the panic message.
-        assert_eq!(out.matches("is not implemented for this contract").count(), 8);
+        assert_eq!(
+            out.matches("is not implemented for this contract").count(),
+            8
+        );
     }
 
     #[test]
