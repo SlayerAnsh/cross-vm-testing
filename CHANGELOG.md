@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added (harness diagnostics: per-invariant coverage, opt-in per-op stats, sequence shrinking)
+
+* `cross-vm-framework`: `RunReport` now carries a `coverage` field, a per-invariant tally (`held` / `skipped` / `violated`) keyed by the invariant's `Debug` name. It is collected on every run at no configuration cost and seeded from `Harness::invariants()` at run start, so an invariant that never fires (for example one silently skipped on one VM's path) still shows up with an all-zero total. `Coverage::uncovered()` lists those never-ran invariants and `log_summary` prints a coverage line flagging them. The existing aggregate `skipped` count now equals `coverage.total_skipped()`.
+* `cross-vm-framework`: opt-in per-op diagnostics via `Runner::with_stats()`. When enabled, a run records (per op variant name) the outcome counts (accepted, rejected, bug, infra), `apply` wall-clock timing (min, avg, max, stddev), and an error breakdown grouped by reason. A summary prints at run end through the same `log_summary` seam, and `Runner::stats()` returns the collected `Stats`. Off by default, so the zero-config path collects nothing. Use it to catch the "80% of generated swaps revert, so the run tested almost nothing" failure mode.
+* `cross-vm-framework`: `Runner<H, Scenario>::shrink(failing, rebuild)`, a generic greedy delta-debug minimizer that reduces a failing operation sequence to a near-minimal one that still fails the same way (same `FailureKind` discriminant, and for an invariant failure the same invariant name, so shrinking never converges on a different bug). It re-drives the runner on a fresh `(Ctx, World)` from the async `rebuild` closure for each attempt (a chunked pass, then a one-by-one pass). `run_and_shrink(ops, rebuild)` runs a sequence and, on failure, puts the minimized history in the returned report.
+
+  ```rust
+  let min = runner.shrink(report.failure.unwrap().history, || async {
+      vault_setup(seed).await.expect("setup")
+  }).await;
+  ```
+* `cross-vm-framework`: documented that transition-style invariants (comparing state before vs after one op) belong in `apply` (async, holds `Ctx`), stashing the snapshot in `World`, rather than in the sync `ContractBase` hooks (which hold no chain handle and cannot query state). The vault harness example gains a `DepositTransition` invariant that snapshots on-chain collateral before a deposit and diffs the live post-state.
+
+### Changed (harness diagnostics hardening)
+
+* `cross-vm-framework`: `Stats` are now strictly per-run. Every driver resets the collected stats at entry, and `shrink` / `run_and_shrink` park them for the duration of the shrink (candidate replays neither tally into the caller's data nor print per-op summary blocks), so a report's stats always describe exactly the run that produced it. Previously stats accumulated across every run and shrink replay on the same runner.
+* `cross-vm-framework`: `shrink` compares `Bug` failures by detail string, not just discriminant, so minimizing one bug can no longer converge on a *different* bug that also surfaces as `FailureKind::Bug`. Emit stable, state-independent bug messages from `apply` to benefit. Invariant failures still compare by invariant name and `Infra` failures by discriminant only (transport errors are noisy).
+* `cross-vm-framework`: `shrink_with(failing, check_every, rebuild)` and `run_and_shrink_with(ops, check_every, rebuild)` replay candidates under the invariant-check cadence the original failure surfaced with, so a cadence-dependent invariant failure is not re-judged under per-op checking. The existing `shrink` / `run_and_shrink` delegate with `check_every = 1` (unchanged behavior).
+* `cross-vm-framework`: shrink replay attempts are capped at `DEFAULT_SHRINK_LIMIT` (256, the analog of Foundry's `shrink_run_limit`); an irreducible sequence costs O(n log n) replays in ddmin's worst case, and on exhaustion the best sequence found so far is returned (with a `warn` log) instead of replaying unbounded.
+* `cross-vm-framework`: `Runner::run(ops, Some(&[]), ..)` now returns an `Infra` failure report ("empty op-kind slice") instead of panicking inside the rng.
+* `cross-vm-framework`: `Stats` timing accumulators are saturating and fully `u128` (`min`/`max` previously truncated through `u64` casts, and a pathological duration could overflow the sum-of-squares and abort the run); `op_label` bounds its fallback label for `Debug` renderings that start with a non-identifier character.
+
 ### Added (Tron (TVM) chain support)
 
 * New `cross-vm-tron` crate (`crates/tron`): a fourth ecosystem behind the same `ChainProvider` trait, alongside CosmWasm (`cw-multi-test`), EVM (`revm`), and Solana (`litesvm`). Two backends, `TronChain` = `Mock(TronMockProvider)` or `Rpc(TronRpcProvider)`, mirroring the EVM crate (the TVM is an EVM derivative, so the mock reuses a `revm` core and layers the Tron-specific behavior on top).

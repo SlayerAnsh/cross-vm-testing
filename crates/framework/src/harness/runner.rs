@@ -18,7 +18,10 @@ use std::time::Duration;
 use tokio::time::{sleep, Instant};
 
 use super::ctx::Ctx;
-use super::outcome::{CheckOutcome, Failure, FailureKind, HarnessError, RunReport};
+use super::outcome::{
+    CheckOutcome, Coverage, Failure, FailureKind, HarnessError, RunReport, Verdict,
+};
+use super::stats::{op_label, OpOutcome, Stats};
 use super::{Harness, Prng};
 
 /// A run-mode marker. The unit type parameter `M` on [`Runner`] selects which driver method is
@@ -122,6 +125,8 @@ pub struct Runner<H: Harness, M: RunMode = Fuzz> {
     world: Option<H::World>,
     seed: u64,
     rng: Prng,
+    /// Opt-in per-op diagnostics; `None` unless [`with_stats`](Runner::with_stats) turned them on.
+    stats: Option<Stats>,
     _marker: PhantomData<M>,
 }
 
@@ -144,8 +149,23 @@ impl<H: Harness, M: RunMode> Runner<H, M> {
             world: None,
             seed,
             rng: Prng::seed_from_u64(seed),
+            stats: None,
             _marker: PhantomData,
         }
+    }
+
+    /// Turn on opt-in per-op diagnostics ([`Stats`]): success/failure counts, `apply` timing, and an
+    /// error breakdown, grouped by op variant name. Off by default; chainable like
+    /// [`setup`](Runner::setup). When on, a per-op summary is logged at run end and
+    /// [`stats`](Runner::stats) returns the collected data.
+    pub fn with_stats(&mut self) -> &mut Self {
+        self.stats = Some(Stats::default());
+        self
+    }
+
+    /// The collected [`Stats`] if [`with_stats`](Runner::with_stats) was enabled, else `None`.
+    pub fn stats(&self) -> Option<&Stats> {
+        self.stats.as_ref()
     }
 
     /// Load the live env and primed world. The one call a macro-driven test must add; returns
@@ -236,14 +256,41 @@ impl<H: Harness, M: Sequential> Runner<H, M> {
             world,
             seed,
             rng,
+            stats,
             ..
         } = self;
         let ctx = ctx.as_mut().expect(NOT_SET_UP);
         let world = world.as_mut().expect(NOT_SET_UP);
+        // Fresh tallies per run: a report's stats always describe exactly this run.
+        if let Some(s) = stats.as_mut() {
+            *s = Stats::default();
+        }
+        let mut coverage = Coverage::seed(harness.invariants().iter().map(|i| format!("{i:?}")));
+
+        // An empty kind slice can generate nothing: surface an infra failure instead of panicking
+        // inside the rng (`None` is the "draw from every kind" spelling).
+        if kinds.is_some_and(|ks| ks.is_empty()) {
+            let report = RunReport {
+                seed: *seed,
+                mode: M::LABEL,
+                steps: 0,
+                skipped: coverage.total_skipped(),
+                coverage,
+                failure: Some(Failure {
+                    step: 0,
+                    op: None,
+                    history: Vec::new(),
+                    kind: FailureKind::Infra(
+                        "empty op-kind slice (pass None to draw from every kind)".into(),
+                    ),
+                }),
+            };
+            log_summary(&report, stats.as_ref());
+            return report;
+        }
 
         let report = 'run: {
             let mut history = Vec::new();
-            let mut skipped = 0usize;
             for i in 0..ops {
                 let op = match kinds {
                     None => harness.generate(rng, world),
@@ -254,33 +301,42 @@ impl<H: Harness, M: Sequential> Runner<H, M> {
                 };
                 history.push(op.clone());
                 let do_check = check_every > 0 && (i + 1).is_multiple_of(check_every);
-                match step(harness, ctx, world, &op, do_check).await {
-                    Ok(n) => skipped += n,
-                    Err(kind) => {
-                        break 'run RunReport {
-                            seed: *seed,
-                            mode: M::LABEL,
-                            steps: i + 1,
-                            skipped,
-                            failure: Some(Failure {
-                                step: i + 1,
-                                op: Some(op),
-                                history,
-                                kind,
-                            }),
-                        }
-                    }
+                if let Err(kind) = step(
+                    harness,
+                    ctx,
+                    world,
+                    &op,
+                    do_check,
+                    &mut coverage,
+                    stats.as_mut(),
+                )
+                .await
+                {
+                    break 'run RunReport {
+                        seed: *seed,
+                        mode: M::LABEL,
+                        steps: i + 1,
+                        skipped: coverage.total_skipped(),
+                        coverage,
+                        failure: Some(Failure {
+                            step: i + 1,
+                            op: Some(op),
+                            history,
+                            kind,
+                        }),
+                    };
                 }
             }
             RunReport {
                 seed: *seed,
                 mode: M::LABEL,
                 steps: history.len(),
-                skipped,
+                skipped: coverage.total_skipped(),
+                coverage,
                 failure: None,
             }
         };
-        log_summary(&report);
+        log_summary(&report, stats.as_ref());
         report
     }
 }
@@ -306,39 +362,52 @@ impl<H: Harness> Runner<H, Endurance> {
             world,
             seed,
             rng,
+            stats,
             ..
         } = self;
         let seed = *seed;
         let ctx = ctx.as_mut().expect(NOT_SET_UP);
         let world = world.as_mut().expect(NOT_SET_UP);
+        // Fresh tallies per run: a report's stats always describe exactly this run.
+        if let Some(s) = stats.as_mut() {
+            *s = Stats::default();
+        }
+        let mut coverage = Coverage::seed(harness.invariants().iter().map(|i| format!("{i:?}")));
 
         let report = 'run: {
             let mut history = Vec::new();
             let deadline = Instant::now() + duration;
             let mut steps = 0usize;
-            let mut skipped = 0usize;
 
             while Instant::now() < deadline {
                 let op = harness.generate(rng, world);
                 history.push(op.clone());
                 steps += 1;
                 let do_check = check_every > 0 && steps.is_multiple_of(check_every);
-                match step(harness, ctx, world, &op, do_check).await {
-                    Ok(n) => skipped += n,
-                    Err(kind) => {
-                        break 'run RunReport {
-                            seed,
-                            mode: Endurance::LABEL,
-                            steps,
-                            skipped,
-                            failure: Some(Failure {
-                                step: steps,
-                                op: Some(op),
-                                history,
-                                kind,
-                            }),
-                        }
-                    }
+                if let Err(kind) = step(
+                    harness,
+                    ctx,
+                    world,
+                    &op,
+                    do_check,
+                    &mut coverage,
+                    stats.as_mut(),
+                )
+                .await
+                {
+                    break 'run RunReport {
+                        seed,
+                        mode: Endurance::LABEL,
+                        steps,
+                        skipped: coverage.total_skipped(),
+                        coverage,
+                        failure: Some(Failure {
+                            step: steps,
+                            op: Some(op),
+                            history,
+                            kind,
+                        }),
+                    };
                 }
 
                 if let Some(base) = advance_blocks {
@@ -352,7 +421,7 @@ impl<H: Harness> Runner<H, Endurance> {
                             seed,
                             Endurance::LABEL,
                             steps,
-                            skipped,
+                            coverage,
                             history,
                             e,
                         );
@@ -372,25 +441,28 @@ impl<H: Harness> Runner<H, Endurance> {
 
             // Final invariant sweep: catches drift accumulated since the last mid-run check.
             for inv in harness.invariants() {
+                let name = format!("{inv:?}");
                 match harness.check(ctx, world, &inv).await {
-                    CheckOutcome::Held => {}
-                    CheckOutcome::Skipped(_) => skipped += 1,
+                    CheckOutcome::Held => coverage.record_held(&name),
+                    CheckOutcome::Skipped(_) => coverage.record_skipped(&name),
                     CheckOutcome::Violated(v) => {
+                        coverage.record_violated(&name);
                         break 'run RunReport {
                             seed,
                             mode: Endurance::LABEL,
                             steps,
-                            skipped,
+                            skipped: coverage.total_skipped(),
+                            coverage,
                             failure: Some(Failure {
                                 step: steps,
                                 op: history.last().cloned(),
                                 history,
                                 kind: FailureKind::Invariant {
-                                    name: format!("{inv:?}"),
+                                    name,
                                     detail: v.detail,
                                 },
                             }),
-                        }
+                        };
                     }
                 }
             }
@@ -399,11 +471,12 @@ impl<H: Harness> Runner<H, Endurance> {
                 seed,
                 mode: Endurance::LABEL,
                 steps,
-                skipped,
+                skipped: coverage.total_skipped(),
+                coverage,
                 failure: None,
             }
         };
-        log_summary(&report);
+        log_summary(&report, stats.as_ref());
         report
     }
 }
@@ -413,77 +486,309 @@ impl<H: Harness> Runner<H, Endurance> {
 impl<H: Harness> Runner<H, Scenario> {
     /// Run a single concrete operation over the loaded env+world, checking invariants after it.
     pub async fn run_case(&mut self, op: H::Operation) -> RunReport<H::Operation> {
-        self.run_fixed(vec![op], Scenario::LABEL).await
+        self.run_fixed(vec![op], Scenario::LABEL, 1).await
     }
 
     /// Run a fixed operation sequence, checking invariants after each.
     pub async fn run_scenario(&mut self, ops: Vec<H::Operation>) -> RunReport<H::Operation> {
-        self.run_fixed(ops, Scenario::LABEL).await
+        self.run_fixed(ops, Scenario::LABEL, 1).await
     }
 
     /// Replay a recorded history deterministically (seed the runner with the recorded seed first).
     /// Reproduces a failure a [`RunReport`] reported; the canonical way to turn a fuzz failure into
     /// a regression test.
     pub async fn replay(&mut self, history: Vec<H::Operation>) -> RunReport<H::Operation> {
-        self.run_fixed(history, "replay").await
+        self.run_fixed(history, "replay", 1).await
+    }
+
+    /// Greedily shrink a known-failing sequence to a near-minimal one that still fails **the same
+    /// way**, checking invariants after every op. Shorthand for
+    /// [`shrink_with`](Runner::shrink_with) with `check_every = 1`; use `shrink_with` when the
+    /// original failure surfaced under a sparser check cadence.
+    pub async fn shrink<F, Fut>(
+        &mut self,
+        failing: Vec<H::Operation>,
+        rebuild: F,
+    ) -> Vec<H::Operation>
+    where
+        F: Fn() -> Fut,
+        Fut: core::future::Future<Output = (Ctx, H::World)>,
+    {
+        self.shrink_with(failing, 1, rebuild).await
+    }
+
+    /// Greedily shrink a known-failing sequence to a near-minimal one that still fails **the same
+    /// way** under the given invariant-check cadence. A generic delta-debug pass: it drops ops
+    /// (windows first, then one at a time), re-drives the runner on a fresh `(Ctx, World)` from
+    /// `rebuild` for each attempt, and keeps a candidate only if it still fails the same way:
+    /// a `Bug` must carry the same detail and an invariant failure the same invariant name, so
+    /// shrinking never converges on a *different* bug. Emit stable,
+    /// state-independent bug messages from `apply` to get the most out of this.
+    ///
+    /// `check_every` replays candidates under the cadence the original failure surfaced with
+    /// (`1` = check after every op, `0` = never mid-run), so a cadence-dependent invariant
+    /// failure is not re-judged under a stricter schedule.
+    ///
+    /// Replay attempts are capped at [`DEFAULT_SHRINK_LIMIT`]; on exhaustion the best sequence
+    /// found so far is returned. Runs are diagnostics-free: any [`Stats`] the runner collects are
+    /// parked for the duration so shrink replays neither pollute tallies nor spam summaries.
+    ///
+    /// `rebuild` yields a fresh live env + primed world for each replay attempt; mock chains are
+    /// cheap to rebuild. It is async because in-tree env setup deploys contracts.
+    ///
+    /// Returns the minimized sequence. If `failing` does not actually fail, it is returned unchanged.
+    ///
+    /// ```ignore
+    /// let min = runner.shrink_with(report.failure.unwrap().history, check_every, || async {
+    ///     vault_setup(seed).await.expect("setup")
+    /// }).await;
+    /// ```
+    pub async fn shrink_with<F, Fut>(
+        &mut self,
+        failing: Vec<H::Operation>,
+        check_every: usize,
+        rebuild: F,
+    ) -> Vec<H::Operation>
+    where
+        F: Fn() -> Fut,
+        Fut: core::future::Future<Output = (Ctx, H::World)>,
+    {
+        // Park stats for the whole shrink: replays are throwaway diagnostics-wise, and the caller's
+        // tallies must keep describing the run they came from.
+        let parked = self.stats.take();
+        let minimized = self.shrink_inner(failing, check_every, &rebuild).await;
+        self.stats = parked;
+        minimized
+    }
+
+    async fn shrink_inner<F, Fut>(
+        &mut self,
+        failing: Vec<H::Operation>,
+        check_every: usize,
+        rebuild: &F,
+    ) -> Vec<H::Operation>
+    where
+        F: Fn() -> Fut,
+        Fut: core::future::Future<Output = (Ctx, H::World)>,
+    {
+        // Establish the reference failure the shrink must preserve.
+        let (ctx, world) = rebuild().await;
+        self.setup(ctx, world);
+        let ref_kind = match self
+            .run_fixed(failing.clone(), Scenario::LABEL, check_every)
+            .await
+            .failure
+        {
+            Some(f) => f.kind,
+            None => return failing, // Doesn't fail: nothing to shrink.
+        };
+
+        let mut current = failing;
+        let mut budget = DEFAULT_SHRINK_LIMIT;
+
+        // Chunked pass: remove contiguous windows, largest first (classic ddmin coarse phase).
+        let mut size = current.len() / 2;
+        while size >= 1 && current.len() > 1 {
+            let mut start = 0;
+            while start < current.len() {
+                let end = (start + size).min(current.len());
+                let candidate: Vec<H::Operation> = current[..start]
+                    .iter()
+                    .chain(&current[end..])
+                    .cloned()
+                    .collect();
+                if !candidate.is_empty() {
+                    let Some(fails) = self
+                        .try_candidate(&candidate, &ref_kind, check_every, rebuild, &mut budget)
+                        .await
+                    else {
+                        return current; // Budget exhausted: best so far.
+                    };
+                    if fails {
+                        current = candidate;
+                        // Keep `start`; the window now spans the ops that followed the removed block.
+                        continue;
+                    }
+                }
+                start += size;
+            }
+            size /= 2;
+        }
+
+        // Single-op pass: drop one op at a time, retrying the same index after a successful drop.
+        let mut i = 0;
+        while i < current.len() && current.len() > 1 {
+            let mut candidate = current.clone();
+            candidate.remove(i);
+            let Some(fails) = self
+                .try_candidate(&candidate, &ref_kind, check_every, rebuild, &mut budget)
+                .await
+            else {
+                return current; // Budget exhausted: best so far.
+            };
+            if fails {
+                current = candidate;
+                continue;
+            }
+            i += 1;
+        }
+        current
+    }
+
+    /// Run one shrink candidate against the budget: `None` when the budget is exhausted, else
+    /// `Some(fails_the_same_way)`. Each attempt re-drives on a fresh env from `rebuild`.
+    async fn try_candidate<F, Fut>(
+        &mut self,
+        candidate: &[H::Operation],
+        ref_kind: &FailureKind,
+        check_every: usize,
+        rebuild: &F,
+        budget: &mut usize,
+    ) -> Option<bool>
+    where
+        F: Fn() -> Fut,
+        Fut: core::future::Future<Output = (Ctx, H::World)>,
+    {
+        if *budget == 0 {
+            tracing::warn!(
+                limit = DEFAULT_SHRINK_LIMIT,
+                "shrink replay budget exhausted; returning best sequence found so far"
+            );
+            return None;
+        }
+        *budget -= 1;
+        let (ctx, world) = rebuild().await;
+        self.setup(ctx, world);
+        let fails = match self
+            .run_fixed(candidate.to_vec(), Scenario::LABEL, check_every)
+            .await
+            .failure
+        {
+            Some(f) => same_failure(&f.kind, ref_kind),
+            None => false,
+        };
+        Some(fails)
+    }
+
+    /// Run a fixed sequence and, if it fails, auto-shrink it: the returned report's
+    /// [`Failure::history`] is the minimized sequence. A pass-through when the run passes.
+    /// Shorthand for [`run_and_shrink_with`](Runner::run_and_shrink_with) with `check_every = 1`.
+    pub async fn run_and_shrink<F, Fut>(
+        &mut self,
+        ops: Vec<H::Operation>,
+        rebuild: F,
+    ) -> RunReport<H::Operation>
+    where
+        F: Fn() -> Fut,
+        Fut: core::future::Future<Output = (Ctx, H::World)>,
+    {
+        self.run_and_shrink_with(ops, 1, rebuild).await
+    }
+
+    /// [`run_and_shrink`](Runner::run_and_shrink) under an explicit invariant-check cadence: the
+    /// run, every shrink replay, and the final re-drive all check per `check_every`, so the
+    /// minimized history reproduces under the same schedule the failure surfaced with.
+    pub async fn run_and_shrink_with<F, Fut>(
+        &mut self,
+        ops: Vec<H::Operation>,
+        check_every: usize,
+        rebuild: F,
+    ) -> RunReport<H::Operation>
+    where
+        F: Fn() -> Fut,
+        Fut: core::future::Future<Output = (Ctx, H::World)>,
+    {
+        let report = self.run_fixed(ops, Scenario::LABEL, check_every).await;
+        if report.passed() {
+            return report;
+        }
+        let failing = report.failure.as_ref().unwrap().history.clone();
+        let minimized = self.shrink_with(failing, check_every, &rebuild).await;
+        // Re-drive the minimized sequence once on a fresh env for a clean, minimal report.
+        let (ctx, world) = rebuild().await;
+        self.setup(ctx, world);
+        let mut final_report = self
+            .run_fixed(minimized.clone(), Scenario::LABEL, check_every)
+            .await;
+        if let Some(f) = final_report.failure.as_mut() {
+            f.history = minimized;
+        }
+        final_report
     }
 
     async fn run_fixed(
         &mut self,
         ops: Vec<H::Operation>,
         mode: &'static str,
+        check_every: usize,
     ) -> RunReport<H::Operation> {
         let Self {
             harness,
             ctx,
             world,
             seed,
+            stats,
             ..
         } = self;
         let seed = *seed;
         let ctx = ctx.as_mut().expect(NOT_SET_UP);
         let world = world.as_mut().expect(NOT_SET_UP);
+        // Fresh tallies per run: a report's stats always describe exactly this run.
+        if let Some(s) = stats.as_mut() {
+            *s = Stats::default();
+        }
+        let mut coverage = Coverage::seed(harness.invariants().iter().map(|i| format!("{i:?}")));
 
         let report = 'run: {
             let mut history = Vec::new();
-            let mut skipped = 0usize;
             for (i, op) in ops.into_iter().enumerate() {
                 history.push(op.clone());
-                match step(harness, ctx, world, &op, true).await {
-                    Ok(n) => skipped += n,
-                    Err(kind) => {
-                        break 'run RunReport {
-                            seed,
-                            mode,
-                            steps: i + 1,
-                            skipped,
-                            failure: Some(Failure {
-                                step: i + 1,
-                                op: Some(op),
-                                history,
-                                kind,
-                            }),
-                        }
-                    }
+                let do_check = check_every > 0 && (i + 1).is_multiple_of(check_every);
+                if let Err(kind) = step(
+                    harness,
+                    ctx,
+                    world,
+                    &op,
+                    do_check,
+                    &mut coverage,
+                    stats.as_mut(),
+                )
+                .await
+                {
+                    break 'run RunReport {
+                        seed,
+                        mode,
+                        steps: i + 1,
+                        skipped: coverage.total_skipped(),
+                        coverage,
+                        failure: Some(Failure {
+                            step: i + 1,
+                            op: Some(op),
+                            history,
+                            kind,
+                        }),
+                    };
                 }
             }
             RunReport {
                 seed,
                 mode,
                 steps: history.len(),
-                skipped,
+                skipped: coverage.total_skipped(),
+                coverage,
                 failure: None,
             }
         };
-        log_summary(&report);
+        log_summary(&report, stats.as_ref());
         report
     }
 }
 
 // ----- shared per-operation step -----
 
-/// Apply one operation and, if `check`, verify every invariant against the resulting state. Returns
-/// the number of invariants that [`CheckOutcome::Skipped`] this step; maps a [`HarnessError`] or a
+/// Apply one operation and, if `check`, verify every invariant against the resulting state. Records
+/// each invariant outcome into `coverage` (keyed by its `Debug` name) and, when `stats` is `Some`,
+/// times the `apply` call and records its outcome. Maps a [`HarnessError`] or a
 /// [`CheckOutcome::Violated`] into a [`FailureKind`].
 ///
 /// A free function (not a method) so it borrows the harness disjointly from the runner's `ctx` and
@@ -494,45 +799,72 @@ async fn step<H: Harness>(
     world: &mut H::World,
     op: &H::Operation,
     check: bool,
-) -> Result<usize, FailureKind> {
+    coverage: &mut Coverage,
+    mut stats: Option<&mut Stats>,
+) -> Result<(), FailureKind> {
     tracing::debug!(op = ?op, check, "apply op");
-    match harness.apply(ctx, world, op).await {
-        Ok(verdict) => tracing::debug!(?verdict, op = ?op, "op applied"),
+    let started = std::time::Instant::now();
+    let result = harness.apply(ctx, world, op).await;
+    let elapsed = started.elapsed();
+    match result {
+        Ok(verdict) => {
+            if let Some(s) = stats.as_mut() {
+                let outcome = match &verdict {
+                    Verdict::Accepted => OpOutcome::Accepted,
+                    Verdict::Rejected { reason } => OpOutcome::Rejected(reason),
+                };
+                s.record(&op_label(op), elapsed, outcome);
+            }
+            tracing::debug!(?verdict, op = ?op, "op applied");
+        }
         Err(HarnessError::Bug(m)) => {
+            if let Some(s) = stats.as_mut() {
+                s.record(&op_label(op), elapsed, OpOutcome::Bug(&m));
+            }
             tracing::debug!(op = ?op, detail = %m, "op surfaced a bug");
             return Err(FailureKind::Bug(m));
         }
         Err(HarnessError::Infra(e)) => {
+            let msg = e.to_string();
+            if let Some(s) = stats.as_mut() {
+                s.record(&op_label(op), elapsed, OpOutcome::Infra(&msg));
+            }
             tracing::debug!(op = ?op, error = %e, "op infra error");
-            return Err(FailureKind::Infra(e.to_string()));
+            return Err(FailureKind::Infra(msg));
         }
     }
-    let mut skipped = 0usize;
     if check {
         for inv in harness.invariants() {
+            let name = format!("{inv:?}");
             match harness.check(ctx, world, &inv).await {
-                CheckOutcome::Held => tracing::debug!(invariant = ?inv, "invariant held"),
+                CheckOutcome::Held => {
+                    coverage.record_held(&name);
+                    tracing::debug!(invariant = ?inv, "invariant held");
+                }
                 CheckOutcome::Skipped(why) => {
+                    coverage.record_skipped(&name);
                     tracing::debug!(invariant = ?inv, reason = %why, "invariant skipped");
-                    skipped += 1;
                 }
                 CheckOutcome::Violated(v) => {
+                    coverage.record_violated(&name);
                     tracing::debug!(invariant = ?inv, detail = %v.detail, "invariant violated");
                     return Err(FailureKind::Invariant {
-                        name: format!("{inv:?}"),
+                        name,
                         detail: v.detail,
                     });
                 }
             }
         }
     }
-    Ok(skipped)
+    Ok(())
 }
 
-/// Emit a one-line end-of-run summary (op count, skips, pass/fail) at `info` level. Sits above the
-/// per-op `debug` logs so a run's totals show under `RUST_LOG=cross_vm_framework=info` without the
-/// per-operation spam. Called once at every driver exit via a labeled-block funnel.
-fn log_summary<Op>(report: &RunReport<Op>) {
+/// Emit a one-line end-of-run summary (op count, skips, pass/fail) at `info` level, plus a
+/// per-invariant coverage line that flags any invariant that never ran, and (when `stats` is
+/// enabled) a per-op stats block. Sits above the per-op `debug` logs so a run's totals show under
+/// `RUST_LOG=cross_vm_framework=info` without the per-operation spam. Called once at every driver
+/// exit via a labeled-block funnel.
+fn log_summary<Op>(report: &RunReport<Op>, stats: Option<&Stats>) {
     match &report.failure {
         None => tracing::info!(
             mode = report.mode,
@@ -551,6 +883,21 @@ fn log_summary<Op>(report: &RunReport<Op>) {
             "run failed"
         ),
     }
+    // Coverage: warn if any invariant never fired, else confirm all did.
+    let uncovered: Vec<&str> = report.coverage.uncovered().collect();
+    if uncovered.is_empty() {
+        tracing::info!(
+            invariants = report.coverage.iter().count(),
+            "invariant coverage: all invariants fired"
+        );
+    } else {
+        tracing::warn!(?uncovered, "invariant coverage: some invariants never ran");
+    }
+    if let Some(s) = stats {
+        if !s.is_empty() {
+            s.log_summary();
+        }
+    }
 }
 
 /// Build a [`RunReport`] for an infrastructure failure raised mid-run (endurance `advance`).
@@ -558,7 +905,7 @@ fn infra_report<Op>(
     seed: u64,
     mode: &'static str,
     steps: usize,
-    skipped: usize,
+    coverage: Coverage,
     history: Vec<Op>,
     e: HarnessError,
 ) -> RunReport<Op>
@@ -569,7 +916,8 @@ where
         seed,
         mode,
         steps,
-        skipped,
+        skipped: coverage.total_skipped(),
+        coverage,
         failure: Some(Failure {
             step: steps,
             op: history.last().cloned(),
@@ -578,5 +926,27 @@ where
         }),
     }
 }
+
+/// Whether two failures are "the same" for shrinking. `Bug`s must carry the same detail string —
+/// two distinct bugs both surfacing as [`FailureKind::Bug`] must not be conflated, so harnesses
+/// should emit stable, state-independent bug messages. Invariant failures compare by invariant
+/// name only (details embed state and vary per replay), and any two `Infra` failures match
+/// (transport errors are inherently noisy).
+fn same_failure(a: &FailureKind, b: &FailureKind) -> bool {
+    match (a, b) {
+        (FailureKind::Bug(d1), FailureKind::Bug(d2)) => d1 == d2,
+        (FailureKind::Infra(_), FailureKind::Infra(_)) => true,
+        (FailureKind::Invariant { name: n1, .. }, FailureKind::Invariant { name: n2, .. }) => {
+            n1 == n2
+        }
+        _ => false,
+    }
+}
+
+/// Replay-attempt budget for one shrink call (the analog of Foundry's `shrink_run_limit`): each
+/// candidate costs a fresh env build plus a full replay, and a nothing-removable sequence costs
+/// O(n log n) attempts, so a cap keeps pathological shrinks bounded. On exhaustion the best
+/// sequence found so far is returned.
+pub const DEFAULT_SHRINK_LIMIT: usize = 256;
 
 const NOT_SET_UP: &str = "Runner::setup(ctx, world) must be called before running";

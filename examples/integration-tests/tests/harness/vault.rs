@@ -59,6 +59,23 @@ enum VaultInv {
     NoBadDebt,
     /// Aggregate debt is backed by aggregate collateral.
     Solvency,
+    /// Transition invariant: after a `Deposit`, the depositor's on-chain collateral rose by exactly
+    /// the deposited amount. Compares live post-state against a snapshot `apply` took just before
+    /// the op (see [`DepositSnapshot`]); [`Skipped`](CheckOutcome::Skipped) when the last op was not
+    /// a deposit.
+    DepositTransition,
+}
+
+/// A pre-op snapshot for the [`VaultInv::DepositTransition`] invariant, captured inside `apply`
+/// (async, holds `Ctx`) and stashed in the `World` — the pattern for transition invariants, as
+/// opposed to the sync contract hooks which cannot query chain state.
+struct DepositSnapshot {
+    chain: String,
+    user: usize,
+    /// The depositor's on-chain collateral immediately before the deposit.
+    before: u128,
+    /// The amount deposited.
+    amount: u128,
 }
 
 /// The data-free kinds of [`VaultOp`], for per-kind fuzzing.
@@ -100,10 +117,13 @@ impl VaultModel {
     }
 }
 
-/// Persisted state: where the vault is deployed per chain, plus the per-chain shadow model.
+/// Persisted state: where the vault is deployed per chain, the per-chain shadow model, and the most
+/// recent deposit snapshot (for the transition invariant).
 struct VaultWorld {
     addrs: HashMap<String, Account>,
     models: HashMap<String, VaultModel>,
+    /// Snapshot of the last `Deposit`'s pre-state, or `None` if the last op was not a deposit.
+    pre: Option<DepositSnapshot>,
 }
 
 struct VaultHarness;
@@ -133,6 +153,9 @@ impl Harness for VaultHarness {
         w: &mut VaultWorld,
         op: &VaultOp,
     ) -> Result<Verdict, HarnessError> {
+        // Invalidate any prior deposit snapshot; the Deposit arm re-arms it below. This makes the
+        // transition invariant apply to exactly the op that just ran.
+        w.pre = None;
         match op {
             VaultOp::Deposit {
                 chain,
@@ -140,14 +163,26 @@ impl Harness for VaultHarness {
                 amount,
             } => {
                 let vault = Self::vault(ctx, w, chain)?;
+                // Snapshot pre-state for the transition invariant (async query, stashed in World).
+                let before = vault
+                    .collateral_of(USERS[*user])
+                    .await
+                    .map_err(HarnessError::Infra)?;
                 let res = vault.deposit(USERS[*user], *amount).await;
-                classify(
+                let verdict = classify(
                     true,
                     res,
                     || w.models.get_mut(chain).unwrap().collateral[*user] += *amount,
                     "",
                     "valid deposit reverted",
-                )
+                )?;
+                w.pre = Some(DepositSnapshot {
+                    chain: chain.clone(),
+                    user: *user,
+                    before,
+                    amount: *amount,
+                });
+                Ok(verdict)
             }
             VaultOp::Withdraw {
                 chain,
@@ -254,10 +289,34 @@ impl Harness for VaultHarness {
             VaultInv::ModelMatches,
             VaultInv::NoBadDebt,
             VaultInv::Solvency,
+            VaultInv::DepositTransition,
         ]
     }
 
     async fn check(&self, ctx: &mut Ctx, w: &VaultWorld, inv: &VaultInv) -> CheckOutcome {
+        // Transition invariant: diff live post-state against the snapshot `apply` stashed in World.
+        if let VaultInv::DepositTransition = inv {
+            let Some(snap) = &w.pre else {
+                return CheckOutcome::skipped("last op was not a deposit");
+            };
+            let vault = match Self::vault(ctx, w, &snap.chain) {
+                Ok(v) => v,
+                Err(e) => return CheckOutcome::violated(e.to_string()),
+            };
+            let post = match vault.collateral_of(USERS[snap.user]).await {
+                Ok(c) => c,
+                Err(e) => return CheckOutcome::violated(e.to_string()),
+            };
+            let expected = snap.before + snap.amount;
+            return if post == expected {
+                CheckOutcome::Held
+            } else {
+                CheckOutcome::violated(format!(
+                    "{}/{}: post-deposit collateral {post} != pre {} + amount {}",
+                    snap.chain, USERS[snap.user], snap.before, snap.amount
+                ))
+            };
+        }
         for label in LABELS {
             let vault = match Self::vault(ctx, w, label) {
                 Ok(v) => v,
@@ -294,6 +353,8 @@ impl Harness for VaultHarness {
                         }
                     }
                     VaultInv::Solvency => {}
+                    // Handled before the per-chain loop; unreachable here.
+                    VaultInv::DepositTransition => {}
                 }
             }
             if let VaultInv::Solvency = inv {
@@ -338,7 +399,14 @@ async fn vault_setup(_seed: u64) -> Result<(Ctx, VaultWorld), HarnessError> {
         addrs.insert(label.to_string(), addr);
         models.insert(label.to_string(), VaultModel::new(USERS.len()));
     }
-    Ok((ctx, VaultWorld { addrs, models }))
+    Ok((
+        ctx,
+        VaultWorld {
+            addrs,
+            models,
+            pre: None,
+        },
+    ))
 }
 
 #[cfg(feature = "invariant")]

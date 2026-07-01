@@ -1,0 +1,237 @@
+//! Opt-in per-operation diagnostics for a run.
+//!
+//! [`Stats`] answers "what did the fuzzer actually exercise?" — the failure mode where 80% of
+//! generated swaps revert and the run tested almost nothing. It is **off by default**: a run only
+//! collects it when the test opts in with [`Runner::with_stats`](crate::harness::Runner::with_stats),
+//! so the zero-config path pays nothing.
+//!
+//! Operations are grouped by **variant name** (the leading token of their `Debug` rendering, e.g.
+//! `Deposit { .. }` -> `"Deposit"`), so a bucket aggregates one op kind rather than one exact input.
+//! This needs no naming method on [`Harness`](crate::harness::Harness): the derived `Debug` is
+//! enough.
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+/// What `apply` did with one operation, as observed by the runner.
+pub(crate) enum OpOutcome<'a> {
+    /// The op was accepted (a legitimate success).
+    Accepted,
+    /// The op was rejected legitimately; the string is the revert reason.
+    Rejected(&'a str),
+    /// `apply` reported a confirmed SUT bug; the string is the detail.
+    Bug(&'a str),
+    /// A test-infrastructure failure; the string is the detail.
+    Infra(&'a str),
+}
+
+/// Timing and outcome tally for one op label.
+#[derive(Debug, Clone, Default)]
+pub struct OpStat {
+    /// Legitimate acceptances.
+    pub accepted: usize,
+    /// Legitimate rejections (reverts the model expected).
+    pub rejected: usize,
+    /// Confirmed SUT bugs surfaced by `apply`.
+    pub bug: usize,
+    /// Infrastructure failures during `apply`.
+    pub infra: usize,
+    /// Number of timed `apply` calls (equals the sum of the four outcome counts).
+    pub count: usize,
+    total_ns: u128,
+    sum_sq_ns: u128,
+    min_ns: u128,
+    max_ns: u128,
+    /// Error/revert reasons, counted (both legitimate rejections and bugs/infra land here).
+    pub errors: BTreeMap<String, usize>,
+}
+
+impl OpStat {
+    /// Fraction of applied ops that were rejected, in `0.0..=1.0`.
+    pub fn reject_rate(&self) -> f64 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.rejected as f64 / self.count as f64
+        }
+    }
+
+    /// Minimum `apply` wall-clock, or zero if nothing was recorded.
+    pub fn min(&self) -> Duration {
+        if self.count == 0 {
+            Duration::ZERO
+        } else {
+            ns_to_duration(self.min_ns)
+        }
+    }
+
+    /// Maximum `apply` wall-clock.
+    pub fn max(&self) -> Duration {
+        ns_to_duration(self.max_ns)
+    }
+
+    /// Mean `apply` wall-clock.
+    pub fn avg(&self) -> Duration {
+        if self.count == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_nanos((self.total_ns / self.count as u128) as u64)
+        }
+    }
+
+    /// Population standard deviation of `apply` wall-clock (cheap, from running sums).
+    pub fn stddev(&self) -> Duration {
+        if self.count == 0 {
+            return Duration::ZERO;
+        }
+        let n = self.count as f64;
+        let mean = self.total_ns as f64 / n;
+        let var = (self.sum_sq_ns as f64 / n) - mean * mean;
+        Duration::from_nanos(var.max(0.0).sqrt() as u64)
+    }
+}
+
+/// Per-op-kind success/failure counts, `apply` timing, and an error breakdown, collected only when
+/// a run opts in. Keyed by op variant name.
+#[derive(Debug, Clone, Default)]
+pub struct Stats {
+    ops: BTreeMap<String, OpStat>,
+}
+
+impl Stats {
+    /// Record one `apply` call: its op `label`, wall-clock `elapsed`, and `outcome`.
+    pub(crate) fn record(&mut self, label: &str, elapsed: Duration, outcome: OpOutcome<'_>) {
+        let stat = self.ops.entry(label.to_string()).or_default();
+        let ns = elapsed.as_nanos();
+        if stat.count == 0 || ns < stat.min_ns {
+            stat.min_ns = ns;
+        }
+        if ns > stat.max_ns {
+            stat.max_ns = ns;
+        }
+        // Saturating: a pathological duration must degrade the derived stddev, not abort the run.
+        stat.total_ns = stat.total_ns.saturating_add(ns);
+        stat.sum_sq_ns = stat.sum_sq_ns.saturating_add(ns.saturating_mul(ns));
+        stat.count += 1;
+        match outcome {
+            OpOutcome::Accepted => stat.accepted += 1,
+            OpOutcome::Rejected(reason) => {
+                stat.rejected += 1;
+                *stat.errors.entry(reason.to_string()).or_default() += 1;
+            }
+            OpOutcome::Bug(detail) => {
+                stat.bug += 1;
+                *stat.errors.entry(detail.to_string()).or_default() += 1;
+            }
+            OpOutcome::Infra(detail) => {
+                stat.infra += 1;
+                *stat.errors.entry(detail.to_string()).or_default() += 1;
+            }
+        }
+    }
+
+    /// Per-label tallies in name order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &OpStat)> {
+        self.ops.iter().map(|(n, s)| (n.as_str(), s))
+    }
+
+    /// The tally for one op label, if any was recorded.
+    pub fn get(&self, label: &str) -> Option<&OpStat> {
+        self.ops.get(label)
+    }
+
+    /// `true` if nothing was recorded (no ops applied).
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+
+    /// Emit a per-op summary block at `info`: counts, reject rate, timing, and top error reasons.
+    pub fn log_summary(&self) {
+        for (label, s) in self.iter() {
+            tracing::info!(
+                op = label,
+                count = s.count,
+                accepted = s.accepted,
+                rejected = s.rejected,
+                bug = s.bug,
+                infra = s.infra,
+                reject_rate = format!("{:.0}%", s.reject_rate() * 100.0),
+                min_ms = s.min().as_secs_f64() * 1e3,
+                avg_ms = s.avg().as_secs_f64() * 1e3,
+                max_ms = s.max().as_secs_f64() * 1e3,
+                stddev_ms = s.stddev().as_secs_f64() * 1e3,
+                "op stats"
+            );
+            // Surface the loudest few error/revert reasons for this op.
+            let mut reasons: Vec<(&String, &usize)> = s.errors.iter().collect();
+            reasons.sort_by(|a, b| b.1.cmp(a.1));
+            for (reason, n) in reasons.into_iter().take(3) {
+                tracing::info!(op = label, count = n, reason = %reason, "op error reason");
+            }
+        }
+    }
+}
+
+/// Saturating nanosecond -> [`Duration`] conversion (`u128` accumulators, `u64` constructor).
+fn ns_to_duration(ns: u128) -> Duration {
+    Duration::from_nanos(u64::try_from(ns).unwrap_or(u64::MAX))
+}
+
+/// The op label used to group [`Stats`]: the leading identifier token of the op's `Debug` rendering
+/// (`Deposit { chain, .. }` -> `"Deposit"`). Groups by variant, not by exact input. A `Debug`
+/// rendering that starts with a non-identifier character has no variant token to take; the label
+/// falls back to the rendering truncated to a few leading characters, keeping bucket keys bounded.
+pub fn op_label<Op: core::fmt::Debug>(op: &Op) -> String {
+    const FALLBACK_LEN: usize = 32;
+    let dbg = format!("{op:?}");
+    let end = dbg
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(dbg.len());
+    if end == 0 {
+        dbg.chars().take(FALLBACK_LEN).collect()
+    } else {
+        dbg[..end].to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    #[allow(dead_code)]
+    enum Op {
+        Deposit { amount: u128 },
+    }
+
+    struct WeirdDebug;
+    impl core::fmt::Debug for WeirdDebug {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "<op with a very long non-identifier debug rendering>")
+        }
+    }
+
+    #[test]
+    fn op_label_takes_the_leading_variant_token() {
+        assert_eq!(op_label(&Op::Deposit { amount: 5 }), "Deposit");
+    }
+
+    #[test]
+    fn op_label_truncates_non_identifier_debug_renderings() {
+        let label = op_label(&WeirdDebug);
+        assert_eq!(label.chars().count(), 32, "bounded fallback label");
+        assert!(label.starts_with("<op with"));
+    }
+
+    #[test]
+    fn timing_accumulators_survive_u64_nanosecond_overflow() {
+        let mut stats = Stats::default();
+        // ~584 years: past u64::MAX nanoseconds; min/max must not truncate on record.
+        let huge = Duration::from_secs(u64::MAX / 1_000_000_000 + 1);
+        stats.record("Op", huge, OpOutcome::Accepted);
+        let s = stats.get("Op").unwrap();
+        // Saturates at the Duration accessor, not silently wrapped at record time.
+        assert_eq!(s.max(), Duration::from_nanos(u64::MAX));
+        assert_eq!(s.min(), Duration::from_nanos(u64::MAX));
+    }
+}

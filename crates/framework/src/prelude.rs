@@ -7,10 +7,10 @@ pub use crate::{
 };
 // Property-testing harness.
 pub use crate::harness::{
-    classify, random_seed, sub_seed, CheckOutcome, Ctx, Endurance, EnduranceConfig,
-    EnduranceRunner, Failure, FailureKind, Fuzz, FuzzRunner, Harness, HarnessError, Invariant,
-    InvariantRunner, Prng, RunMode, RunReport, Runner, Scenario, ScenarioRunner, Sequential,
-    Verdict, Violation,
+    classify, op_label, random_seed, sub_seed, CheckOutcome, Coverage, Ctx, Endurance,
+    EnduranceConfig, EnduranceRunner, Failure, FailureKind, Fuzz, FuzzRunner, Harness,
+    HarnessError, InvCoverage, Invariant, InvariantRunner, OpStat, Prng, RunMode, RunReport,
+    Runner, Scenario, ScenarioRunner, Sequential, Stats, Verdict, Violation, DEFAULT_SHRINK_LIMIT,
 };
 pub use cross_vm_core::{
     ChainKind, ChainProvider, ChainSpec, CrossVmError, WalletFactory, WalletLabel, WalletSource,
