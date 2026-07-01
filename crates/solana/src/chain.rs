@@ -30,7 +30,6 @@ const SPL_AMOUNT_OFFSET: usize = 64;
 
 /// A Solana chain backed by either a mock or an RPC provider.
 // Mock holds the full litesvm state; RPC stub is tiny. Intentional size gap.
-#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum SvmChain {
     /// In-process `litesvm` backend.

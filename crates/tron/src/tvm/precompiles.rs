@@ -38,7 +38,7 @@ const VALIDATE_MULTISIGN_ADDR: u64 = 0x0a;
 ///
 /// Each signature is the 65-byte `r(32) || s(32) || v(1)` form. `v` is a recovery id, accepted
 /// either raw (`0`/`1`) or in the Ethereum `27`/`28` convention. Signatures that fail to parse or
-/// recover are skipped. At most [`MAX_MULTISIGN_KEYS`] signatures are processed (TRC-60).
+/// recover are skipped. At most `MAX_MULTISIGN_KEYS` (5) signatures are processed (TRC-60).
 ///
 /// Recovery follows Tron account derivation: the recovered secp256k1 public key is taken in its
 /// uncompressed SEC1 form, the `0x04` tag is dropped, the 64-byte body is `keccak256`-hashed, and

@@ -28,7 +28,6 @@ const BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
 
 /// A Tron chain backed by either a mock or an RPC provider.
 // Mock holds the full revm state; RPC stub is tiny. Intentional size gap.
-#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum TronChain {
     /// In-process `revm`-based TVM backend.

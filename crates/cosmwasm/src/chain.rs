@@ -42,7 +42,6 @@ struct Cw20BalanceResponse {
 /// A CosmWasm chain backed by either a mock or an RPC provider.
 // The mock holds full in-process chain state; the RPC stub is tiny. The size gap is
 // intentional and the value is not stored in bulk, so boxing would only add indirection.
-#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum CwChain {
     /// In-process `cw-multi-test` backend.

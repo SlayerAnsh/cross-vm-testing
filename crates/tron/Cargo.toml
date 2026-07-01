@@ -19,18 +19,21 @@ reqwest.workspace = true
 serde_json.workspace = true
 hex.workspace = true
 # Local signer with BIP-39 mnemonic derivation (secp256k1, same curve as Tron accounts).
-alloy-signer-local = { version = "1", features = ["mnemonic"] }
+alloy-signer-local.workspace = true
 thiserror.workspace = true
 # Async mutex for the per-wallet broadcast lock (held across await on a current-thread rt).
 tokio.workspace = true
 # Tron address codec + hashing (generic crates; NOT a Tron-specific dependency).
-bs58 = "0.5"
-sha2 = "0.10"
-sha3 = "0.10"
-k256 = "0.13"
+bs58.workspace = true
+sha2.workspace = true
+sha3.workspace = true
+k256.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
 cross-vm-macros.workspace = true
 # Load `.env` into the process environment for the live onchain test.
 dotenvy.workspace = true
+
+[lints]
+workspace = true

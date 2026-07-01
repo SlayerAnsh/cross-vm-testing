@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Changed (workspace hygiene: enforced lints, centralized deps, publish readiness)
+
+* Lint discipline is now enforced, not conventional: a `[workspace.lints]` table (`missing_docs = "warn"`, `unsafe_code = "deny"`, one centralized `clippy::large_enum_variant` allow with its rationale) inherited by every member via `[lints] workspace = true`. The five per-enum `#[allow(clippy::large_enum_variant)]`s are deleted. `define_wallet_roster!` and `#[cross_vm_contract]` now emit doc comments on every generated public item (keeping developer-written docs when present, filling a generated line when absent), so macro call sites satisfy `missing_docs` too; `#[cross_vm_contract]` also preserves the spec trait's own attributes and docs, which it previously dropped.
+* Every third-party version now lives in `[workspace.dependencies]`: `alloy-signer-local` (was declared twice), `bs58`/`sha2`/`sha3`/`k256`, `rand`/`rand_chacha`/`arbitrary`, `solana-system-interface`, `rstest`/`base64`.
+* Publish-ready (not published): all six internal path dependencies carry a `version` (cargo strips path-only deps at publish time), and `[workspace.package]` gains `homepage`, `readme`, `keywords`, `categories`. `cargo publish --dry-run -p cross-vm-core` passes; the remaining crates publish bottom-up once `core`/`macros` are on crates.io. `examples/integration-tests` stays `publish = false`.
+* Fixed the two rustdoc warnings in `cross-vm-tron` (an unresolved cross-crate link and a public doc link to a private const) and the framework crate description's awkward Tron retrofit.
+
 ### Added (contribution scaffolding) / Changed (documentation refresh)
 
 * `CONTRIBUTING.md` (setup, the pre-PR command list mirroring CI, and the ground rules: mock-first default suite, feature subsets must build, seeded reproducibility, deliberate major pins), `.github/ISSUE_TEMPLATE/` (the bug template requires seed + mode + minimized history for harness failures) and a PR template with a CHANGELOG/docs/feature-subset checklist.

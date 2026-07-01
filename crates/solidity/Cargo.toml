@@ -17,7 +17,7 @@ alloy-primitives.workspace = true
 alloy.workspace = true
 # Local signer with BIP-39 mnemonic derivation (MnemonicBuilder/PrivateKeySigner). The
 # `mnemonic` feature pulls in coins-bip39, which alloy's `full` does not enable.
-alloy-signer-local = { version = "1", features = ["mnemonic"] }
+alloy-signer-local.workspace = true
 thiserror.workspace = true
 # Async mutex for the per-wallet broadcast lock (held across await on a current-thread rt).
 tokio.workspace = true
@@ -27,3 +27,6 @@ tokio.workspace = true
 cross-vm-macros.workspace = true
 # Load `.env` into the process environment for the live onchain test.
 dotenvy.workspace = true
+
+[lints]
+workspace = true

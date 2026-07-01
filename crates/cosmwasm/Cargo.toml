@@ -33,3 +33,6 @@ counter = { path = "../../examples/cosmwasm-contracts/counter" }
 # The vault contract, with the `cross-vm` feature on so its messages carry the typed-handle
 # derives (exercises CwExecuteFns `#[payable]` + CwQueryFns end to end).
 vault = { path = "../../examples/cosmwasm-contracts/vault", features = ["cross-vm"] }
+
+[lints]
+workspace = true
