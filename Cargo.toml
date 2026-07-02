@@ -91,7 +91,7 @@ alloy-signer-local = { version = "2", features = ["mnemonic"] }
 
 # Tron address codec + hashing (generic crates; NOT Tron-specific dependencies).
 bs58 = "0.5"
-sha2 = "0.10"
+sha2 = "0.11"
 sha3 = "0.11"
 k256 = "0.13"
 
