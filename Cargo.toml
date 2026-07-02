@@ -87,7 +87,7 @@ alloy-primitives = "1"
 alloy-chains = "0.2"
 # Local signer with BIP-39 mnemonic derivation; the `mnemonic` feature pulls in coins-bip39,
 # which alloy's `full` does not enable. Shared by the EVM and Tron providers (same curve).
-alloy-signer-local = { version = "1", features = ["mnemonic"] }
+alloy-signer-local = { version = "2", features = ["mnemonic"] }
 
 # Tron address codec + hashing (generic crates; NOT Tron-specific dependencies).
 bs58 = "0.5"
