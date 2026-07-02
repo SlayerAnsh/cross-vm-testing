@@ -261,21 +261,21 @@ jobs:
           cache-on-failure: true
       # Solana .so -> examples/solana-contracts/target/deploy/  (include_bytes!)
       - name: Download Solana artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: solana-so
           path: examples/solana-contracts/target/deploy
       # Solidity .json -> examples/solidity-contracts/out/  (sol!, consumed by
       # both crates/solidity/tests and the integration-tests support files).
       - name: Download Solidity artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: solidity-out
           path: examples/solidity-contracts/out
       # Tron .json -> examples/tron-contracts/build/  (sol!, consumed by the
       # integration-tests support files for the TVM creation bytecode).
       - name: Download Tron artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tron-build
           path: examples/tron-contracts/build
