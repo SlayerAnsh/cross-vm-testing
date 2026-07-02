@@ -43,10 +43,12 @@ pub struct ChainDecl {
 
 /// Returns the names of fields required for `decl.kind` that are absent from `decl`.
 ///
-/// Pure, per-kind presence check with no orchestration: it does not know about `RunConfig`,
-/// does not run automatically, and returning an empty vec does not mean the declaration is
-/// otherwise valid. Structural validation (calling this, plus label uniqueness, plus selection
-/// checks) is wired up in a later task.
+/// Pure, per-kind presence check with no orchestration: it does not know about `RunConfig` and
+/// does not run automatically; returning an empty vec does not mean the declaration is
+/// otherwise valid (e.g. `kind` could still be empty, or the label could collide with another
+/// chain). Structural validation (calling this, plus label uniqueness, plus an empty-`kind`
+/// check, plus selection checks) is wired up in the loader's structural-validation stage
+/// (`validate::validate`).
 pub fn missing_required_fields(decl: &ChainDecl) -> Vec<&'static str> {
     match decl.kind.as_str() {
         "cosmwasm" => {

@@ -23,6 +23,7 @@ use std::collections::HashSet;
 pub fn validate(cfg: &RunConfig) -> Result<(), ConfigError> {
     validate_chain_labels_unique(&cfg.chains)?;
     for decl in &cfg.chains {
+        validate_chain_kind_non_empty(decl)?;
         validate_chain_fields(decl)?;
     }
     validate_suites(cfg)?;
@@ -51,6 +52,18 @@ fn validate_chain_labels_unique(chains: &[ChainDecl]) -> Result<(), ConfigError>
                 label: decl.label.clone(),
             });
         }
+    }
+    Ok(())
+}
+
+/// `kind` is non-empty: the framework resolves it to a `ChainKind` at run time (an unknown
+/// non-empty kind is a framework-level error), but an empty string can never resolve to
+/// anything, so this crate rejects it directly rather than deferring to the framework.
+fn validate_chain_kind_non_empty(decl: &ChainDecl) -> Result<(), ConfigError> {
+    if decl.kind.is_empty() {
+        return Err(ConfigError::EmptyChainKind {
+            label: decl.label.clone(),
+        });
     }
     Ok(())
 }

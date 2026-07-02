@@ -23,7 +23,16 @@ use crate::ConfigError;
 
 /// The profile keys shared by every mode (spec section 4.3); a defaulted key naming one of
 /// these always applies, regardless of mode.
+///
+/// `mode` is included even though section 4.3 doesn't list it as a per-mode config value: it is
+/// structural (the dispatcher in `build_run_config` needs it to pick a per-mode struct at all)
+/// and must never be stripped, whether a profile set it itself or inherited it from
+/// `[defaults]`. Without this, a `[defaults].mode` inherited by a profile that omits its own
+/// `mode` would be copied in by the defaults merge below and then immediately stripped back out
+/// by the very same allowlist check, since `mode` matched none of the mode-specific key lists
+/// either.
 const COMMON_KEYS: &[&str] = &[
+    "mode",
     "seed",
     "check_every",
     "stats",
@@ -134,7 +143,8 @@ pub fn merge(root: &mut toml::Value) -> Result<Vec<String>, ConfigError> {
                 }
                 None => None,
             };
-            let merged_env = merge_env_tables(&top_env, profile_env_override.as_ref());
+            let merged_env =
+                merge_env_tables(profile_name, &top_env, profile_env_override.as_ref())?;
             if merged_env.is_empty() {
                 profile_table.remove("env");
             } else {
@@ -149,22 +159,36 @@ pub fn merge(root: &mut toml::Value) -> Result<Vec<String>, ConfigError> {
 /// Shallow-merges a profile's `env` override table over the top-level `[env]` table.
 /// `target`, `chains`, and `params` are whole-value overrides (override wins when present);
 /// `targets` merges label-wise (override labels win, other top-level labels survive).
-fn merge_env_tables(top: &toml::Table, profile_override: Option<&toml::Table>) -> toml::Table {
+///
+/// A non-table `targets` override (e.g. `env = { targets = "oops" }`) is a hard error rather
+/// than being silently dropped: it is a user typo (the schema requires a label-to-target
+/// table), and masking it would let a broken override pass through as if it were simply absent.
+fn merge_env_tables(
+    profile_name: &str,
+    top: &toml::Table,
+    profile_override: Option<&toml::Table>,
+) -> Result<toml::Table, ConfigError> {
     let mut merged = top.clone();
     let Some(over) = profile_override else {
-        return merged;
+        return Ok(merged);
     };
 
     for (key, value) in over {
         if key == "targets" {
+            let over_targets = match value {
+                toml::Value::Table(t) => t,
+                _ => {
+                    return Err(ConfigError::Parse(format!(
+                        "`profile.{profile_name}.env.targets` must be a table"
+                    )))
+                }
+            };
             let mut targets_table = match merged.get("targets") {
                 Some(toml::Value::Table(t)) => t.clone(),
                 _ => toml::Table::new(),
             };
-            if let toml::Value::Table(over_targets) = value {
-                for (label, target) in over_targets {
-                    targets_table.insert(label.clone(), target.clone());
-                }
+            for (label, target) in over_targets {
+                targets_table.insert(label.clone(), target.clone());
             }
             merged.insert("targets".to_string(), toml::Value::Table(targets_table));
         } else {
@@ -172,7 +196,7 @@ fn merge_env_tables(top: &toml::Table, profile_override: Option<&toml::Table>) -
         }
     }
 
-    merged
+    Ok(merged)
 }
 
 #[cfg(test)]
@@ -365,6 +389,72 @@ mod tests {
         merge(&mut doc).unwrap();
         let profile = doc.get("profile").unwrap().get("p").unwrap();
         assert_eq!(profile.get("bogus").unwrap().as_bool(), Some(true));
+    }
+
+    #[test]
+    fn defaults_mode_is_never_stripped_by_the_allowlist() {
+        // A profile that omits its own `mode` but inherits one from [defaults], plus a
+        // mode-specific default key, must retain both after the strip: `mode` is structural
+        // and always allowed, and once it survives, the mode-specific key is allowed too.
+        let mut doc = parse(
+            r#"
+            [defaults]
+            mode = "fuzz"
+            cases = 1
+            ops = 1
+
+            [profile.p]
+            "#,
+        );
+        let warnings = merge(&mut doc).unwrap();
+        let profile = doc.get("profile").unwrap().get("p").unwrap();
+        assert_eq!(profile.get("mode").unwrap().as_str(), Some("fuzz"));
+        assert_eq!(profile.get("cases").unwrap().as_integer(), Some(1));
+        assert_eq!(profile.get("ops").unwrap().as_integer(), Some(1));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn profiles_own_mode_is_never_stripped_either() {
+        // Even when the profile sets `mode` itself (not inherited from [defaults]), a
+        // mode-inapplicable default key must be stripped, but `mode` itself must survive.
+        let mut doc = parse(
+            r#"
+            [defaults]
+            cases = 8
+
+            [profile.p]
+            mode = "scenario"
+
+              [[profile.p.steps]]
+              op = "Ping"
+            "#,
+        );
+        merge(&mut doc).unwrap();
+        let profile = doc.get("profile").unwrap().get("p").unwrap();
+        assert_eq!(profile.get("mode").unwrap().as_str(), Some("scenario"));
+        assert!(profile.get("cases").is_none(), "cases must still be stripped");
+    }
+
+    #[test]
+    fn malformed_targets_override_is_a_hard_error() {
+        let mut doc = parse(
+            r#"
+            [env]
+            targets = { eth = "rpc" }
+
+            [profile.p]
+            mode = "fuzz"
+            cases = 1
+            ops = 1
+            env = { targets = "not-a-table" }
+            "#,
+        );
+        let err = merge(&mut doc).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Parse(ref msg) if msg.contains("targets")),
+            "expected a targets-shaped Parse error, got: {err:?}"
+        );
     }
 
     #[test]

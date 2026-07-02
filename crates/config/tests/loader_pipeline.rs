@@ -138,6 +138,41 @@ fn bad_kinds_weights_errors() {
 }
 
 #[test]
+fn bad_empty_chain_kind_errors() {
+    let err = cross_vm_config::from_toml_str(fixture!("bad_empty_chain_kind.toml"), &no_vars)
+        .unwrap_err();
+    assert!(
+        matches!(err, ConfigError::EmptyChainKind { ref label } if label == "eth"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn defaults_mode_survives_the_strip_and_dispatches_as_fuzz() {
+    let cfg = cross_vm_config::from_toml_str(fixture!("good_defaults_mode.toml"), &no_vars)
+        .expect("a [defaults].mode inherited by a mode-less profile should still load cleanly");
+    assert!(
+        cfg.warnings.is_empty(),
+        "mode and its mode-specific defaults must not be stripped, got warnings: {:?}",
+        cfg.warnings
+    );
+    match cfg.profiles.get("p").expect("profile `p` must exist") {
+        cross_vm_config::Profile::Fuzz(f) => {
+            assert_eq!(f.cases, 1);
+            assert_eq!(f.ops, 1);
+        }
+        other => panic!("expected a Fuzz profile (mode inherited from [defaults]), got {other:?}"),
+    }
+}
+
+#[test]
+fn replay_block_is_tolerated_and_ignored() {
+    let cfg = cross_vm_config::from_toml_str(fixture!("good_with_replay.toml"), &no_vars)
+        .expect("a top-level [replay] block must be tolerated, not rejected as an unknown field");
+    assert_eq!(cfg.profiles.len(), 1);
+}
+
+#[test]
 fn bad_suite_missing_profile_errors() {
     let err = cross_vm_config::from_toml_str(fixture!("bad_suite_missing_profile.toml"), &no_vars)
         .unwrap_err();

@@ -113,6 +113,14 @@ pub enum ConfigError {
         /// The names of the missing required fields.
         fields: Vec<String>,
     },
+    /// A `[[chain]]` entry set `kind` to an empty string. The framework resolves `kind` to a
+    /// `ChainKind` at run time; an unrecognized non-empty kind is a framework error, but an
+    /// empty kind can never resolve to anything, so this crate hard-errors on it directly.
+    #[error("chain `{label}`: `kind` must not be empty")]
+    EmptyChainKind {
+        /// The chain's label.
+        label: String,
+    },
     /// A fuzz profile's `cases` was not greater than zero.
     #[error("profile `{profile}`: `cases` must be greater than 0")]
     InvalidCases {
@@ -172,8 +180,10 @@ pub enum ConfigError {
     InvalidChainTarget {
         /// The chain's label.
         label: String,
-        /// A description of the invalid value (never the raw value itself; it is not a
-        /// secret, but the message is already descriptive without echoing it).
+        /// A description of the invalid value, produced by [`crate::parse_target_str`]. It
+        /// does embed the raw offending string (e.g. `` invalid target `bogus`, expected
+        /// "mock" or "rpc" ``); that is fine here since a chain's `target` field is a fixed
+        /// enum-like string (`"mock"`/`"rpc"`), never a secret, unlike an interpolated value.
         message: String,
     },
     /// A chain resolved to the `rpc` target (for some profile's effective environment) but has
@@ -193,6 +203,12 @@ pub enum ConfigError {
 ///
 /// `deny_unknown_fields`: the merge stage consumes and removes `[defaults]` before this struct
 /// ever sees the document, so a top-level typo is still a hard error here.
+///
+/// `replay` is the one deliberate exception: spec section 4.2 lists a top-level `[replay]`
+/// block as valid, provenance data written by `cross-vm replay` into P4 replay artifacts, and
+/// explicitly "ignored by the run schema". It is parsed here (as an untyped table) purely so
+/// `deny_unknown_fields` doesn't reject it, then dropped in [`build_run_config`]; it never
+/// reaches [`RunConfig`].
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRunConfig {
@@ -205,6 +221,9 @@ struct RawRunConfig {
     profile: BTreeMap<String, toml::Table>,
     #[serde(rename = "suite", default)]
     suite: BTreeMap<String, Suite>,
+    /// Tolerated but ignored; see the struct doc comment.
+    #[serde(default)]
+    replay: Option<toml::Table>,
 }
 
 /// Parses a TOML document string into a [`RunConfig`], running the full five-stage pipeline:
@@ -268,6 +287,9 @@ fn build_run_config(value: toml::Value) -> Result<RunConfig, ConfigError> {
         path: "<root>".to_string(),
         message: e.to_string(),
     })?;
+    // `[replay]` is parsed only so `deny_unknown_fields` tolerates it; it is not part of the
+    // run schema and is intentionally dropped here.
+    let _ = raw.replay;
 
     let mut profiles = BTreeMap::new();
     for (name, mut table) in raw.profile {

@@ -311,7 +311,8 @@ struct EnduranceProfileWire {
 pub struct EnduranceProfile {
     /// Keys shared with every other mode.
     pub common: CommonKeys,
-    /// Wall clock bound; required unless `max_ops` is set (checked in a later task).
+    /// Wall clock bound; required unless `max_ops` is set (enforced by the loader's
+    /// structural-validation stage, `validate::validate`).
     pub duration: Option<Duration>,
     /// Op count bound; whichever bound hits first stops the run.
     pub max_ops: Option<usize>,
@@ -381,7 +382,8 @@ struct ScenarioProfileWire {
 pub struct ScenarioProfile {
     /// Keys shared with every other mode.
     pub common: CommonKeys,
-    /// Ordered concrete steps; required, non-empty (checked in a later task).
+    /// Ordered concrete steps; required, non-empty (enforced by the loader's
+    /// structural-validation stage, `validate::validate`).
     pub steps: Vec<ScenarioStepRaw>,
     /// Optional path to serialize the final `World` as JSON (a later phase).
     pub export_world: Option<String>,
