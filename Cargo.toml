@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/config",
     "crates/revm-common",
     "crates/cosmwasm",
     "crates/solidity",
@@ -47,6 +48,7 @@ large_enum_variant = "allow"
 # locally and the version on crates.io (path-only deps are stripped at publish time and fail
 # the dry run). Keep in step with [workspace.package] version.
 cross-vm-core = { path = "crates/core", version = "0.1.0" }
+cross-vm-config = { path = "crates/config", version = "0.1.0" }
 cross-vm-macros = { path = "crates/macros", version = "0.1.0" }
 cross-vm-revm-common = { path = "crates/revm-common", version = "0.1.0" }
 cross-vm-cosmwasm = { path = "crates/cosmwasm", version = "0.1.0" }
@@ -62,6 +64,13 @@ proc-macro2 = "1"
 # Shared
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+# TOML parsing for the declarative run-config crate (cross-vm-config).
+toml = "0.8"
+# Duration string parsing (humantime grammar) for the run-config crate.
+humantime = "2"
+# CLI argument parsing; only reached via the framework's `cli` feature in later phases.
+clap = { version = "4", features = ["derive"] }
 # Structured leveled logging: facade in the libs, subscriber wired by the test binary.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
