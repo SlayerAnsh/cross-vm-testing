@@ -1,0 +1,17 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for routine bumps; majors stay individual so pinned-major rationale
+      # (revm 41, cw-multi-test 2, litesvm 0.13, alloy 1; see DEVELOPER.md) is
+      # revisited consciously.
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

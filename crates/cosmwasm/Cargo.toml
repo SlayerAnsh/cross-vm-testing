@@ -2,6 +2,7 @@
 name = "cross-vm-cosmwasm"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "CosmWasm chain provider (cw-multi-test) for the cross-vm testing suite"
@@ -32,3 +33,6 @@ counter = { path = "../../examples/cosmwasm-contracts/counter" }
 # The vault contract, with the `cross-vm` feature on so its messages carry the typed-handle
 # derives (exercises CwExecuteFns `#[payable]` + CwQueryFns end to end).
 vault = { path = "../../examples/cosmwasm-contracts/vault", features = ["cross-vm"] }
+
+[lints]
+workspace = true

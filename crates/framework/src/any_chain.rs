@@ -17,7 +17,6 @@ use crate::contract::Account;
 /// `ChainProvider` is not object safe, so this enum (rather than a trait object) is how
 /// CosmWasm, EVM, and Solana chains live side by side in one map.
 // Per-VM mock states differ in size; the gap is inherent to wrapping three VMs.
-#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum AnyChain {
     /// A CosmWasm chain.

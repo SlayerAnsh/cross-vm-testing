@@ -2,14 +2,14 @@
 
 ## Prerequisites
 
-* Rust stable (developed against 1.96, edition 2021).
+* Rust stable, edition 2021. The MSRV is declared as `rust-version` in the workspace `Cargo.toml` (the manifest is the source of truth; CI enforces it with a dedicated `msrv` job).
 * Building the integration-test contract artifacts (all git-ignored): Foundry (`forge`) for the EVM Counter, `cargo-build-sbf` for the Solana program, and the CosmWasm wasm builds. Run `make compile` (or a single ecosystem target) before `cargo test -p cross-vm-integration-tests`. The pure unit tests in each VM crate need none of this.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on push to `main`, on pull requests, and on manual dispatch. It is four jobs. Three run in parallel: `lint` (`cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo doc --workspace --no-deps`), `solana-artifacts` (installs the Agave platform tools, runs `make compile-solana`, uploads the three `.so`), and `solidity-artifacts` (installs Foundry, runs `forge fmt --check` and `make compile-solidity`, uploads the `out/` directory). The fourth job, `test`, declares `needs: [solana-artifacts, solidity-artifacts]`, downloads both artifacts into their exact embed paths (`examples/solana-contracts/target/deploy` for the `.so` consumed by `include_bytes!`, `examples/solidity-contracts/out` for the `.json` consumed by `sol!`), verifies they landed, then runs the tests in two steps: `cargo test --workspace --exclude cross-vm-cosmwasm`, then `cargo test -p cross-vm-cosmwasm --lib --test counter --test vault --test typed_handle`.
+`.github/workflows/ci.yml` runs on push to `main`, on pull requests, and on manual dispatch. It is eight jobs. Seven run in parallel: `lint` (`cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo doc --workspace --no-deps`), `msrv` (`cargo check --workspace` on the declared `rust-version`), `deny` (`cargo deny check` against `deny.toml`: advisories, licenses, duplicate versions, sources), `features` (`cargo hack --feature-powerset` over the framework's per-VM feature gates), `solana-artifacts` (installs the Agave platform tools, runs `make compile-solana`, uploads the three `.so`), `solidity-artifacts` (installs Foundry, runs `forge fmt --check` and `make compile-solidity`, uploads the `out/` directory), and `tron-artifacts` (Node + pnpm + tronbox, runs `make compile-tron`, uploads `build/`). The eighth job, `test`, declares `needs: [solana-artifacts, solidity-artifacts, tron-artifacts]`, downloads all three artifact sets into their exact embed paths (`examples/solana-contracts/target/deploy` for the `.so` consumed by `include_bytes!`, `examples/solidity-contracts/out` and `examples/tron-contracts/build` for the `.json` consumed by `sol!`), verifies they landed, runs `cargo clippy --all-targets` (the artifact-dependent lint pass the `lint` job deliberately skips), then runs the tests in two steps: `cargo test --workspace --exclude cross-vm-cosmwasm`, then `cargo test -p cross-vm-cosmwasm --lib --test counter --test vault --test typed_handle`. A separate `live-smoke.yml` workflow (weekly cron + manual dispatch, secrets-gated, never a required check) runs the `#[ignore]`d live RPC tests.
 
-The contract builds parallelize cheaply because the root workspace excludes `examples/` and `examples/solana-contracts` is its own Cargo workspace, so `cargo build-sbf` compiles only the three SBF programs, not the main target. The earlier layout was a single sequential job (a six-job version before that was reverted because every job reinstalled toolchains and recompiled the full workspace with no cache). To keep the parallel split from repeating that cost, `lint` and `test` share one `Swatinem/rust-cache` key (`cross-vm-main`) so the dependency graph compiles once and restores in both, the Agave install is cached on `~/.local/share/solana` keyed to the pinned `v4.0.0`, and `lint` drops the redundant `cargo build --workspace` (the `test` job compiles the workspace anyway, and clippy already surfaces build errors). `forge fmt --check` now lives in `solidity-artifacts`, so a formatting nit gates `test` but not `lint`.
+The contract builds parallelize cheaply because the root workspace excludes `examples/` and `examples/solana-contracts` is its own Cargo workspace, so `cargo build-sbf` compiles only the three SBF programs, not the main target. The earlier layout was a single sequential job (a six-job version before that was reverted because every job reinstalled toolchains and recompiled the full workspace with no cache). To keep the parallel split from repeating that cost, `lint` and `test` share one `Swatinem/rust-cache` key (`cross-vm-main`) so the dependency graph compiles once and restores in both, the Agave install is cached on `~/.local/share/solana` keyed to the pinned version (the `SOLANA_VERSION` workflow env, one knob for the install URL and both caches), and `lint` drops the redundant `cargo build --workspace` (the `test` job compiles the workspace anyway, and clippy already surfaces build errors). `forge fmt --check` now lives in `solidity-artifacts`, so a formatting nit gates `test` but not `lint`.
 
 The Solana artifacts are built with `cargo build-sbf` (from the Anza platform tools), not `anchor build`. The tests use raw instruction discriminators, so the Anchor IDL is unnecessary, and `cargo build-sbf` avoids Anchor's anchor-cli/anchor-lang version handshake (the prebuilt npm `anchor-cli@0.31.1` reports `0.31.0`, so `anchor build` aborted and silently produced no `.so`). The toolchain runs with `rustflags: ""` so the action's default `-D warnings` does not turn the third-party SBF program build's deprecation warnings into errors; `-D warnings` is still enforced explicitly on clippy. `make compile-solana` is followed by a check that the `.so` exist, so a no-op build fails loudly rather than at the later `include_bytes!`.
 
@@ -28,13 +28,14 @@ dev-dependency only (the library crates define `async fn`s but pull in no runtim
 This is a Cargo workspace with one crate per VM plus a shared core crate. Dependency trees are isolated per crate, so building or testing one VM does not pull the others.
 
 ```
-crates/core       cross-vm-core       no VM dependencies
-crates/cosmwasm   cross-vm-cosmwasm   cw-multi-test, cosmwasm-std
-crates/solidity   cross-vm-solidity   revm (alloy for the test bindings)
-crates/solana     cross-vm-solana     litesvm, granular solana-* crates
-crates/tron       cross-vm-tron       revm core + TVM layers (Tron precompiles, energy/bandwidth shim, sun balances)
-crates/macros     cross-vm-macros     proc-macros (syn/quote): cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, fuzz/invariant/endurance runners
-crates/framework  cross-vm-framework  umbrella over core + all three VM crates
+crates/core         cross-vm-core         no VM dependencies
+crates/revm-common  cross-vm-revm-common  shared revm mock core (RevmCore) for the EVM-derived providers
+crates/cosmwasm     cross-vm-cosmwasm     cw-multi-test, cosmwasm-std
+crates/solidity     cross-vm-solidity     revm via the shared core (alloy for the test bindings)
+crates/solana       cross-vm-solana       litesvm, granular solana-* crates
+crates/tron         cross-vm-tron         shared revm core + TVM layers (Tron precompiles, energy/bandwidth shim, sun balances)
+crates/macros       cross-vm-macros       proc-macros (syn/quote): cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, fuzz/invariant/endurance runners
+crates/framework    cross-vm-framework    umbrella over core + all four VM crates
 ```
 
 `cross-vm-framework` defines `MultiChainEnv`. Each VM crate also exposes a backend enum
@@ -91,13 +92,13 @@ cargo run -p cross-vm-solana   --example solana_quickstart
 
 ## Tests
 
-Each crate has unit tests (chain metadata, account creation, balance set/get, block advance, RPC write paths return an error) in `src/tests.rs`, and an integration test in `tests/`. All three VM crates also have `tests/rpc.rs`, `#[ignore]` live read tests against Osmosis testnet, Ethereum Sepolia, and Solana Devnet (for example `cargo test -p cross-vm-solana --test rpc -- --ignored`):
+Each crate has unit tests (chain metadata, account creation, balance set/get, block advance, RPC write paths return an error) in `src/tests.rs`, and an integration test in `tests/`. The CosmWasm, EVM, and Solana crates also have `tests/rpc.rs`, `#[ignore]` live read tests against Osmosis testnet, Ethereum Sepolia, and Solana Devnet (for example `cargo test -p cross-vm-solana --test rpc -- --ignored`); Tron's equivalent is `tests/onchain.rs` (Nile testnet reads plus a funded deploy/call write test):
 
 * `cross-vm-cosmwasm`: `store_code` + `instantiate` an in-test `ContractWrapper` counter, then `execute_contract`, `query_wasm_smart`.
 * `cross-vm-solidity`: `deploy_create` the Solidity `Counter` from `examples/solidity-contracts` (creation bytecode from the forge artifact via `sol!`), then `call` for `increment`/`reset`, read via `static_call`.
 * `cross-vm-solana`: airdrop, System Program transfer through `send_transaction`, balance assertion.
 * `cross-vm-framework`: keeps only framework functionality tests. `src/tests.rs` covers `MultiChainEnv` setup, label/VM error handling, native funding, and the before/after hook mechanics; inline `#[cfg(test)]` mods in `contract/account.rs`, `contract/response.rs`, `harness/rng.rs`, and `harness/outcome.rs` cover their units. The heavy multi-chain integration tests live in their own crate (see below), so the framework build no longer drags the contract-artifact toolchain.
-* `cross-vm-integration-tests` (`examples/integration-tests`): the multi-chain integration and example tests, co-located with the contract artifacts they embed. Two test binaries. `tests/harness/` holds the property-testing examples (`counter.rs`, `vault.rs`, `ping_pong.rs`, and `mechanics.rs` for the runner mechanics); `tests/cross_vm/` holds the multi-chain tests (`setup.rs`, `counter.rs`, `wallet.rs`, `ping_pong.rs`). Both share `tests/support/`, split by concern into `counter.rs` (the cross-VM `Counter` wrapper), `vault.rs` (the cross-VM `Vault` wrapper), `ping_pong.rs` and `bridge.rs` (the ping-pong relayer flow), and `wallets.rs` (`test_wallets` plus funding helpers), aggregated by `tests/support/mod.rs`. Each group has a `main.rs` that declares its modules (Cargo treats `tests/<group>/main.rs` as one test target). `tests/cross_vm/counter.rs` runs one rstest over all three VMs (`#[values(ChainKind::CosmWasm, ChainKind::Evm, ChainKind::Svm)]`, each case building the matching `.mock(wallets)`) driving the single `Counter` wrapper. All three VMs use the canonical contracts from `examples/`. The EVM and Solana cases read build artifacts at compile time, all git-ignored, so run `make compile` (or `make compile-solidity compile-solana`) before `cargo test -p cross-vm-integration-tests`. A fresh checkout will not compile the tests until they exist:
+* `cross-vm-integration-tests` (`examples/integration-tests`): the multi-chain integration and example tests, co-located with the contract artifacts they embed. Two test binaries. `tests/harness/` holds the property-testing examples (`counter.rs`, `vault.rs`, `ping_pong.rs`, and `mechanics.rs` for the runner mechanics); `tests/cross_vm/` holds the multi-chain tests (`setup.rs`, `counter.rs`, `wallet.rs`, `ping_pong.rs`). Both share `tests/support/`, split by concern into `counter.rs` (the cross-VM `Counter` wrapper), `vault.rs` (the cross-VM `Vault` wrapper), `ping_pong.rs` and `bridge.rs` (the ping-pong relayer flow), and `wallets.rs` (`test_wallets` plus funding helpers), aggregated by `tests/support/mod.rs`. Each group has a `main.rs` that declares its modules (Cargo treats `tests/<group>/main.rs` as one test target). `tests/cross_vm/counter.rs` runs one rstest over all four VMs (`#[values(ChainKind::CosmWasm, ChainKind::Evm, ChainKind::Svm, ChainKind::Tron)]`, each case building the matching `.mock(wallets)`) driving the single `Counter` wrapper. All four VMs use the canonical contracts from `examples/`. The EVM, Solana, and Tron cases read build artifacts at compile time, all git-ignored, so run `make compile` (or the per-ecosystem `compile-solidity` / `compile-solana` / `compile-tron` targets) before `cargo test -p cross-vm-integration-tests`. A fresh checkout will not compile the tests until they exist:
   * CosmWasm: the `examples/cosmwasm-contracts/counter` crate is consumed as an rlib (no artifact build needed).
   * EVM: `sol!` parses `examples/solidity-contracts/out/Counter.sol/Counter.json` (forge build) for the ABI and creation bytecode.
   * Solana: `include_bytes!` loads `examples/solana-contracts/target/deploy/counter.so` (`cargo-build-sbf`).
@@ -114,7 +115,7 @@ Transition invariants (comparing on-chain state before vs after one op) need no 
 
 ## Writing a cross-VM contract wrapper
 
-To drive one contract across CosmWasm, EVM, and Solana from a single test, declare its logical methods in a spec trait, apply `#[cross_vm_contract(StructName)]`, and write the per-VM hooks. The macro (from `cross-vm-macros`, re-exported in the prelude) generates the wrapper struct, its `new` / `instance` constructors, the `on_before` / `on_after` forwarders, and a dispatcher per method that matches the VM and calls the matching `cw_*` / `evm_*` / `svm_*` hook. See `examples/integration-tests/tests/support/counter.rs` for a full example. The shape:
+To drive one contract across CosmWasm, EVM, Solana, and Tron from a single test, declare its logical methods in a spec trait, apply `#[cross_vm_contract(StructName)]`, and write the per-VM hooks. The macro (from `cross-vm-macros`, re-exported in the prelude) generates the wrapper struct, its `new` / `instance` constructors, the `on_before` / `on_after` forwarders, and a dispatcher per method that matches the VM and calls the matching `cw_*` / `evm_*` / `svm_*` / `tron_*` hook; a hook you do not write defaults to `unimplemented!`, panicking only if that VM is actually dispatched, so a wrapper can target a subset of VMs. See `examples/integration-tests/tests/support/counter.rs` for a full example. The shape:
 
 ```rust
 // Declare logical methods once. Return types are the bare Ok type (the macro wraps each in
@@ -179,22 +180,26 @@ Properties:
 * Synchronous `FnMut`. The mock backends are synchronous and the runtime is current-thread (futures are not `Send`), so async side-effects flow through a channel or an `Rc<RefCell<_>>` buffer the closure captures and drains later.
 * Both kinds return `Result<(), CrossVmError>`. The first `Err` aborts: a before-`Err` stops the transaction from running; an after-`Err` becomes the method's error.
 * Registered per contract, fired in registration order. A before-hook reads `label` / `kind`; an after-hook also reads `transaction_hash` / `gas_used` off the response, plus per-VM event data.
-* Events are exposed per VM because the shapes do not unify: `cosmwasm_events()` returns typed `Event` attributes, `evm_logs()` returns ABI `Log`s (address, topics, data), `solana_logs()` returns the program log lines (`msg!` / `sol_log`; Anchor `emit!` events are base64 inside them). The matching accessor succeeds; the other two return `WrongVm`. An after-hook that watches all three VMs matches on `ctx.kind()`.
+* Events are exposed per VM because the shapes do not unify: `cosmwasm_events()` returns typed `Event` attributes, `evm_logs()` returns ABI `Log`s (address, topics, data), `solana_logs()` returns the program log lines (`msg!` / `sol_log`; Anchor `emit!` events are base64 inside them), and `tron_logs()` returns Tron's EVM-shaped logs. The matching accessor succeeds; the others return `WrongVm`. An after-hook that watches every VM matches on `ctx.kind()`.
 * Re-entrancy is unsupported: a hook that re-enters the same contract's `run_before` / `run_after` panics on the `RefCell` (the registry is borrowed while firing).
 * The two dispatcher lines are the shape the deferred scaffolding macro will generate.
 
 ## Adding a predefined chain
 
-Add a constant to the relevant crate's `chains/presets.rs`. The metadata struct (`CosmosChainInfo`, `EvmChainInfo`, or `SolanaChainInfo`) lives in `chains/info.rs`; the `ChainSpec` impl and the `.mock()` / `.rpc()` sugar (`chains/sugar.rs`) apply automatically.
+Add a constant to the relevant crate's `chains/presets.rs`. The metadata struct (`CosmosChainInfo`, `EvmChainInfo`, `SolanaChainInfo`, or `TronChainInfo`) lives in `chains/info.rs`; the `ChainSpec` impl and the `.mock()` / `.rpc()` sugar (`chains/sugar.rs`) apply automatically.
 
 ## Adding a new VM
 
+The short version:
+
 1. Add a crate under `crates/` and list it in the workspace `members`.
 2. Define a `ChainInfo` struct implementing `cross_vm_core::ChainSpec`, with a `chains` module of constants.
-3. Implement `cross_vm_core::ChainProvider` for a mock provider and an RPC stub (chain-level ops only).
+3. Implement `cross_vm_core::ChainProvider` for a mock provider and an RPC provider (chain-level ops only). The mock is what the default suite runs; the RPC backend can start read-only and grow writes later (the EVM, CosmWasm, and Tron providers all sign and broadcast today).
 4. Add idiomatic contract/program methods on the mock and RPC providers (and delegate from the chain enum).
 5. Convert the provider error into `CrossVmError` via `From`.
 6. Mirror the unit and integration test layout above.
+
+The full file-by-file checklist, derived from the Tron addition (the most recent complete example), lives in [`docs/adding-a-vm.md`](docs/adding-a-vm.md). The framework touch points (the `AnyChain` / `Account` / `RawResponse` / funding enums, the macro hook, the prelude, CI) are enum dispatch by design, so a new VM edits a known, bounded set of files; the checklist names each one and which existing VM to crib from.
 
 ## Notes on crate versions
 

@@ -1,6 +1,6 @@
 //! Live java-tron RPC provider over the TronGrid HTTP REST API.
 //!
-//! [`TronRpcProvider`] mirrors the EVM [`EvmRpcProvider`]: chain reads ([`balance`],
+//! [`TronRpcProvider`] mirrors the EVM `EvmRpcProvider`: chain reads ([`balance`],
 //! [`block_height`]) and read-only [`static_call`] need no signer; the write paths
 //! ([`deploy_create`], [`call`]) sign the transaction id with the wallet's secp256k1 key and
 //! broadcast. Only `set_balance` stays [`TronError::Unimplemented`] (a live chain cannot mint).

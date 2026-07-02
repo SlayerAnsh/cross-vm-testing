@@ -26,7 +26,6 @@ const BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
 
 /// An EVM chain backed by either a mock or an RPC provider.
 // Mock holds the full revm state; RPC stub is tiny. Intentional size gap.
-#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum EvmChain {
     /// In-process `revm` backend.

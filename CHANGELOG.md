@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Changed (shared revm mock core: `cross-vm-revm-common`)
+
+* New internal crate `crates/revm-common`: the EVM and Tron mock providers were structural clones (identical VM construction, TxEnv plumbing, `exec_or_err`, block/balance surface); the shared machinery now lives once in `RevmCore` (`new(chain_id, spec, customize)`, `deploy_create`, value-carrying `call` with the payable top-up, `static_call`, `balance`/`set_balance`, `block_height`/`advance_blocks`) plus a transport-agnostic `ExecFailure` whose `deploy_message`/`call_message` helpers reproduce the providers' historical error strings exactly.
+* `EvmMockProvider` and `TronMockProvider` keep their own types and semantics: the EVM mock seeds block 1 + the shared mock clock in its `customize` hook; the Tron mock injects the TIP-272 precompile set and the TVM-native opcodes there, keeps its bandwidth accounting, its `TronAddress`/sun boundary conversions, and the documented `DIVERGENCE(tron)` CREATE-address caveat. Both providers' existing unit tests pass unchanged (the extraction's safety net). The `rpc.rs` and `chain.rs` layers are deliberately NOT unified (verified: almost no overlap; alloy JSON-RPC vs TronGrid HTTP).
+
+### Changed (workspace hygiene: enforced lints, centralized deps, publish readiness)
+
+* Lint discipline is now enforced, not conventional: a `[workspace.lints]` table (`missing_docs = "warn"`, `unsafe_code = "deny"`, one centralized `clippy::large_enum_variant` allow with its rationale) inherited by every member via `[lints] workspace = true`. The five per-enum `#[allow(clippy::large_enum_variant)]`s are deleted. `define_wallet_roster!` and `#[cross_vm_contract]` now emit doc comments on every generated public item (keeping developer-written docs when present, filling a generated line when absent), so macro call sites satisfy `missing_docs` too; `#[cross_vm_contract]` also preserves the spec trait's own attributes and docs, which it previously dropped.
+* Every third-party version now lives in `[workspace.dependencies]`: `alloy-signer-local` (was declared twice), `bs58`/`sha2`/`sha3`/`k256`, `rand`/`rand_chacha`/`arbitrary`, `solana-system-interface`, `rstest`/`base64`.
+* Publish-ready (not published): all six internal path dependencies carry a `version` (cargo strips path-only deps at publish time), and `[workspace.package]` gains `homepage`, `readme`, `keywords`, `categories`. `cargo publish --dry-run -p cross-vm-core` passes; the remaining crates publish bottom-up once `core`/`macros` are on crates.io. `examples/integration-tests` stays `publish = false`.
+* Fixed the two rustdoc warnings in `cross-vm-tron` (an unresolved cross-crate link and a public doc link to a private const) and the framework crate description's awkward Tron retrofit.
+
+### Added (contribution scaffolding) / Changed (documentation refresh)
+
+* `CONTRIBUTING.md` (setup, the pre-PR command list mirroring CI, and the ground rules: mock-first default suite, feature subsets must build, seeded reproducibility, deliberate major pins), `.github/ISSUE_TEMPLATE/` (the bug template requires seed + mode + minimized history for harness failures) and a PR template with a CHANGELOG/docs/feature-subset checklist.
+* `docs/adding-a-vm.md`: the file-by-file checklist for adding a fifth chain ecosystem, derived from the Tron commit's actual blast radius (provider crate layout, the framework's enum dispatch touch points, macro hook, example wrappers, Makefile and CI wiring), each row naming which existing VM to crib from.
+* `DEVELOPER.md` swept for post-Tron staleness: the CI section describes all eight jobs plus the live-smoke workflow, the test inventory covers four VM crates (Tron's live tests live in `tests/onchain.rs`), the wrapper section documents the `tron_*` hook and the default-`unimplemented!` per-VM hooks, the events list gains `tron_logs()`, "Adding a predefined chain" gains `TronChainInfo`, and "Adding a new VM" drops the stale "RPC stub" framing and links the new checklist.
+* `README.md`: MSRV badge and install note, a "Reproducing a failure" paragraph (seed + `replay` are the whole workflow), and links to the new contribution docs.
+
+### Added (CI hardening: MSRV, supply chain, feature matrix, live smoke)
+
+* Declared the workspace MSRV: `rust-version = "1.91"` in `[workspace.package]`, inherited by every crate (floor set by the locked `revm-state` 41). `DEVELOPER.md` now points at the manifest instead of hard-coding a compiler version. A new `msrv` CI job runs `cargo check --workspace` on exactly that toolchain.
+* `deny.toml` + a `cargo deny` CI job: RustSec advisories (with three documented `rustls-webpki` ignores reachable only through the pinned `cosmrs` live-RPC path), a license allowlist, duplicate-version warnings, and a registry/git source lockdown. `unmaintained = "workspace"` scopes unmaintained-crate errors to direct dependencies (the solana/cosmos trees carry several transitively).
+* `.github/dependabot.yml`: weekly grouped minor/patch cargo updates (majors stay individual PRs so the pinned-major rationale in `DEVELOPER.md` is revisited consciously) and GitHub Actions updates.
+* A `features` CI job (`cargo hack --feature-powerset --depth 2 --at-least-one-of cw,evm,solana,tron`) checking every VM feature subset the framework supports; `cross-vm-framework` now emits a clear `compile_error!` when built with no VM feature at all (the per-VM enums would be empty).
+* Clippy now covers test and example targets: the `test` CI job (which has the contract artifacts) runs `cargo clippy --all-targets -- -D warnings` with the same cosmwasm target split as the test steps. The artifact-free `lint` job is unchanged.
+* `.github/workflows/live-smoke.yml`: a weekly + manually dispatchable, secrets-gated, non-blocking job running the `#[ignore]`d live RPC tests (`tests/rpc.rs` in the VM crates, `tests/onchain.rs` in tron) that otherwise have zero automated coverage. Skips cleanly when `MNEMONIC_TEST` is not configured, so forks stay green.
+* The pinned Agave toolchain version moved to a single `SOLANA_VERSION` workflow env used by the install URL and both caches, so the next bump is one line.
 ### Added (harness diagnostics: per-invariant coverage, opt-in per-op stats, sequence shrinking)
 
 * `cross-vm-framework`: `RunReport` now carries a `coverage` field, a per-invariant tally (`held` / `skipped` / `violated`) keyed by the invariant's `Debug` name. It is collected on every run at no configuration cost and seeded from `Harness::invariants()` at run start, so an invariant that never fires (for example one silently skipped on one VM's path) still shows up with an all-zero total. `Coverage::uncovered()` lists those never-ran invariants and `log_summary` prints a coverage line flagging them. The existing aggregate `skipped` count now equals `coverage.total_skipped()`.

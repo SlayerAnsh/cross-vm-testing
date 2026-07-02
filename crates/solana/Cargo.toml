@@ -2,6 +2,7 @@
 name = "cross-vm-solana"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Solana (SVM) chain provider (litesvm) for the cross-vm testing suite"
@@ -34,3 +35,6 @@ tokio.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
+
+[lints]
+workspace = true

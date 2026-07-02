@@ -1,0 +1,49 @@
+name: Bug report
+description: Something misbehaves in the framework, a VM provider, or the harness
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got. Include the exact error or failing assertion.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - framework (MultiChainEnv / contract wrappers / macros)
+        - harness (fuzz / invariant / endurance / scenario / shrink)
+        - cosmwasm provider
+        - evm provider
+        - solana provider
+        - tron provider
+        - live RPC backend
+        - build / CI / tooling
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >
+        For harness failures this is mandatory and cheap: paste the printed seed, the run
+        mode (fuzz / invariant / endurance), and the failing invariant name or bug detail.
+        If you ran shrink / run_and_shrink, paste the minimized history from the report;
+        with seed + history the failure replays deterministically via ScenarioRunner::replay.
+      placeholder: |
+        seed: 4242
+        mode: invariant
+        failure: Invariant { name: "ModelMatches", .. }
+        minimized history: [Deposit { user: 0, amount: 50 }, Withdraw { user: 0, amount: 20 }]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit / version
+      placeholder: git rev-parse --short HEAD
+    validations:
+      required: true

@@ -2,26 +2,27 @@
 name = "cross-vm-framework"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Cross-VM testing framework: hold and drive CosmWasm, EVM, and Solana chains in one simulation, and Tron"
+description = "Cross-VM testing framework: hold and drive CosmWasm, EVM, Solana, and Tron chains in one simulation"
 
 [dependencies]
 cross-vm-core.workspace = true
 cross-vm-macros.workspace = true
-cross-vm-cosmwasm = { path = "../cosmwasm", optional = true }
-cross-vm-solidity = { path = "../solidity", optional = true }
-cross-vm-solana = { path = "../solana", optional = true }
-cross-vm-tron = { path = "../tron", optional = true }
+cross-vm-cosmwasm = { workspace = true, optional = true }
+cross-vm-solidity = { workspace = true, optional = true }
+cross-vm-solana = { workspace = true, optional = true }
+cross-vm-tron = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio.workspace = true
 # Emit per-operation / per-invariant debug logs through the tracing facade.
 tracing.workspace = true
 # Property testing: portable, seedable RNG (ChaCha) for deterministic, replayable runs.
-rand = "0.8"
-rand_chacha = "0.3"
+rand.workspace = true
+rand_chacha.workspace = true
 # Optional zero-boilerplate stateless operation generation.
-arbitrary = { version = "1", features = ["derive"], optional = true }
+arbitrary = { workspace = true, optional = true }
 
 [features]
 default = ["cw", "evm", "solana", "tron"]
@@ -39,4 +40,7 @@ fuzz = ["dep:arbitrary"]
 # `#[tokio::test]` in src/tests.rs; `#[tokio::main]` in examples/.
 tokio.workspace = true
 # Solana system-program transfer used by examples/wallet_quickstart.rs.
-solana-system-interface = { version = "2", features = ["bincode"] }
+solana-system-interface.workspace = true
+
+[lints]
+workspace = true

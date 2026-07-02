@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/revm-common",
     "crates/cosmwasm",
     "crates/solidity",
     "crates/solana",
@@ -21,13 +22,37 @@ exclude = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# Floor set by the locked dependency tree (revm-state 41 requires 1.91); verified in CI by the
+# msrv job. Bump alongside dependency upgrades that raise the floor.
+rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/Anshudhar/cross-vm-testing"
+homepage = "https://github.com/Anshudhar/cross-vm-testing"
+readme = "README.md"
+keywords = ["testing", "cosmwasm", "evm", "solana", "smart-contracts"]
+categories = ["development-tools::testing"]
+
+[workspace.lints.rust]
+# Rustdoc coverage is a design feature of this codebase; keep it enforced, not conventional.
+missing_docs = "warn"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# Deliberate: the Mock variants hold a full in-process VM, the Rpc variants a thin client.
+# Boxing the mock would ripple &mut self borrows through every provider method for no gain.
+large_enum_variant = "allow"
 
 [workspace.dependencies]
-# Internal
-cross-vm-core = { path = "crates/core" }
-cross-vm-macros = { path = "crates/macros" }
+# Internal. The `version` alongside `path` keeps every crate publishable: cargo uses the path
+# locally and the version on crates.io (path-only deps are stripped at publish time and fail
+# the dry run). Keep in step with [workspace.package] version.
+cross-vm-core = { path = "crates/core", version = "0.1.0" }
+cross-vm-macros = { path = "crates/macros", version = "0.1.0" }
+cross-vm-revm-common = { path = "crates/revm-common", version = "0.1.0" }
+cross-vm-cosmwasm = { path = "crates/cosmwasm", version = "0.1.0" }
+cross-vm-solidity = { path = "crates/solidity", version = "0.1.0" }
+cross-vm-solana = { path = "crates/solana", version = "0.1.0" }
+cross-vm-tron = { path = "crates/tron", version = "0.1.0" }
 
 # Proc-macro toolkit
 syn = { version = "2", features = ["full"] }
@@ -60,8 +85,28 @@ revm = "41"
 alloy = { version = "1", features = ["full", "sol-types"] }
 alloy-primitives = "1"
 alloy-chains = "0.2"
+# Local signer with BIP-39 mnemonic derivation; the `mnemonic` feature pulls in coins-bip39,
+# which alloy's `full` does not enable. Shared by the EVM and Tron providers (same curve).
+alloy-signer-local = { version = "1", features = ["mnemonic"] }
+
+# Tron address codec + hashing (generic crates; NOT Tron-specific dependencies).
+bs58 = "0.5"
+sha2 = "0.10"
+sha3 = "0.10"
+k256 = "0.13"
 
 # Solana
 litesvm = "0.13"
 solana-sdk = "4"
 solana-program = "4"
+solana-system-interface = { version = "2", features = ["bincode"] }
+
+# Property testing: portable, seedable RNG (ChaCha) for deterministic, replayable runs, plus
+# the optional `arbitrary` path for stateless op generation.
+rand = "0.8"
+rand_chacha = "0.3"
+arbitrary = { version = "1", features = ["derive"] }
+
+# Test-layer helpers (integration-tests).
+rstest = "0.23"
+base64 = "0.22"

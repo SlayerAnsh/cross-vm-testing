@@ -14,6 +14,12 @@ env:
   CARGO_TERM_COLOR: always
   # Incremental compilation bloats the cache without helping a cold CI runner.
   CARGO_INCREMENTAL: 0
+  # Single source of truth for the pinned Agave toolchain (install URL + caches).
+  # Its platform-tools Cargo must keep parsing the committed solana-contracts
+  # lockfile; see the comment on the Install Solana step before bumping.
+  SOLANA_VERSION: v4.0.0
+  # Keep in step with [workspace.package] rust-version in Cargo.toml.
+  MSRV: "1.91"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -48,6 +54,62 @@ jobs:
         run: cargo doc --workspace --no-deps
 
   # ---------------------------------------------------------------------------
+  # MSRV: the workspace must keep compiling on the declared rust-version floor
+  # (locked dep tree currently requires 1.91 via revm-state). `check` only: no
+  # artifacts, no tests, just the compile floor.
+  # ---------------------------------------------------------------------------
+  msrv:
+    name: MSRV (cargo check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ env.MSRV }}
+          rustflags: ""
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-vm-msrv
+          cache-on-failure: true
+      - name: cargo check on MSRV
+        run: cargo check --workspace
+
+  # ---------------------------------------------------------------------------
+  # Supply chain: advisories, license allowlist, duplicate versions, sources.
+  # Config in deny.toml at the repo root.
+  # ---------------------------------------------------------------------------
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # ---------------------------------------------------------------------------
+  # Feature matrix: the framework gates every VM behind a cargo feature (~150
+  # cfg sites), and "compiles with defaults, breaks under --features tron only"
+  # is the classic regression. cargo-hack checks every single feature and every
+  # depth-2 combination; --at-least-one-of skips the VM-less sets (the crate is
+  # enum dispatch over the enabled VMs, so zero VMs is a documented
+  # compile_error!). --no-dev-deps keeps it artifact-free.
+  # ---------------------------------------------------------------------------
+  features:
+    name: Feature matrix (cargo hack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - uses: taiki-e/install-action@cargo-hack
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-vm-features
+          cache-on-failure: true
+      - name: Feature powerset (depth 2, at least one VM)
+        run: cargo hack check -p cross-vm-framework --feature-powerset --depth 2 --at-least-one-of cw,evm,solana,tron --no-dev-deps
+
+  # ---------------------------------------------------------------------------
   # Solana artifacts: install+cache pinned Agave v4.0.0, cargo build-sbf in the
   # ISOLATED solana-contracts workspace, upload the 3 .so. This is light: the
   # root workspace excludes examples/ and solana-contracts is its own workspace
@@ -69,15 +131,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.local/share/solana
-          key: solana-v4.0.0-${{ runner.os }}
-      # Pin v4.0.0: its platform-tools Cargo understands edition2024, required by
-      # a transitive dep (toml_parser) in the committed solana-contracts/Cargo.lock.
-      # Older lines (v2.1.0 ships Cargo 1.79) fail to parse it. Keep in step with
-      # the lock. cargo-build-sbf builds the .so directly (no Anchor CLI: its
-      # version handshake silently produced no .so).
+          key: solana-${{ env.SOLANA_VERSION }}-${{ runner.os }}
+      # The SOLANA_VERSION pin (workflow env, single knob): its platform-tools
+      # Cargo understands edition2024, required by a transitive dep (toml_parser)
+      # in the committed solana-contracts/Cargo.lock. Older lines (v2.1.0 ships
+      # Cargo 1.79) fail to parse it. Keep in step with the lock. cargo-build-sbf
+      # builds the .so directly (no Anchor CLI: its version handshake silently
+      # produced no .so).
       - name: Install Solana
         if: steps.solana-cache.outputs.cache-hit != 'true'
-        run: sh -c "$(curl -sSfL https://release.anza.xyz/v4.0.0/install)"
+        run: sh -c "$(curl -sSfL https://release.anza.xyz/${SOLANA_VERSION}/install)"
       - name: Solana on PATH
         run: |
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
@@ -86,7 +149,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: examples/solana-contracts
-          shared-key: solana-sbf-v4.0.0
+          shared-key: solana-sbf-${{ env.SOLANA_VERSION }}
           cache-on-failure: true
       - name: cargo build-sbf
         run: make compile-solana
@@ -191,6 +254,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           rustflags: ""
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cross-vm-main   # SHARED with the lint job
@@ -229,6 +293,14 @@ jobs:
             test -f "examples/tron-contracts/build/$c.json" \
               || { echo "missing tron $c.json"; exit 1; }
           done
+      # Clippy over EVERY target (tests, examples, benches): the artifact-free
+      # `lint` job deliberately skips --all-targets, so the ~2k lines of test and
+      # harness code are linted here, where the embedded artifacts exist. Same
+      # target split as the test steps below (onchain.rs needs Docker-built wasm).
+      - name: Clippy (all targets, artifact-dependent)
+        run: |
+          cargo clippy --workspace --exclude cross-vm-cosmwasm --all-targets -- -D warnings
+          cargo clippy -p cross-vm-cosmwasm --lib --test counter --test vault --test typed_handle -- -D warnings
       # Everything except cross-vm-cosmwasm, whose tests/onchain.rs embeds a
       # compiled counter.wasm built only by the Docker CosmWasm optimizer (not in
       # CI). That is a live #[ignore] test; the cross-VM cosmwasm path is still
