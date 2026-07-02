@@ -6,8 +6,18 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
+      # alloy meta-crate and alloy-signer-local share a major and must move in
+      # lockstep (alloy 2.x pulls alloy-network 2.x, whose TxSigner trait the
+      # signer implements; a split fails the bound). Group them across all update
+      # types, majors included, so a major never lands as a lone signer-splitting
+      # PR. Listed first: a dependency joins only the first matching group.
+      # alloy-primitives is intentionally NOT here (chained to revm 41; see DEVELOPER.md).
+      alloy-lockstep:
+        patterns:
+          - "alloy"
+          - "alloy-signer-local"
       # One PR for routine bumps; majors stay individual so pinned-major rationale
-      # (revm 41, cw-multi-test 2, litesvm 0.13, alloy 1; see DEVELOPER.md) is
+      # (revm 41, cw-multi-test 2, litesvm 0.13, alloy-primitives 1; see DEVELOPER.md) is
       # revisited consciously.
       minor-and-patch:
         update-types: ["minor", "patch"]
