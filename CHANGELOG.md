@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added (spec: TOML driven test runs)
+
+* `docs/config-runs-spec.md`: a full specification for the declarative run configuration layer (the first piece of the planned cross VM orchestration layer). One TOML file declares any number of fuzz, invariant, endurance and scenario profiles over a registered harness, executed by a user crate CLI binary (`cross-vm run`/`validate`/`list`/`replay`). Covers the schema and loader (new pure `cross-vm-config` crate, `${VAR}` interpolation, humantime durations, `seed = "random"`), the framework additions (`KindMix` weighted generation preserving golden seed reproducibility, `SetupRequest` for mock/rpc switching, scenario steps with `expect` assertions for on chain deployment scripting, endurance extensions with `max_ops`, infra tolerance, heartbeat and graceful SIGINT stop), the harness registry with serde based op serialization (opt in at registration, `Harness` unchanged), auto written replay artifacts that are themselves runnable configs, JSON reports, a ranked prior art survey (Foundry, Echidna, Medusa, proptest, libFuzzer, k6), six implementation phases and a risk register. Spec only, no code changes.
+
 ### Changed (shared revm mock core: `cross-vm-revm-common`)
 
 * New internal crate `crates/revm-common`: the EVM and Tron mock providers were structural clones (identical VM construction, TxEnv plumbing, `exec_or_err`, block/balance surface); the shared machinery now lives once in `RevmCore` (`new(chain_id, spec, customize)`, `deploy_create`, value-carrying `call` with the payable top-up, `static_call`, `balance`/`set_balance`, `block_height`/`advance_blocks`) plus a transport-agnostic `ExecFailure` whose `deploy_message`/`call_message` helpers reproduce the providers' historical error strings exactly.

@@ -135,4 +135,4 @@ Both `.mock(wallets)` and `.rpc(wallets)` take the shared `Rc<WalletFactory>`; t
 
 ## Out of scope (later phases)
 
-The Solana RPC write paths (signed `add_program`/`send_transaction`, blocked on decoupling their mock-backend return types); the mock's tx-id-based `CREATE` / `CREATE2` derivation (Tron); the cross VM orchestration layer that runs one script across all four; gas/compute reporting; fork from live.
+The Solana RPC write paths (signed `add_program`/`send_transaction`, blocked on decoupling their mock-backend return types); the mock's tx-id-based `CREATE` / `CREATE2` derivation (Tron); the cross VM orchestration layer that runs one script across all four (its first piece, declarative TOML driven test runs, is now specified in [docs/config-runs-spec.md](docs/config-runs-spec.md)); gas/compute reporting; fork from live.
