@@ -108,5 +108,5 @@ rand_chacha = "0.3"
 arbitrary = { version = "1", features = ["derive"] }
 
 # Test-layer helpers (integration-tests).
-rstest = "0.23"
+rstest = "0.26"
 base64 = "0.22"
