@@ -160,7 +160,7 @@ jobs:
               || { echo "missing $so.so after compile-solana"; exit 1; }
           done
       - name: Upload Solana artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: solana-so
           path: examples/solana-contracts/target/deploy/*.so
@@ -193,7 +193,7 @@ jobs:
       # Upload the whole out/ dir so the Name.sol/Name.json nesting that sol!
       # expects is preserved verbatim.
       - name: Upload Solidity artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: solidity-out
           path: examples/solidity-contracts/out
@@ -231,7 +231,7 @@ jobs:
               || { echo "missing $c.json after compile-tron"; exit 1; }
           done
       - name: Upload Tron artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tron-build
           path: examples/tron-contracts/build
