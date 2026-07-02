@@ -11,6 +11,16 @@
 //!
 //! Both kinds return `Result<(), CrossVmError>`. The first `Err` aborts: a before-`Err` stops the
 //! transaction from running; an after-`Err` becomes the method's error.
+//!
+//! # Not for state snapshots
+//!
+//! These hooks are for event/relay/indexer side-logic only. Do **not** reach for them to capture
+//! on-chain state for a transition-style invariant (comparing state before vs after an op). They are
+//! synchronous `FnMut`, hold no chain handle, and see only the [`AppResponse`](super::AppResponse) /
+//! events, so they cannot async-query state. Snapshot state in the harness's
+//! [`apply`](crate::harness::Harness::apply) instead: it is async, holds the [`Ctx`](crate::harness::Ctx),
+//! and can query a chain; stash the snapshot in the `World` and diff against it in
+//! [`check`](crate::harness::Harness::check). See the vault harness example.
 
 use cross_vm_core::{ChainKind, CrossVmError};
 #[cfg(feature = "cw")]
