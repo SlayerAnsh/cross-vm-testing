@@ -73,7 +73,7 @@ hex = "0.4"
 
 # CosmWasm
 cw-multi-test = "2"
-cosmwasm-std = "2"
+cosmwasm-std = "3"
 # Live RPC (cosmos): tendermint-rpc transport + cosmos/cosmwasm protobuf query types.
 cosmrs = { version = "0.21", features = ["rpc", "cosmwasm", "bip32"] }
 prost = "0.13"
