@@ -2300,6 +2300,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cross-vm-revm-common"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "cross-vm-core",
+ "revm",
+]
+
+[[package]]
 name = "cross-vm-solana"
 version = "0.1.0"
 dependencies = [
@@ -2334,6 +2343,7 @@ dependencies = [
  "alloy-signer-local",
  "cross-vm-core",
  "cross-vm-macros",
+ "cross-vm-revm-common",
  "dotenvy",
  "revm",
  "thiserror 2.0.18",
@@ -2349,6 +2359,7 @@ dependencies = [
  "bs58",
  "cross-vm-core",
  "cross-vm-macros",
+ "cross-vm-revm-common",
  "dotenvy",
  "hex",
  "k256",

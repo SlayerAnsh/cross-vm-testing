@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/revm-common",
     "crates/cosmwasm",
     "crates/solidity",
     "crates/solana",
@@ -47,6 +48,7 @@ large_enum_variant = "allow"
 # the dry run). Keep in step with [workspace.package] version.
 cross-vm-core = { path = "crates/core", version = "0.1.0" }
 cross-vm-macros = { path = "crates/macros", version = "0.1.0" }
+cross-vm-revm-common = { path = "crates/revm-common", version = "0.1.0" }
 cross-vm-cosmwasm = { path = "crates/cosmwasm", version = "0.1.0" }
 cross-vm-solidity = { path = "crates/solidity", version = "0.1.0" }
 cross-vm-solana = { path = "crates/solana", version = "0.1.0" }

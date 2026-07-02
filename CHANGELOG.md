@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Changed (shared revm mock core: `cross-vm-revm-common`)
+
+* New internal crate `crates/revm-common`: the EVM and Tron mock providers were structural clones (identical VM construction, TxEnv plumbing, `exec_or_err`, block/balance surface); the shared machinery now lives once in `RevmCore` (`new(chain_id, spec, customize)`, `deploy_create`, value-carrying `call` with the payable top-up, `static_call`, `balance`/`set_balance`, `block_height`/`advance_blocks`) plus a transport-agnostic `ExecFailure` whose `deploy_message`/`call_message` helpers reproduce the providers' historical error strings exactly.
+* `EvmMockProvider` and `TronMockProvider` keep their own types and semantics: the EVM mock seeds block 1 + the shared mock clock in its `customize` hook; the Tron mock injects the TIP-272 precompile set and the TVM-native opcodes there, keeps its bandwidth accounting, its `TronAddress`/sun boundary conversions, and the documented `DIVERGENCE(tron)` CREATE-address caveat. Both providers' existing unit tests pass unchanged (the extraction's safety net). The `rpc.rs` and `chain.rs` layers are deliberately NOT unified (verified: almost no overlap; alloy JSON-RPC vs TronGrid HTTP).
+
 ### Changed (workspace hygiene: enforced lints, centralized deps, publish readiness)
 
 * Lint discipline is now enforced, not conventional: a `[workspace.lints]` table (`missing_docs = "warn"`, `unsafe_code = "deny"`, one centralized `clippy::large_enum_variant` allow with its rationale) inherited by every member via `[lints] workspace = true`. The five per-enum `#[allow(clippy::large_enum_variant)]`s are deleted. `define_wallet_roster!` and `#[cross_vm_contract]` now emit doc comments on every generated public item (keeping developer-written docs when present, filling a generated line when absent), so macro call sites satisfy `missing_docs` too; `#[cross_vm_contract]` also preserves the spec trait's own attributes and docs, which it previously dropped.

@@ -28,13 +28,14 @@ dev-dependency only (the library crates define `async fn`s but pull in no runtim
 This is a Cargo workspace with one crate per VM plus a shared core crate. Dependency trees are isolated per crate, so building or testing one VM does not pull the others.
 
 ```
-crates/core       cross-vm-core       no VM dependencies
-crates/cosmwasm   cross-vm-cosmwasm   cw-multi-test, cosmwasm-std
-crates/solidity   cross-vm-solidity   revm (alloy for the test bindings)
-crates/solana     cross-vm-solana     litesvm, granular solana-* crates
-crates/tron       cross-vm-tron       revm core + TVM layers (Tron precompiles, energy/bandwidth shim, sun balances)
-crates/macros     cross-vm-macros     proc-macros (syn/quote): cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, fuzz/invariant/endurance runners
-crates/framework  cross-vm-framework  umbrella over core + all three VM crates
+crates/core         cross-vm-core         no VM dependencies
+crates/revm-common  cross-vm-revm-common  shared revm mock core (RevmCore) for the EVM-derived providers
+crates/cosmwasm     cross-vm-cosmwasm     cw-multi-test, cosmwasm-std
+crates/solidity     cross-vm-solidity     revm via the shared core (alloy for the test bindings)
+crates/solana       cross-vm-solana       litesvm, granular solana-* crates
+crates/tron         cross-vm-tron         shared revm core + TVM layers (Tron precompiles, energy/bandwidth shim, sun balances)
+crates/macros       cross-vm-macros       proc-macros (syn/quote): cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, fuzz/invariant/endurance runners
+crates/framework    cross-vm-framework    umbrella over core + all four VM crates
 ```
 
 `cross-vm-framework` defines `MultiChainEnv`. Each VM crate also exposes a backend enum

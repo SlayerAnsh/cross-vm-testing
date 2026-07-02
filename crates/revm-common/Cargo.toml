@@ -1,0 +1,16 @@
+[package]
+name = "cross-vm-revm-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared revm mock core for the EVM-derived chain providers (EVM, Tron/TVM)"
+
+[dependencies]
+cross-vm-core.workspace = true
+revm.workspace = true
+alloy-primitives.workspace = true
+
+[lints]
+workspace = true

@@ -9,6 +9,7 @@ description = "Tron (TVM) chain provider for the cross-vm testing suite"
 
 [dependencies]
 cross-vm-core.workspace = true
+cross-vm-revm-common.workspace = true
 revm.workspace = true
 # Ethereum value types (Address/Bytes/U256/keccak256). alloy-primitives is the crate revm
 # re-exports, so the single shared version unifies and types match at the revm boundary.
