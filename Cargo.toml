@@ -99,7 +99,7 @@ k256 = "0.13"
 litesvm = "0.13"
 solana-sdk = "4"
 solana-program = "4"
-solana-system-interface = { version = "2", features = ["bincode"] }
+solana-system-interface = { version = "3", features = ["bincode"] }
 
 # Property testing: portable, seedable RNG (ChaCha) for deterministic, replayable runs, plus
 # the optional `arbitrary` path for stateless op generation.

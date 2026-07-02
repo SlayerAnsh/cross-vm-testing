@@ -22,7 +22,7 @@ solana-derivation-path = "3"
 solana-message = "4"
 solana-native-token = "3"
 solana-signer = "3"
-solana-system-interface = { version = "2", features = ["bincode"] }
+solana-system-interface = { version = "3", features = ["bincode"] }
 solana-transaction = "3"
 # Live-RPC provider: thin JSON-RPC client over reqwest, base64 for getAccountInfo data.
 reqwest.workspace = true
