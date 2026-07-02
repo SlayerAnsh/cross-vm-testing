@@ -32,18 +32,21 @@ mod ctx;
 mod outcome;
 mod rng;
 mod runner;
+mod stats;
 
 pub use ctx::Ctx;
 pub use outcome::{
-    classify, CheckOutcome, Failure, FailureKind, HarnessError, RunReport, Verdict, Violation,
+    classify, CheckOutcome, Coverage, Failure, FailureKind, HarnessError, InvCoverage, RunReport,
+    Verdict, Violation,
 };
 #[cfg(feature = "fuzz")]
 pub use rng::sample_arbitrary;
 pub use rng::{random_seed, sub_seed, Prng};
 pub use runner::{
     Endurance, EnduranceConfig, EnduranceRunner, Fuzz, FuzzRunner, Invariant, InvariantRunner,
-    RunMode, Runner, Scenario, ScenarioRunner, Sequential,
+    RunMode, Runner, Scenario, ScenarioRunner, Sequential, DEFAULT_SHRINK_LIMIT,
 };
+pub use stats::{op_label, OpStat, Stats};
 
 /// A developer-defined property-test subject. One implementation drives fuzz, invariant,
 /// endurance, and rstest-matrix runs.
@@ -59,6 +62,18 @@ pub use runner::{
 /// This split is what lets a contract that creates another contract be tested: `apply` reads the
 /// child's address (from the response events or a factory query), records it in `World`, and a
 /// later `apply`/`check` rebuilds a handle for it from `Ctx`.
+///
+/// # Transition invariants (state before vs after an op)
+///
+/// A transition-style invariant compares on-chain state before and after a single operation. No
+/// special associated type or hook is needed: [`step`](crate::harness::Runner) runs `apply` then
+/// `check` for the same op, so snapshot the pre-state **inside `apply`** (it is async and holds
+/// `Ctx`, so it can query a chain), stash it in `World`, and diff live post-state against it in
+/// `check`, returning [`Held`](CheckOutcome::Held) / [`Violated`](CheckOutcome::Violated) (or
+/// [`Skipped`](CheckOutcome::Skipped) when no snapshot applies). Do **not** use the sync
+/// [`ContractBase`](crate::contract::ContractBase) before/after hooks for this: they are `FnMut`,
+/// hold no chain handle, and cannot async-query state; they are for event/relay/indexer side-logic
+/// only. The vault harness example demonstrates the `World`-stash pattern.
 #[allow(async_fn_in_trait)]
 pub trait Harness {
     /// Persisted per-run state: shadow model, flags, and learned addresses. No chains.

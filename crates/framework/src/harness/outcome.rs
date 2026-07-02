@@ -10,6 +10,8 @@
 //! The classification policy lives inside the developer's `apply`, the only place that knows an
 //! operation's semantics. [`classify`] collapses the common four-way match into one call.
 
+use std::collections::BTreeMap;
+
 use cross_vm_core::CrossVmError;
 
 use crate::contract::AppResponse;
@@ -149,8 +151,89 @@ pub struct Failure<Op> {
     pub kind: FailureKind,
 }
 
-/// The result of a run: the seed and mode that produced it, the number of steps taken, and the
-/// first failure if any. `failure.is_none()` means the run passed.
+/// Per-invariant tally over a run: how many times each invariant held, skipped, or was violated.
+///
+/// A `held + skipped + violated` total of `0` means the invariant never ran — critical on multi-VM
+/// runs, where an invariant can silently never fire on one chain's path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InvCoverage {
+    /// Times the invariant was applicable and held.
+    pub held: usize,
+    /// Times the invariant was not applicable ([`CheckOutcome::Skipped`]).
+    pub skipped: usize,
+    /// Times the invariant was violated.
+    pub violated: usize,
+}
+
+impl InvCoverage {
+    /// Total checks recorded for this invariant. `0` means it never ran.
+    pub fn total(&self) -> usize {
+        self.held + self.skipped + self.violated
+    }
+}
+
+/// Per-invariant coverage over a whole run, keyed by the invariant's `Debug` name (the same key
+/// used for [`FailureKind::Invariant::name`]).
+///
+/// Seeded with every invariant [`Harness::invariants`](crate::harness::Harness::invariants) reports
+/// at run start, so an invariant that is never checked (e.g. `check_every` skipped it, or the run
+/// was too short) still appears with an all-zero tally instead of vanishing.
+#[derive(Debug, Clone, Default)]
+pub struct Coverage(BTreeMap<String, InvCoverage>);
+
+impl Coverage {
+    /// Pre-insert every invariant name at an all-zero tally so never-checked invariants stay visible.
+    pub fn seed(names: impl IntoIterator<Item = String>) -> Self {
+        Self(
+            names
+                .into_iter()
+                .map(|n| (n, InvCoverage::default()))
+                .collect(),
+        )
+    }
+
+    /// Record that `name` held on one check.
+    pub fn record_held(&mut self, name: &str) {
+        self.entry(name).held += 1;
+    }
+
+    /// Record that `name` was skipped on one check.
+    pub fn record_skipped(&mut self, name: &str) {
+        self.entry(name).skipped += 1;
+    }
+
+    /// Record that `name` was violated on one check.
+    pub fn record_violated(&mut self, name: &str) {
+        self.entry(name).violated += 1;
+    }
+
+    fn entry(&mut self, name: &str) -> &mut InvCoverage {
+        // A seeded name is the common case; only an invariant set that grew mid-run allocates.
+        self.0.entry(name.to_string()).or_default()
+    }
+
+    /// Total skipped checks across all invariants (the aggregate the report also exposes).
+    pub fn total_skipped(&self) -> usize {
+        self.0.values().map(|c| c.skipped).sum()
+    }
+
+    /// Names of invariants that never ran (a zero total): candidates for a coverage gap.
+    pub fn uncovered(&self) -> impl Iterator<Item = &str> {
+        self.0
+            .iter()
+            .filter(|(_, c)| c.total() == 0)
+            .map(|(n, _)| n.as_str())
+    }
+
+    /// Iterate every invariant's tally in name order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &InvCoverage)> {
+        self.0.iter().map(|(n, c)| (n.as_str(), c))
+    }
+}
+
+/// The result of a run: the seed and mode that produced it, the number of steps taken, per-invariant
+/// [`coverage`](RunReport::coverage), and the first failure if any. `failure.is_none()` means the
+/// run passed.
 #[derive(Debug, Clone)]
 pub struct RunReport<Op> {
     /// The base seed the run was driven with.
@@ -159,8 +242,12 @@ pub struct RunReport<Op> {
     pub mode: &'static str,
     /// Total operations applied.
     pub steps: usize,
-    /// How many invariant checks were skipped (precondition not yet met) over the run.
+    /// How many invariant checks were skipped (precondition not yet met) over the run. Equals
+    /// [`Coverage::total_skipped`] on [`coverage`](RunReport::coverage).
     pub skipped: usize,
+    /// Per-invariant tallies (held / skipped / violated), keyed by the invariant's `Debug` name.
+    /// An invariant with a zero total never ran on this path.
+    pub coverage: Coverage,
     /// The first failure encountered, if any.
     pub failure: Option<Failure<Op>>,
 }
