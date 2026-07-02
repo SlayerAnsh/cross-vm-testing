@@ -1559,7 +1559,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
 dependencies = [
  "bitcoin_hashes",
- "rand 0.8.6",
+ "rand 0.7.3",
  "rand_core 0.5.1",
  "serde",
  "unicode-normalization",
@@ -2265,7 +2265,7 @@ dependencies = [
  "cross-vm-solana",
  "cross-vm-solidity",
  "cross-vm-tron",
- "rand 0.8.6",
+ "rand 0.9.4",
  "rand_chacha 0.3.1",
  "solana-system-interface 2.0.0",
  "thiserror 2.0.18",
@@ -6976,7 +6976,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6435a6070b6c5898201aae845db328cf3bd3cebc17b55af9b43138da5ced4a85"
 dependencies = [
  "lazy_static",
- "solana-address 2.2.0",
+ "solana-address 2.6.1",
  "solana-hash 4.2.0",
  "solana-instruction",
  "solana-sanitize",
