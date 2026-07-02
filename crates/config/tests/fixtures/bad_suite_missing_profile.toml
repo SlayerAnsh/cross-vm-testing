@@ -1,0 +1,11 @@
+# suite.nightly names a profile ("missing") that does not exist.
+[harness]
+name = "h"
+
+[profile.p]
+mode = "fuzz"
+cases = 1
+ops = 1
+
+[suite.nightly]
+profiles = ["missing"]

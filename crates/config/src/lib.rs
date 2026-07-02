@@ -5,25 +5,31 @@
 //! plain string fixtures and is safe for a later proc-macro to reuse verbatim. Kind names stay
 //! `String`, and scenario ops stay raw [`toml::Value`]; this crate never sees harness types.
 //!
-//! This first pass implements only parsing and typed deserialization: environment variable
-//! interpolation, `[defaults]` merging, and structural validation land in a later task. The
-//! `vars` closure parameter on every entry point is accepted now (for a stable signature) but
-//! unused until then.
+//! The full five-stage loader pipeline (parse, interpolate, merge, typed deserialize,
+//! structural validate) is implemented; see [`from_toml_str`] for the stage order. The `vars`
+//! closure parameter on every entry point resolves `${VAR}` references during the interpolate
+//! stage.
 
 #![warn(missing_docs)]
 
 mod chain;
 mod duration;
+mod interpolate;
+mod merge;
 mod schema;
 mod seed;
+mod target;
+mod validate;
 
 pub use chain::{missing_required_fields, ChainDecl};
 pub use duration::{humantime_duration, humantime_opt};
+pub use interpolate::interpolate_value;
 pub use schema::{
     CommonKeys, EnduranceProfile, EnvSpec, ExpectStr, FuzzProfile, HarnessRef, InvariantProfile,
     Profile, ScenarioProfile, ScenarioStepRaw, Suite, TargetStr,
 };
 pub use seed::SeedSpec;
+pub use target::{parse_target_str, resolve_chain_target, TargetOverrides};
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -38,10 +44,15 @@ pub struct RunConfig {
     pub chains: Vec<ChainDecl>,
     /// `[env]`: the default environment request for every profile.
     pub env: EnvSpec,
-    /// `[profile.<name>]` blocks, keyed by name.
+    /// `[profile.<name>]` blocks, keyed by name. Each profile's `common().env` already holds
+    /// the fully merged effective environment for that profile (the merge stage shallow-merges
+    /// the profile's own `env` override over the top-level `[env]` before typed deserialize).
     pub profiles: BTreeMap<String, Profile>,
     /// `[suite.<name>]` blocks, keyed by name.
     pub suites: BTreeMap<String, Suite>,
+    /// Warnings collected while loading, currently only the `[defaults]` allowlist-strip:
+    /// one entry per default key removed because it did not apply to a profile's mode.
+    pub warnings: Vec<String>,
 }
 
 /// Errors returned while loading or parsing a config document.
@@ -67,12 +78,123 @@ pub enum ConfigError {
         /// The underlying deserialization error message.
         message: String,
     },
+    /// A `${VAR}` reference had no value and no `:-default` fallback. Never carries the
+    /// surrounding string value, since it may hold an RPC secret.
+    #[error(
+        "undefined variable `{var}` referenced at `{path}` (set the environment variable, or add a `:-default` fallback)"
+    )]
+    MissingVar {
+        /// The variable name, exactly as written inside `${...}`.
+        var: String,
+        /// The TOML path of the string value that referenced it (e.g. `chain[1].rpc_url`).
+        path: String,
+    },
+    /// A `${...}` interpolation expression was malformed (e.g. an unterminated `${`).
+    #[error("invalid interpolation expression at `{path}`: {message}")]
+    Interpolation {
+        /// The TOML path of the offending string value.
+        path: String,
+        /// A description of what was malformed; never echoes the value's contents.
+        message: String,
+    },
+    /// Two or more `[[chain]]` entries share the same `label`.
+    #[error("duplicate chain label `{label}`")]
+    DuplicateChainLabel {
+        /// The label that appears more than once.
+        label: String,
+    },
+    /// A `[[chain]]` entry is missing field(s) required for its `kind`.
+    #[error("chain `{label}` (kind `{kind}`) is missing required field(s): {}", fields.join(", "))]
+    MissingChainFields {
+        /// The chain's label.
+        label: String,
+        /// The chain's `kind`.
+        kind: String,
+        /// The names of the missing required fields.
+        fields: Vec<String>,
+    },
+    /// A fuzz profile's `cases` was not greater than zero.
+    #[error("profile `{profile}`: `cases` must be greater than 0")]
+    InvalidCases {
+        /// The offending profile's name.
+        profile: String,
+    },
+    /// A fuzz or invariant profile's `ops` was not greater than zero.
+    #[error("profile `{profile}`: `ops` must be greater than 0")]
+    InvalidOps {
+        /// The offending profile's name.
+        profile: String,
+    },
+    /// A scenario profile's `steps` was empty.
+    #[error("profile `{profile}`: `steps` must be non-empty")]
+    EmptySteps {
+        /// The offending profile's name.
+        profile: String,
+    },
+    /// An endurance profile set neither `duration` nor `max_ops`.
+    #[error("profile `{profile}`: endurance requires `duration` or `max_ops` (or both)")]
+    EnduranceMissingBound {
+        /// The offending profile's name.
+        profile: String,
+    },
+    /// A profile set both `kinds` and `weights`, which are mutually exclusive.
+    #[error("profile `{profile}`: `kinds` and `weights` are mutually exclusive")]
+    KindsWeightsConflict {
+        /// The offending profile's name.
+        profile: String,
+    },
+    /// A `[suite.<name>]` named a profile that does not exist.
+    #[error("suite `{suite}` references unknown profile `{profile}`")]
+    UnknownSuiteProfile {
+        /// The suite's name.
+        suite: String,
+        /// The profile name it referenced that does not exist.
+        profile: String,
+    },
+    /// `env.chains` named a label with no matching `[[chain]]` entry.
+    #[error("profile `{profile}`: env.chains references unknown chain label `{label}`")]
+    UnknownChainSelection {
+        /// The profile whose effective `env.chains` referenced the label.
+        profile: String,
+        /// The unmatched label.
+        label: String,
+    },
+    /// `env.targets` named a label with no matching `[[chain]]` entry.
+    #[error("profile `{profile}`: env.targets references unknown chain label `{label}`")]
+    UnknownTargetLabel {
+        /// The profile whose effective `env.targets` referenced the label.
+        profile: String,
+        /// The unmatched label.
+        label: String,
+    },
+    /// A `[[chain]].target` value was neither `"mock"` nor `"rpc"`.
+    #[error("chain `{label}`: invalid `target` value: {message}")]
+    InvalidChainTarget {
+        /// The chain's label.
+        label: String,
+        /// A description of the invalid value (never the raw value itself; it is not a
+        /// secret, but the message is already descriptive without echoing it).
+        message: String,
+    },
+    /// A chain resolved to the `rpc` target (for some profile's effective environment) but has
+    /// no `rpc_url`.
+    #[error("profile `{profile}`: chain `{label}` resolves to target `rpc` but has no `rpc_url`")]
+    MissingRpcUrl {
+        /// The profile under which this chain resolves to `rpc`.
+        profile: String,
+        /// The chain's label.
+        label: String,
+    },
 }
 
 /// A raw, mostly-typed view of the document used to drive [`build_run_config`]. Profiles are
 /// left as raw tables so `mode` can be popped and dispatched manually; everything else already
 /// has a stable shape that plain derived `Deserialize` handles.
+///
+/// `deny_unknown_fields`: the merge stage consumes and removes `[defaults]` before this struct
+/// ever sees the document, so a top-level typo is still a hard error here.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawRunConfig {
     harness: HarnessRef,
     #[serde(rename = "chain", default)]
@@ -85,35 +207,45 @@ struct RawRunConfig {
     suite: BTreeMap<String, Suite>,
 }
 
-/// Parses a TOML document string into a [`RunConfig`].
-///
-/// This stage only parses and typed-deserializes: no interpolation, no `[defaults]` merging,
-/// no structural validation. The `vars` closure is accepted for a stable signature but unused
-/// until interpolation lands in a later task.
+/// Parses a TOML document string into a [`RunConfig`], running the full five-stage pipeline:
+/// parse, interpolate (`vars`), merge (`[defaults]` and per-profile `env`), typed deserialize,
+/// structural validate.
 pub fn from_toml_str(
     s: &str,
     vars: &dyn Fn(&str) -> Option<String>,
 ) -> Result<RunConfig, ConfigError> {
-    let _ = vars;
     let value: toml::Value = toml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?;
-    build_run_config(value)
+    load_from_value(value, vars)
 }
 
-/// Parses a JSON document string into a [`RunConfig`].
+/// Parses a JSON document string into a [`RunConfig`], running the same pipeline as
+/// [`from_toml_str`].
 ///
 /// The schema is format agnostic: the JSON value is converted to the same [`toml::Value`]
 /// representation `from_toml_str` uses, so both inputs share one dispatch path and produce
-/// equal [`RunConfig`]s for equivalent documents. See [`from_toml_str`] for what this stage
-/// does and does not do yet.
+/// equal [`RunConfig`]s for equivalent documents.
 pub fn from_json_str(
     s: &str,
     vars: &dyn Fn(&str) -> Option<String>,
 ) -> Result<RunConfig, ConfigError> {
-    let _ = vars;
     let json_value: serde_json::Value =
         serde_json::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?;
     let value = json_to_toml_value(json_value)?;
-    build_run_config(value)
+    load_from_value(value, vars)
+}
+
+/// Runs stages 2 through 5 of the loader pipeline over an already-parsed document: interpolate,
+/// merge (collecting defaults-strip warnings), typed deserialize, structural validate.
+fn load_from_value(
+    mut value: toml::Value,
+    vars: &dyn Fn(&str) -> Option<String>,
+) -> Result<RunConfig, ConfigError> {
+    interpolate::interpolate_value(&mut value, vars)?;
+    let warnings = merge::merge(&mut value)?;
+    let mut cfg = build_run_config(value)?;
+    validate::validate(&cfg)?;
+    cfg.warnings = warnings;
+    Ok(cfg)
 }
 
 /// Reads `path` and parses it as TOML, or as JSON when the extension is `.json`.
@@ -164,6 +296,7 @@ fn build_run_config(value: toml::Value) -> Result<RunConfig, ConfigError> {
         env: raw.env,
         profiles,
         suites: raw.suite,
+        warnings: Vec::new(),
     })
 }
 

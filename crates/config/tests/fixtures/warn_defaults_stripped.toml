@@ -1,0 +1,13 @@
+# A shared [defaults] key ("cases") only applies to fuzz, but the only profile here is a
+# scenario; the defaults allowlist strip should remove it with a warning, not hard-error.
+[harness]
+name = "h"
+
+[defaults]
+cases = 8
+
+[profile.p]
+mode = "scenario"
+
+  [[profile.p.steps]]
+  op = "Ping"

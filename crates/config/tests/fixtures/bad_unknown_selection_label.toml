@@ -1,0 +1,16 @@
+# env.chains selects a label ("osmosis") that has no matching [[chain]] entry.
+[harness]
+name = "h"
+
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "1"
+
+[env]
+chains = ["osmosis"]
+
+[profile.p]
+mode = "fuzz"
+cases = 1
+ops = 1

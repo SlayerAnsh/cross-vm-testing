@@ -132,7 +132,11 @@ pub struct CommonKeys {
     pub artifacts_dir: String,
     /// Optional path to write the run report as JSON.
     pub json_report: Option<String>,
-    /// Per-profile override of the top level `[env]`, shallow merged (later task).
+    /// Per-profile override of the top level `[env]`, shallow merged over it by the loader's
+    /// merge stage before typed deserialize (`targets` merges label-wise; `target`, `chains`,
+    /// `params` are whole-value overrides). `None` only when neither the profile nor the
+    /// top-level `[env]` set anything; otherwise this already holds the fully merged,
+    /// effective environment for this profile, not just the override delta.
     pub env: Option<EnvSpec>,
     /// Auto-shrink a failing history before writing the artifact; mode-dependent default
     /// resolved in the framework, so this stays `Option` here.
