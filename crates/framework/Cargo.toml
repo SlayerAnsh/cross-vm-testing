@@ -23,6 +23,27 @@ rand.workspace = true
 rand_chacha.workspace = true
 # Optional zero-boilerplate stateless operation generation.
 arbitrary = { workspace = true, optional = true }
+# `cli`-only: the declarative run-config schema the `config` module bridges into framework types.
+cross-vm-config = { workspace = true, optional = true }
+# `cli`-only: CLI argument parsing (Task 7).
+clap = { workspace = true, optional = true }
+# `cli`-only: `ResolvedProfile`/`ChainSpecData` construction needs `serde::Serialize` reachable
+# on the outcome/stats types in a later task (Task 11); declaring the feature now is correct per
+# the plan even though no `#[derive(Serialize)]` is added in this task.
+serde = { workspace = true, optional = true }
+# `cli`-only: `--json-report` (Task 7) and JSON config input (already in cross-vm-config).
+serde_json = { workspace = true, optional = true }
+# `cli`-only: `.env` secret loading for the CLI binary (Task 7/10).
+dotenvy = { workspace = true, optional = true }
+# `cli`-only: the CLI's tracing-subscriber fmt layer (Task 7).
+tracing-subscriber = { workspace = true, optional = true }
+# `cli`-only: `ChainSpecData::params` and inline config tables.
+toml = { workspace = true, optional = true }
+# `cli`-only: `SpecId` (`revm::primitives::hardfork::SpecId`) is a field type on `ChainSpecData`
+# regardless of which VM features are on, but neither `cross-vm-solidity` nor `cross-vm-tron`
+# re-export the type, so the framework needs its own direct dependency to name it. Not in the
+# brief's literal optional-dep list, but required for `ChainSpecData`/`build_chain` to compile.
+revm = { workspace = true, optional = true }
 
 [features]
 default = ["cw", "evm", "solana", "tron"]
@@ -35,6 +56,24 @@ solana = ["dep:cross-vm-solana"]
 tron = ["dep:cross-vm-tron"]
 # Enables `sample_arbitrary` + the `arbitrary` derive path for stateless op generation.
 fuzz = ["dep:arbitrary"]
+# Adds `Serialize` reachability for outcome/stats types (the derives themselves land in Task 11).
+serde = ["dep:serde"]
+# The config-driven CLI: TOML/JSON run configs, chain construction, profile resolution, and (in
+# later tasks) the registry and the `cross-vm` binary's argument parsing.
+cli = [
+    "serde",
+    "dep:cross-vm-config",
+    "dep:clap",
+    "dep:serde_json",
+    "dep:dotenvy",
+    "dep:tracing-subscriber",
+    "dep:toml",
+    "dep:revm",
+    # ctrl-c handling for the endurance runner's cooperative stop flag (Task 10); tokio is a
+    # mandatory workspace dep with a fixed feature set, so `cli` adds the extra feature to the
+    # existing dependency rather than redeclaring it.
+    "tokio/signal",
+]
 
 [dev-dependencies]
 # `#[tokio::test]` in src/tests.rs; `#[tokio::main]` in examples/.
