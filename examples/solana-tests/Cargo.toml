@@ -27,16 +27,13 @@ endurance = []
 
 [dependencies]
 cross-vm-framework = { path = "../../crates/framework", features = ["cli"] }
-cross-vm-solana = { path = "../../crates/solana" }
-# Counter program bindings (SVM program bytes + discriminators) plus the shared wallet/funding helpers.
+# The shared `Counter` wrapper + harness (SVM program bytes/discriminators, instruction builders,
+# ops/world serde derives) and the shared wallet/funding helpers; this crate only supplies the
+# `SOLANA_DEVNET` preset + label.
 cross-vm-common = { path = "../common", features = ["solana"] }
-solana-instruction = "3"
-solana-system-interface = { version = "2", features = ["bincode"] }
 # Needed by the `cross-vm` bin's `#[tokio::main(flavor = "current_thread")]`; bin targets cannot
 # use `[dev-dependencies]`.
 tokio.workspace = true
-# `CounterOp` / `CounterOpKind` derive `Serialize`/`Deserialize` for the config-driven op shape.
-serde.workspace = true
 
 [dev-dependencies]
 # Proc-macro attributes must be imported from the proc-macro crate directly so rust-analyzer can

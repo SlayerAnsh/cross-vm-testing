@@ -11,11 +11,13 @@
 #![allow(dead_code, unused_imports)]
 
 mod bridge;
-mod counter;
 mod ping_pong;
 
 pub use bridge::{parse_packets, record_hook, Bridge, BridgeLedger, PacketEvent, PacketKind};
-pub use counter::{Counter, CounterSpec};
+// The `Counter` wrapper + `CounterSpec` now live once in `cross-vm-common` (shared with the
+// single-VM example crates); re-export them so `use crate::support::{Counter, CounterSpec}` keeps
+// compiling unchanged.
+pub use cross_vm_common::contracts::counter::{Counter, CounterSpec};
 pub use cross_vm_tests::support::{
     empty_wallets, fund_alice, fund_evm, fund_user, init_tracing, test_wallets, Vault,
 };

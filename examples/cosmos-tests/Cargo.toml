@@ -27,14 +27,12 @@ endurance = []
 
 [dependencies]
 cross-vm-framework = { path = "../../crates/framework", features = ["cli"] }
-# Counter contract bindings (CosmWasm messages + in-process contract factory) plus the shared
-# wallet/funding helpers.
+# The shared `Counter` wrapper + harness (CosmWasm bindings, ops/world serde derives) and the shared
+# wallet/funding helpers; this crate only supplies the `OSMOSIS` preset + label.
 cross-vm-common = { path = "../common", features = ["cw"] }
 # Needed by the `cross-vm` bin's `#[tokio::main(flavor = "current_thread")]`; bin targets cannot
 # use `[dev-dependencies]`.
 tokio.workspace = true
-# `CounterOp` / `CounterOpKind` derive `Serialize`/`Deserialize` for the config-driven op shape.
-serde.workspace = true
 
 [dev-dependencies]
 # Proc-macro attributes must be imported from the proc-macro crate directly so rust-analyzer can

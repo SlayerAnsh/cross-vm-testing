@@ -2130,7 +2130,6 @@ dependencies = [
  "cross-vm-framework",
  "cross-vm-macros",
  "rstest",
- "serde",
  "serde_json",
  "tokio",
 ]
@@ -2297,9 +2296,15 @@ dependencies = [
  "cosmwasm-std",
  "counter",
  "cross-vm-framework",
+ "cross-vm-macros",
+ "cross-vm-solana",
  "cross-vm-solidity",
+ "cross-vm-tron",
  "cw-multi-test",
  "ping-pong",
+ "serde",
+ "solana-instruction",
+ "solana-system-interface 2.0.0",
  "tracing-subscriber 0.3.23",
  "vault",
 ]
@@ -3065,13 +3070,10 @@ dependencies = [
 name = "evm-tests"
 version = "0.1.0"
 dependencies = [
- "alloy",
  "cross-vm-common",
  "cross-vm-framework",
  "cross-vm-macros",
- "cross-vm-solidity",
  "rstest",
- "serde",
  "serde_json",
  "tokio",
 ]
@@ -7681,12 +7683,8 @@ dependencies = [
  "cross-vm-common",
  "cross-vm-framework",
  "cross-vm-macros",
- "cross-vm-solana",
  "rstest",
- "serde",
  "serde_json",
- "solana-instruction",
- "solana-system-interface 2.0.0",
  "tokio",
 ]
 
@@ -8539,13 +8537,10 @@ dependencies = [
 name = "tvm-tests"
 version = "0.1.0"
 dependencies = [
- "alloy",
  "cross-vm-common",
  "cross-vm-framework",
  "cross-vm-macros",
- "cross-vm-tron",
  "rstest",
- "serde",
  "serde_json",
  "tokio",
 ]

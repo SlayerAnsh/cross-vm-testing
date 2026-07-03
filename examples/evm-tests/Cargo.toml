@@ -27,15 +27,12 @@ endurance = []
 
 [dependencies]
 cross-vm-framework = { path = "../../crates/framework", features = ["cli"] }
-cross-vm-solidity  = { path = "../../crates/solidity" }
-# Counter contract bindings (EVM ABI + creation bytecode) plus the shared wallet/funding helpers.
+# The shared `Counter` wrapper + harness (EVM ABI bindings, ops/world serde derives) and the shared
+# wallet/funding helpers; this crate only supplies the `ETHEREUM` preset + label.
 cross-vm-common = { path = "../common", features = ["evm"] }
-alloy = { workspace = true }
 # Needed by the `cross-vm` bin's `#[tokio::main(flavor = "current_thread")]`; bin targets cannot
 # use `[dev-dependencies]`.
 tokio.workspace = true
-# `CounterOp` / `CounterOpKind` derive `Serialize`/`Deserialize` for the config-driven op shape.
-serde.workspace = true
 
 [dev-dependencies]
 # Proc-macro attributes must be imported from the proc-macro crate directly so rust-analyzer can
