@@ -104,15 +104,26 @@ fn enum_data(input: &DeriveInput) -> syn::Result<&DataEnum> {
     }
 }
 
-/// `(method-arg declarations, field idents)` for a variant. Named fields become args; a unit
-/// variant has none; a tuple variant is rejected.
-fn variant_fields(v: &Variant) -> syn::Result<(Vec<TokenStream>, Vec<&Ident>)> {
+/// `(method-arg declarations, field idents)` for a variant. Named fields become args; tuple
+/// fields become positional `arg0`, `arg1`, ... args (cw-orch style); a unit variant has none.
+fn variant_fields(v: &Variant) -> syn::Result<(Vec<TokenStream>, Vec<Ident>)> {
     match &v.fields {
         Fields::Named(named) => {
             let mut decls = Vec::new();
             let mut idents = Vec::new();
             for f in &named.named {
-                let id = f.ident.as_ref().expect("named field has an ident");
+                let id = f.ident.as_ref().expect("named field has an ident").clone();
+                let ty = &f.ty;
+                decls.push(quote! { #id: #ty });
+                idents.push(id);
+            }
+            Ok((decls, idents))
+        }
+        Fields::Unnamed(unnamed) => {
+            let mut decls = Vec::new();
+            let mut idents = Vec::new();
+            for (i, f) in unnamed.unnamed.iter().enumerate() {
+                let id = format_ident!("arg{}", i);
                 let ty = &f.ty;
                 decls.push(quote! { #id: #ty });
                 idents.push(id);
@@ -120,19 +131,17 @@ fn variant_fields(v: &Variant) -> syn::Result<(Vec<TokenStream>, Vec<&Ident>)> {
             Ok((decls, idents))
         }
         Fields::Unit => Ok((Vec::new(), Vec::new())),
-        Fields::Unnamed(_) => Err(syn::Error::new_spanned(
-            v,
-            "tuple variants are not supported; use named fields or a unit variant",
-        )),
     }
 }
 
-/// The expression that constructs this variant, e.g. `ExecuteMsg::Deposit { amount }`.
-fn variant_ctor(enum_ident: &Ident, v: &Variant, field_idents: &[&Ident]) -> TokenStream {
+/// The expression that constructs this variant, e.g. `ExecuteMsg::Deposit { amount }` or
+/// `ExecuteMsg::ManageFactoryState(arg0)`.
+fn variant_ctor(enum_ident: &Ident, v: &Variant, field_idents: &[Ident]) -> TokenStream {
     let var = &v.ident;
     match &v.fields {
         Fields::Named(_) => quote! { #enum_ident::#var { #(#field_idents),* } },
-        _ => quote! { #enum_ident::#var },
+        Fields::Unnamed(_) => quote! { #enum_ident::#var(#(#field_idents),*) },
+        Fields::Unit => quote! { #enum_ident::#var },
     }
 }
 
@@ -228,9 +237,32 @@ mod tests {
     }
 
     #[test]
-    fn tuple_variant_is_rejected() {
-        let err = exec("enum ExecuteMsg { Increment(u64) }").unwrap_err();
-        assert!(err.to_string().contains("tuple"), "{err}");
+    fn execute_single_field_tuple_variant() {
+        let out = exec("enum ExecuteMsg { ManageFactoryState(ManageFactoryState) }").unwrap();
+        assert!(out.contains("fn manage_factory_state"));
+        assert!(out.contains("arg0"));
+        assert!(out.contains("ManageFactoryState"));
+        assert!(out.contains("ManageFactoryState (arg0)"));
+    }
+
+    #[test]
+    fn execute_multi_field_tuple_variant() {
+        let out = exec("enum ExecuteMsg { Pair(u64, String) }").unwrap();
+        assert!(out.contains("fn pair"));
+        assert!(out.contains("arg0"));
+        assert!(out.contains("arg1"));
+        assert!(out.contains("Pair (arg0 , arg1)"));
+    }
+
+    #[test]
+    fn query_tuple_variant() {
+        let out =
+            query("enum QueryMsg { #[returns(CountResponse)] GetCount(CountRequest) }").unwrap();
+        assert!(out.contains("fn get_count"));
+        assert!(out.contains("arg0"));
+        assert!(out.contains("CountRequest"));
+        assert!(out.contains("CountResponse"));
+        assert!(!out.contains("wallet"));
     }
 
     #[test]

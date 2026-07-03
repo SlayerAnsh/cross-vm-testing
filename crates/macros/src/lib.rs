@@ -45,7 +45,8 @@ pub fn cross_vm_contract(args: TokenStream, item: TokenStream) -> TokenStream {
 /// Generate typed, per-variant execute methods from a CosmWasm `ExecuteMsg` enum.
 ///
 /// `#[derive(CwExecuteFns)]` emits a `pub trait <Name>Fns` and `impl <Name>Fns for CwContract`,
-/// one `async fn` per variant (snake_cased; named fields become args). A variant marked
+/// one `async fn` per variant (snake_cased; named fields become args; tuple fields become
+/// positional `arg0`, `arg1`, ... args). A variant marked
 /// `#[payable]` gains a trailing `funds: &[Coin]` arg routed through `execute_with_funds`.
 #[proc_macro_derive(CwExecuteFns, attributes(payable))]
 pub fn derive_cw_execute_fns(item: TokenStream) -> TokenStream {
@@ -156,7 +157,8 @@ pub fn config_runner(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Generate typed, per-variant query methods from a CosmWasm `QueryMsg` enum.
 ///
 /// `#[derive(CwQueryFns)]` emits a `pub trait <Name>Fns` and `impl <Name>Fns for CwContract`,
-/// one `async fn` per variant returning the variant's `#[returns(T)]` type. Every variant must
+/// one `async fn` per variant returning the variant's `#[returns(T)]` type (named fields become
+/// args; tuple fields become positional `arg0`, `arg1`, ... args). Every variant must
 /// carry `#[returns(T)]`.
 #[proc_macro_derive(CwQueryFns, attributes(returns))]
 pub fn derive_cw_query_fns(item: TokenStream) -> TokenStream {

@@ -259,7 +259,7 @@ Guidelines:
 * A VM you do not support: return `CrossVmError::unimplemented(kind, "...")` from that arm.
 * Wrap a return value as `AppResponse<T>`; the caller reads `.value()` and reaches the raw result via `raw_cosmwasm` / `raw_evm` / `raw_solana` (or `transaction_hash` / `gas_used`), and the emitted events via `raw_cosmwasm_events` / `raw_evm_logs` / `raw_solana_logs`.
 * The EVM `call` returns an `EvmExecution { output, logs }` (it no longer discards the logs revm produces); build the response with `AppResponse::evm((), exec.output, exec.logs)`.
-* CosmWasm hooks can skip the hand-built `ExecuteMsg` / `query_wasm_smart`: derive `CwExecuteFns` / `CwQueryFns` (from `cross-vm-macros`) on the contract's `ExecuteMsg` / `QueryMsg` (under a `cross-vm` feature so the wasm build stays clean), then call `self.base.cosmwasm()?.contract(addr).increment(wallet)` / `.get_count()`. Query variants need `#[returns(T)]`; a variant marked `#[payable]` adds a trailing `funds: &[Coin]` arg. EVM already gets typed calls from `alloy::sol!`; Solana has no schema so its hooks stay hand-written.
+* CosmWasm hooks can skip the hand-built `ExecuteMsg` / `query_wasm_smart`: derive `CwExecuteFns` / `CwQueryFns` (from `cross-vm-macros`) on the contract's `ExecuteMsg` / `QueryMsg` (under a `cross-vm` feature so the wasm build stays clean), then call `self.base.cosmwasm()?.contract(addr).increment(wallet)` / `.get_count()`. Named fields become method args; tuple fields become positional `arg0`, `arg1`, ... args (cw-orch style). Query variants need `#[returns(T)]`; a variant marked `#[payable]` adds a trailing `funds: &[Coin]` arg. EVM already gets typed calls from `alloy::sol!`; Solana has no schema so its hooks stay hand-written.
 
 ## Transaction hooks
 

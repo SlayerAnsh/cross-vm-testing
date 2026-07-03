@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added
+
+* `cross-vm-macros`: `CwExecuteFns` and `CwQueryFns` now support tuple (unnamed) enum variants. Unnamed fields become positional method args `arg0`, `arg1`, ... (cw-orch style), e.g. `ManageFactoryState(ManageFactoryState)` generates `manage_factory_state(wallet, arg0)`.
+
 ### Changed (repo restructure: `contracts/`, `cross-vm-common`, per-VM example crates)
 
 * Example contract sources moved from `examples/{cosmwasm,solidity,solana,tron}-contracts` to a new root `contracts/{cosmwasm,solidity,solana,tron}` directory (the `-contracts` suffix dropped). The `crates/` layout is unchanged. The Makefile `compile-*` targets and the CI artifact embed paths now point at `contracts/*`.

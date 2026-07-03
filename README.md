@@ -260,7 +260,7 @@ Two honest v1 limits remain in the mock. The mock's `CREATE` / `CREATE2` use rev
 | Macro | Kind | Purpose |
 | --- | --- | --- |
 | `#[cross_vm_contract(Name)]` | attribute | Turn a spec trait into a contract wrapper that dispatches each method to the matching `cw_*` / `evm_*` / `svm_*` / `tron_*` hook |
-| `#[derive(CwExecuteFns)]` | derive | Typed per variant `async fn` execute methods from a CosmWasm `ExecuteMsg` enum (`#[payable]` adds a `funds` arg) |
+| `#[derive(CwExecuteFns)]` | derive | Typed per variant `async fn` execute methods from a CosmWasm `ExecuteMsg` enum (named or tuple fields become args; `#[payable]` adds a `funds` arg) |
 | `#[derive(CwQueryFns)]` | derive | Typed per variant `async fn` query methods from a `QueryMsg` enum (each variant needs `#[returns(T)]`) |
 | `define_wallet_roster!` | function-like | Compile time wallet roster with typed `WalletLabel` fields |
 | `#[fuzz_runner]` | attribute | Fan a fuzz test into one `#[tokio::test]` per case with a seeded `FuzzRunner` |
