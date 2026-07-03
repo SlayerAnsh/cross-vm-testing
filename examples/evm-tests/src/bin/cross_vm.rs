@@ -2,8 +2,8 @@
 //! framework's config-driven CLI and drives it against `counter.cross-vm.toml`.
 //!
 //! ```sh
-//! cargo run -p evm-tests --bin cross-vm -- validate counter.cross-vm.toml
-//! cargo run -p evm-tests --bin cross-vm -- run counter.cross-vm.toml --profile smoke
+//! cargo run -p evm-tests -- validate counter.cross-vm.toml
+//! cargo run -p evm-tests -- run counter.cross-vm.toml --profile smoke
 //! ```
 //!
 //! `current_thread` is required: the erased registry layer, and every mock VM, are `!Send` by

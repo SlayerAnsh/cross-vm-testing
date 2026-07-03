@@ -11,7 +11,7 @@ fn config_path() -> PathBuf {
 
 /// Runs the `cross-vm` bin built by this same `cargo test` invocation.
 fn cross_vm(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_cross-vm"))
+    Command::new(env!("CARGO_BIN_EXE_solana-cli"))
         .args(args)
         .output()
         .expect("spawn cross-vm bin")

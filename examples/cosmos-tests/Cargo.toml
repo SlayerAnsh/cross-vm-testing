@@ -12,10 +12,10 @@ publish = false
 name = "cosmos_tests"
 
 # The config-driven CLI binary: registers the counter harness and drives it against
-# `counter.cross-vm.toml`. Shares the `cross-vm` binary name with the other example crates; always
-# invoke it with `-p cosmos-tests` (a bare `cargo run --bin cross-vm` is ambiguous across the workspace).
+# `counter.cross-vm.toml`. Uniquely named (`cosmos-cli`) so it never collides with the other example
+# crates' binaries; run it with `cargo run -p cosmos-tests`.
 [[bin]]
-name = "cross-vm"
+name = "cosmos-cli"
 path = "src/bin/cross_vm.rs"
 
 # Heavier harness runs are opt-in so the default `cargo test` stays fast (the scenario test and the

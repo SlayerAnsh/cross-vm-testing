@@ -12,10 +12,10 @@ publish = false
 name = "tvm_tests"
 
 # The config-driven CLI binary: registers the counter harness and drives it against
-# `counter.cross-vm.toml`. Shares the `cross-vm` binary name with the other example crates; always
-# invoke it with `-p tvm-tests` (a bare `cargo run --bin cross-vm` is ambiguous across the workspace).
+# `counter.cross-vm.toml`. Uniquely named (`tvm-cli`) so it never collides with the other example
+# crates' binaries; run it with `cargo run -p tvm-tests`.
 [[bin]]
-name = "cross-vm"
+name = "tvm-cli"
 path = "src/bin/cross_vm.rs"
 
 # Heavier harness runs are opt-in so the default `cargo test` stays fast (the scenario test and the
