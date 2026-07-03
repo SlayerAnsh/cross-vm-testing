@@ -23,8 +23,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::harness::{
-    sub_seed, Expectation, Fuzz, Harness, Invariant, KindMix, RunReport, Runner, Scenario,
-    ScenarioStep, Stats,
+    sub_seed, Endurance, EnduranceConfig, Expectation, Fuzz, Harness, Invariant, KindMix,
+    RunReport, Runner, Scenario, ScenarioStep, Stats,
 };
 
 use super::erased::{erase_report, LocalBoxFuture};
@@ -85,6 +85,13 @@ pub enum RunError {
     #[error("{0}")]
     UnsupportedMode(String),
 }
+
+/// Stand-in "no duration bound" for an endurance profile that sets `max_ops` but not `duration`.
+/// Not `Duration::MAX`: adding that to `Instant::now()` overflows the underlying clock's
+/// arithmetic (panics). 50 years comfortably outlives any `max_ops`-bounded run while staying
+/// far inside `Instant`'s representable range.
+const EFFECTIVELY_UNBOUNDED_DURATION: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60 * 24 * 365 * 50);
 
 /// A validate closure's boxed shape, factored out purely to keep [`Entry`] and
 /// [`Registry::register`] readable (clippy's `type_complexity`).
@@ -437,9 +444,57 @@ where
             )
             .map_err(|e| RunError::Serialize(e.to_string()))
         }
-        cross_vm_config::Profile::Endurance(_) => Err(RunError::UnsupportedMode(
-            "endurance not yet supported (P3)".to_string(),
-        )),
+        cross_vm_config::Profile::Endurance(p) => {
+            let selection = parse_kind_selection::<H>(&p.kinds, &p.weights)?;
+
+            let (ctx, world) = setup(build_setup_request(resolved, base_seed))
+                .await
+                .map_err(|e| RunError::Setup(e.to_string()))?;
+
+            // The loader's structural validation (`validate::validate`) guarantees a profile
+            // sets `duration` and/or `max_ops`; when only `max_ops` is set, a long-but-safe
+            // duration (not `Duration::MAX`, which overflows `Instant` arithmetic) lets `max_ops`
+            // alone govern the run.
+            let duration = opts
+                .duration
+                .or(p.duration)
+                .unwrap_or(EFFECTIVELY_UNBOUNDED_DURATION);
+            let max_ops = opts.ops.or(p.max_ops);
+
+            let mut cfg = EnduranceConfig::new(duration)
+                .base_delay(p.base_delay)
+                .max_delay(p.max_delay)
+                .check_every(resolved.check_every)
+                .max_consecutive_infra(p.max_consecutive_infra)
+                .heartbeat(p.heartbeat);
+            if let Some(n) = max_ops {
+                cfg = cfg.max_ops(n);
+            }
+            if let Some(base) = p.advance_blocks {
+                cfg = cfg.advance_blocks(base as u64, p.block_jitter as u64);
+            }
+            if let Some(flag) = opts.stop.clone() {
+                cfg = cfg.stop(flag);
+            }
+
+            let mut runner = Runner::<H, Endurance>::endurance(make_harness(), base_seed);
+            if resolved.stats {
+                runner.with_stats();
+            }
+            runner.setup(ctx, world);
+            let report = runner.run_with(cfg, selection.as_mix()).await;
+            let stats = runner.stats().cloned();
+
+            erase_report(
+                report,
+                harness_name,
+                resolved.name.clone(),
+                "endurance".to_string(),
+                stats,
+                started.elapsed(),
+            )
+            .map_err(|e| RunError::Serialize(e.to_string()))
+        }
         cross_vm_config::Profile::Scenario(p) => {
             let (ctx, world) = setup(build_setup_request(resolved, base_seed))
                 .await
@@ -880,10 +935,113 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_modes_are_reported_by_run_error_not_a_panic() {
-        // Covered end-to-end via `run`; this just documents the expected message shape so a
-        // future endurance task notices if it changes silently.
-        let err = RunError::UnsupportedMode("endurance not yet supported (P3)".to_string());
-        assert_eq!(err.to_string(), "endurance not yet supported (P3)");
+    fn unsupported_mode_error_still_formats_for_a_future_mode() {
+        // Every mode the schema knows about (fuzz/invariant/endurance/scenario) is implemented
+        // today; `UnsupportedMode` stays on `RunError` as a forward-compat exit for a future
+        // mode, and `Cli`'s exit-code mapping still matches on it (see `cli.rs`'s
+        // `exit_code_for_run_error_maps_usage_errors_to_three`). This just pins the `Display`.
+        let err = RunError::UnsupportedMode("not yet supported".to_string());
+        assert_eq!(err.to_string(), "not yet supported");
+    }
+
+    // ----- endurance runs over the mock harness -----
+
+    fn endurance_profile(
+        duration: Option<std::time::Duration>,
+        max_ops: Option<usize>,
+        kinds: Option<Vec<String>>,
+    ) -> Profile {
+        Profile::Endurance(cross_vm_config::EnduranceProfile {
+            common: common(),
+            duration,
+            max_ops,
+            base_delay: std::time::Duration::ZERO,
+            max_delay: std::time::Duration::ZERO,
+            advance_blocks: None,
+            block_jitter: 0,
+            max_consecutive_infra: 0,
+            heartbeat: std::time::Duration::from_secs(60),
+            kinds,
+            weights: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn endurance_run_over_mock_harness_reports_endurance_mode() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        let profile = endurance_profile(
+            Some(std::time::Duration::from_millis(20)),
+            None,
+            Some(vec!["Ping".to_string()]),
+        );
+        let resolved = resolved(profile);
+
+        let report = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .expect("run ok");
+        assert_eq!(report.mode, "endurance");
+        assert!(report.failure.is_none(), "{:?}", report.failure);
+        assert!(report.steps > 0, "endurance ran zero steps");
+    }
+
+    #[tokio::test]
+    async fn endurance_max_ops_bounds_the_run_independent_of_duration() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        // A generous duration but a tight max_ops, no delay: max_ops must be what stops the run,
+        // and it must stop at exactly that count.
+        let profile = endurance_profile(
+            Some(std::time::Duration::from_secs(5)),
+            Some(3),
+            Some(vec!["Ping".to_string()]),
+        );
+        let resolved = resolved(profile);
+
+        let report = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .expect("run ok");
+        assert_eq!(report.steps, 3);
+    }
+
+    #[tokio::test]
+    async fn endurance_run_options_ops_override_wins_as_max_ops() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        let profile = endurance_profile(
+            Some(std::time::Duration::from_secs(5)),
+            Some(100),
+            Some(vec!["Ping".to_string()]),
+        );
+        let resolved = resolved(profile);
+        let opts = RunOptions {
+            ops: Some(2),
+            ..Default::default()
+        };
+
+        let report = registry.run("mock", &resolved, &opts).await.expect("run ok");
+        assert_eq!(report.steps, 2);
+    }
+
+    #[tokio::test]
+    async fn endurance_missing_duration_with_max_ops_still_stops_at_max_ops() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        // No duration at all: the registry's defensive fallback must not panic or hang, and
+        // max_ops alone must govern.
+        let profile = endurance_profile(None, Some(4), Some(vec!["Ping".to_string()]));
+        let resolved = resolved(profile);
+
+        let report = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .expect("run ok");
+        assert_eq!(report.steps, 4);
     }
 }

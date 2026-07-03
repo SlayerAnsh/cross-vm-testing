@@ -23,6 +23,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -190,7 +192,30 @@ impl Cli {
             }
         };
 
-        let opts = build_run_options(args, &env);
+        let mut opts = build_run_options(args, &env);
+
+        // Cooperative ctrl-c for an endurance run: the driver polls `opts.stop` at the top of
+        // its loop only (see `EnduranceRunner::run_with`), never around an in-flight `apply`, so
+        // a wallet lock or in-flight broadcast is never severed. First ctrl-c asks the run to
+        // stop after its current operation; a second forces a hard exit. The spawned task
+        // captures only the `Send` `Arc<AtomicBool>`, so it is spawnable on this CLI's required
+        // `#[tokio::main(flavor = "current_thread")]` runtime despite the rest of the registry
+        // being `!Send`.
+        let stop = Arc::new(AtomicBool::new(false));
+        opts.stop = Some(Arc::clone(&stop));
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_err() {
+                return;
+            }
+            stop.store(true, Ordering::Relaxed);
+            tracing::info!(
+                "stopping after the current operation; press ctrl-c again to force quit"
+            );
+            if tokio::signal::ctrl_c().await.is_ok() {
+                std::process::exit(130);
+            }
+        });
+
         let code = run_selected(&self.registry, cfg, &names, &opts, stop_on_failure).await;
         tracing::info!(exit_code = code, profiles = names.len(), "run summary");
         code
@@ -431,6 +456,10 @@ fn build_run_options(args: &RunArgs, env: &dyn Fn(&str) -> Option<String>) -> Ru
         json_report: args.json_report.clone(),
         artifacts_dir: args.artifacts_dir.clone(),
         no_shrink: args.no_shrink,
+        // Never folded here: `run_with_config` wires this to the ctrl-c signal task, which needs
+        // a live `Arc` to flip, not anything derivable from `args`/`env` alone. Kept `None` in
+        // this pure, unit-tested builder.
+        stop: None,
     }
 }
 

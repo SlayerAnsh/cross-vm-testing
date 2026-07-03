@@ -10,8 +10,10 @@
 //! The bank has no chains, so its [`Ctx`] is an empty `MultiChainEnv` it never touches; the
 //! `World` is pure in-memory state. This isolates the runner's control flow from any VM.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 use cross_vm_framework::prelude::*;
@@ -41,7 +43,7 @@ enum OpKind {
     Withdraw,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Behavior {
     /// Correct implementation.
     Good,
@@ -55,6 +57,19 @@ enum Behavior {
     /// A deposit that lands the balance exactly on the given value reports a bug. Only the full
     /// cumulative sequence triggers it, making the failing sequence irreducible (ddmin worst case).
     BugAtBalance(u128),
+    /// Cycles through `pattern` (repeating past its end): `true` fails the op as
+    /// [`HarnessError::Infra`], `false` applies it exactly like [`Behavior::Good`]. Indexed by
+    /// the bank's own applied-op counter, so it gives full deterministic control over which ops
+    /// in an endurance run come back `Infra`, independent of the (randomly generated) op content.
+    /// Used to test the endurance runner's tolerated-Infra streak (continue / reset / fail).
+    InfraPattern(Vec<bool>),
+    /// Applies exactly like [`Behavior::Good`], but on the Nth applied op (0-indexed, `N` = the
+    /// wrapped value) additionally perturbs every user's model by `+1` relative to chain,
+    /// deterministically breaking `ModelMatches` from that point on regardless of which
+    /// (randomly generated) op landed on that index or whether it was accepted/rejected. Used to
+    /// test that a final invariant sweep still catches drift a `check_every = 0` mid-run cadence
+    /// missed.
+    DriftAfter(usize),
 }
 
 struct World {
@@ -67,6 +82,9 @@ struct Bank {
     behavior: Behavior,
     /// Records every applied op so a test can assert what ran (e.g. per-op fuzz runs one kind).
     log: Rc<RefCell<Vec<Op>>>,
+    /// Applied-op counter: indexes into `Behavior::InfraPattern`'s pattern, and marks the op
+    /// `Behavior::DriftAfter` perturbs the model on. Interior mutability: `apply` takes `&self`.
+    op_calls: Cell<usize>,
 }
 
 impl Bank {
@@ -77,6 +95,7 @@ impl Bank {
                 users,
                 behavior,
                 log: log.clone(),
+                op_calls: Cell::new(0),
             },
             log,
         )
@@ -91,6 +110,25 @@ impl Harness for Bank {
 
     async fn apply(&self, _ctx: &mut Ctx, w: &mut World, op: &Op) -> Result<Verdict, HarnessError> {
         self.log.borrow_mut().push(op.clone());
+        let call_idx = self.op_calls.get();
+        self.op_calls.set(call_idx + 1);
+
+        if let Behavior::InfraPattern(pattern) = &self.behavior {
+            if pattern[call_idx % pattern.len()] {
+                return Err(HarnessError::Infra(CrossVmError::wallet("infra pattern hit")));
+            }
+            // `false`: falls through to the same application the `Good` behavior takes below,
+            // since `InfraPattern` matches none of the `matches!` guards in that match.
+        }
+        if let Behavior::DriftAfter(n) = &self.behavior {
+            if call_idx == *n {
+                // Unconditional, before the op is even matched: independent of whether this op
+                // is a deposit/withdraw or ends up accepted/rejected.
+                for m in w.model.iter_mut() {
+                    *m = m.wrapping_add(1);
+                }
+            }
+        }
         match *op {
             Op::Deposit { user, amount } => {
                 if matches!(self.behavior, Behavior::BugOnDeposit | Behavior::BugOnBoth) {
@@ -98,8 +136,8 @@ impl Harness for Bank {
                 }
                 w.chain[user] += amount;
                 w.model[user] += amount;
-                if let Behavior::BugAtBalance(bomb) = self.behavior {
-                    if w.chain[user] == bomb {
+                if let Behavior::BugAtBalance(bomb) = &self.behavior {
+                    if w.chain[user] == *bomb {
                         return Err(HarnessError::Bug("balance bomb".into()));
                     }
                 }
@@ -230,6 +268,185 @@ async fn endurance_honors_wall_clock_and_passes() {
         .await;
     assert!(rep.passed(), "endurance: {:?}", rep.failure);
     assert!(rep.steps > 0, "endurance ran zero steps");
+}
+
+#[tokio::test]
+async fn endurance_max_ops_stops_independent_of_duration() {
+    // A generous wall-clock bound but a tight `max_ops`, no inter-op delay: `max_ops` must be
+    // what stops the run, and it must stop at exactly that count.
+    let (bank, _log) = Bank::new(2, Behavior::Good);
+    let (ctx, world) = bank_env(2).await.unwrap();
+    let mut r = Runner::endurance(bank, 101);
+    r.setup(ctx, world);
+    let rep = r
+        .run(
+            EnduranceConfig::new(Duration::from_secs(5))
+                .check_every(0)
+                .max_ops(7),
+        )
+        .await;
+    assert!(rep.passed(), "endurance: {:?}", rep.failure);
+    assert_eq!(rep.steps, 7);
+}
+
+#[tokio::test]
+async fn endurance_default_fails_on_the_first_infra() {
+    // `max_consecutive_infra` defaults to 0: today's behavior (fail on the first Infra) must be
+    // preserved unless a test opts into tolerance.
+    let (bank, _log) = Bank::new(2, Behavior::InfraPattern(vec![true]));
+    let (ctx, world) = bank_env(2).await.unwrap();
+    let mut r = Runner::endurance(bank, 103);
+    r.setup(ctx, world);
+    let rep = r
+        .run(EnduranceConfig::new(Duration::from_secs(5)).check_every(0).max_ops(5))
+        .await;
+    assert!(!rep.passed(), "expected the first Infra to fail the run");
+    let f = rep.failure.unwrap();
+    assert_eq!(f.step, 1);
+    assert!(matches!(f.kind, FailureKind::Infra(_)), "{:?}", f.kind);
+}
+
+#[tokio::test]
+async fn endurance_tolerates_infra_up_to_max_consecutive() {
+    // 2 consecutive Infra ops, then success, then 1 more Infra: never more than 2 in a row, and
+    // `max_consecutive_infra = 2` tolerates exactly that.
+    let (bank, _log) = Bank::new(
+        2,
+        Behavior::InfraPattern(vec![true, true, false, true, false]),
+    );
+    let (ctx, world) = bank_env(2).await.unwrap();
+    let mut r = Runner::endurance(bank, 107);
+    r.setup(ctx, world);
+    let rep = r
+        .run(
+            EnduranceConfig::new(Duration::from_secs(5))
+                .check_every(0)
+                .max_ops(5)
+                .max_consecutive_infra(2),
+        )
+        .await;
+    assert!(rep.passed(), "endurance: {:?}", rep.failure);
+    assert_eq!(rep.steps, 5);
+}
+
+#[tokio::test]
+async fn endurance_infra_streak_resets_on_success() {
+    // Alternating Infra/success, never two Infra in a row: `max_consecutive_infra = 1` must never
+    // trip even though the pattern repeats for the whole run (the streak resets to 0 every other
+    // op, so it is never given the chance to exceed 1).
+    let (bank, _log) = Bank::new(2, Behavior::InfraPattern(vec![true, false]));
+    let (ctx, world) = bank_env(2).await.unwrap();
+    let mut r = Runner::endurance(bank, 109);
+    r.setup(ctx, world);
+    let rep = r
+        .run(
+            EnduranceConfig::new(Duration::from_secs(5))
+                .check_every(0)
+                .max_ops(10)
+                .max_consecutive_infra(1),
+        )
+        .await;
+    assert!(rep.passed(), "endurance: {:?}", rep.failure);
+    assert_eq!(rep.steps, 10);
+}
+
+#[tokio::test]
+async fn endurance_fails_once_infra_streak_exceeds_max_consecutive() {
+    // Every op is Infra: with `max_consecutive_infra = 2`, the 3rd consecutive Infra must fail
+    // the run (the first two are tolerated).
+    let (bank, _log) = Bank::new(2, Behavior::InfraPattern(vec![true]));
+    let (ctx, world) = bank_env(2).await.unwrap();
+    let mut r = Runner::endurance(bank, 113);
+    r.setup(ctx, world);
+    let rep = r
+        .run(
+            EnduranceConfig::new(Duration::from_secs(5))
+                .check_every(0)
+                .max_ops(10)
+                .max_consecutive_infra(2),
+        )
+        .await;
+    assert!(
+        !rep.passed(),
+        "expected the infra streak to exceed the ceiling"
+    );
+    let f = rep.failure.unwrap();
+    assert!(matches!(f.kind, FailureKind::Infra(_)), "{:?}", f.kind);
+    assert_eq!(f.step, 3, "should fail on the 3rd consecutive infra op");
+}
+
+#[tokio::test]
+async fn endurance_stop_flag_ends_the_run_as_a_pass_with_final_sweep() {
+    // The flag is already set before the first iteration: the loop must break immediately, but
+    // the final sweep must still run (and the report is a PASS, not a failure).
+    let (bank, _log) = Bank::new(2, Behavior::Good);
+    let (ctx, world) = bank_env(2).await.unwrap();
+    let mut r = Runner::endurance(bank, 127);
+    r.setup(ctx, world);
+    let stop = Arc::new(AtomicBool::new(true));
+    let rep = r
+        .run(
+            EnduranceConfig::new(Duration::from_secs(5))
+                .check_every(0)
+                .stop(stop),
+        )
+        .await;
+    assert!(rep.passed(), "stop should end the run as a pass: {:?}", rep.failure);
+    assert_eq!(rep.steps, 0, "the flag was already set before the first op");
+    assert!(
+        rep.coverage.iter().all(|(_, c)| c.total() > 0),
+        "the final sweep must still have run: {:?}",
+        rep.coverage
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn endurance_delay_advances_the_paused_clock() {
+    let (bank, _log) = Bank::new(1, Behavior::Good);
+    let (ctx, world) = bank_env(1).await.unwrap();
+    let mut r = Runner::endurance(bank, 131);
+    r.setup(ctx, world);
+    let start = tokio::time::Instant::now();
+    let rep = r
+        .run(
+            EnduranceConfig::new(Duration::from_secs(30))
+                .base_delay(Duration::from_millis(500))
+                .check_every(0)
+                .max_ops(3),
+        )
+        .await;
+    assert!(rep.passed(), "{:?}", rep.failure);
+    assert_eq!(rep.steps, 3);
+    assert!(
+        start.elapsed() >= Duration::from_millis(1500),
+        "virtual clock should have advanced by base_delay * steps, elapsed = {:?}",
+        start.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn endurance_check_every_zero_disables_mid_run_sweep_but_final_sweep_still_runs() {
+    // `DriftAfter(0)` perturbs the model on the very first applied op, deterministically breaking
+    // `ModelMatches` from then on regardless of which op the endurance draw landed on. With
+    // `check_every = 0` no mid-run sweep can catch it, but the final sweep must.
+    let (bank, _log) = Bank::new(2, Behavior::DriftAfter(0));
+    let (ctx, world) = bank_env(2).await.unwrap();
+    let mut r = Runner::endurance(bank, 137);
+    r.setup(ctx, world);
+    let rep = r
+        .run(
+            EnduranceConfig::new(Duration::from_secs(5))
+                .check_every(0)
+                .max_ops(5),
+        )
+        .await;
+    assert!(
+        !rep.passed(),
+        "the final sweep must catch the drift the mid-run cadence missed"
+    );
+    let f = rep.failure.unwrap();
+    assert_eq!(f.step, 5, "the sweep only runs after every op has applied");
+    assert!(matches!(f.kind, FailureKind::Invariant { .. }), "{:?}", f.kind);
 }
 
 #[tokio::test]

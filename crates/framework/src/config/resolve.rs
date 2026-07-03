@@ -54,6 +54,11 @@ pub struct RunOptions {
     /// `--no-shrink`: force-disables auto-shrink regardless of the profile's own `shrink` key
     /// or mode default.
     pub no_shrink: bool,
+    /// Cooperative cancellation flag for an endurance run, checked at the top of the endurance
+    /// driver's loop (never around an in-flight `apply`). The CLI wires this to a ctrl-c signal
+    /// task; `resolve_profile` never reads it (it is consumed by the registry's endurance run
+    /// arm). `None` (the default) means an endurance run never stops early by signal.
+    pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// A profile resolved into a runnable shape: selection-filtered chain specs with parsed enums

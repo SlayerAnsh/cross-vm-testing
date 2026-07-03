@@ -13,6 +13,8 @@
 //! shell as a `#[runner]` argument and fan fuzz out into one `#[tokio::test]` per case.
 
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::{sleep, Instant};
@@ -59,8 +61,12 @@ pub trait Sequential: RunMode {}
 impl Sequential for Fuzz {}
 impl Sequential for Invariant {}
 
-/// Knobs for [`EnduranceRunner::run`] (the only driver with more than one tuning parameter).
+/// Knobs for [`EnduranceRunner::run`] / [`EnduranceRunner::run_with`] (the only drivers with more
+/// than one tuning parameter). `#[non_exhaustive]`: build one with [`EnduranceConfig::new`] and
+/// its builder methods, never a struct literal, so new fields (this task added four) never break
+/// downstream construction.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EnduranceConfig {
     /// Wall-clock duration to run for.
     pub duration: Duration,
@@ -75,11 +81,28 @@ pub struct EnduranceConfig {
     pub advance_blocks: Option<u64>,
     /// Add up to this many extra random blocks per advance.
     pub block_jitter: u64,
+    /// Stop after this many applied operations, regardless of `duration`. Whichever bound (this
+    /// or `duration`) is hit first ends the run. `None` (the default) means op count never
+    /// bounds the run.
+    pub max_ops: Option<usize>,
+    /// Consecutive [`FailureKind::Infra`] failures tolerated before the run fails: the streak
+    /// resets to zero on the next success and the run only fails once the streak exceeds this
+    /// count. Defaults to `0`, preserving today's behavior of failing on the first `Infra`.
+    pub max_consecutive_infra: usize,
+    /// Cadence for a periodic `info`-level progress log (steps, coverage, stats snapshot).
+    /// `Duration::ZERO` disables it. Defaults to 60 seconds.
+    pub heartbeat: Duration,
+    /// Cooperative cancellation flag, checked at the top of every loop iteration (never
+    /// interrupts an in-flight `apply`). `None` (the default) means the run never stops early by
+    /// signal; the `cli`-feature CLI's ctrl-c handling sets this via `RunOptions::stop`
+    /// (`crate::config`, only compiled under the `cli` feature).
+    pub stop: Option<Arc<AtomicBool>>,
 }
 
 impl EnduranceConfig {
     /// A config running for `duration` with sensible defaults (check after each op, no delay, no
-    /// block progression).
+    /// block progression, no op-count bound, fail on the first `Infra`, a 60s heartbeat, no
+    /// cancellation flag).
     pub fn new(duration: Duration) -> Self {
         Self {
             duration,
@@ -88,6 +111,10 @@ impl EnduranceConfig {
             check_every: 1,
             advance_blocks: None,
             block_jitter: 0,
+            max_ops: None,
+            max_consecutive_infra: 0,
+            heartbeat: Duration::from_secs(60),
+            stop: None,
         }
     }
 
@@ -113,6 +140,33 @@ impl EnduranceConfig {
     pub fn advance_blocks(mut self, base: u64, jitter: u64) -> Self {
         self.advance_blocks = Some(base);
         self.block_jitter = jitter;
+        self
+    }
+
+    /// Bound the run by operation count in addition to (or instead of) `duration`: whichever
+    /// bound is hit first stops the run.
+    pub fn max_ops(mut self, n: usize) -> Self {
+        self.max_ops = Some(n);
+        self
+    }
+
+    /// Tolerate up to `n` consecutive `Infra` failures (the streak resets on the next success)
+    /// before the run fails.
+    pub fn max_consecutive_infra(mut self, n: usize) -> Self {
+        self.max_consecutive_infra = n;
+        self
+    }
+
+    /// Set the periodic progress-log cadence; `Duration::ZERO` disables it.
+    pub fn heartbeat(mut self, d: Duration) -> Self {
+        self.heartbeat = d;
+        self
+    }
+
+    /// Wire a cooperative cancellation flag: checked at the top of every loop iteration, never
+    /// around an in-flight `apply`.
+    pub fn stop(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.stop = Some(flag);
         self
     }
 }
@@ -375,10 +429,44 @@ impl<H: Harness, M: Sequential> Runner<H, M> {
 // ----- endurance driver -----
 
 impl<H: Harness> Runner<H, Endurance> {
-    /// Apply random operations at random delays until `cfg.duration` elapses, optionally advancing
-    /// blocks between ops, then run a final invariant sweep that catches drift since the last
-    /// mid-run check.
+    /// Apply random operations at random delays until `cfg.duration` and/or `cfg.max_ops` is hit,
+    /// optionally advancing blocks between ops, then run a final invariant sweep that catches
+    /// drift since the last mid-run check. Draws every op via [`Harness::generate`] (a harness
+    /// `generate` override still applies). Sugar over [`run_with`](Runner::run_with):
+    /// `self.run_with(cfg, KindMix::Harness).await`, which is also what keeps this method's op
+    /// stream byte-identical to every release before `run_with` existed (see `run_with`'s docs).
     pub async fn run(&mut self, cfg: EnduranceConfig) -> RunReport<H::Operation> {
+        self.run_with(cfg, KindMix::Harness).await
+    }
+
+    /// Apply operations at random delays, drawing each op's kind (and then its data) according to
+    /// `mix`, until `cfg.duration` and/or `cfg.max_ops` is hit, optionally advancing blocks
+    /// between ops, then run a final invariant sweep that catches drift since the last mid-run
+    /// check.
+    ///
+    /// **Compatibility**: [`KindMix::Harness`] routes through the crate-private `OpSource`'s
+    /// `Generated { kinds: None, .. }` shape, whose `next()` calls `harness.generate(rng, world)`
+    /// — the exact draw [`run`](Runner::run) has always made. The per-iteration rng draw order is
+    /// also unchanged: op draw (`source.next`), then block-advance jitter (`rng.below`), then
+    /// delay jitter (`rng.below`); `apply`/`check` never touch the rng (it is only ever drawn
+    /// from `OpSource::next`/`Harness::generate`). So for `KindMix::Harness` with `cfg.max_ops =
+    /// None`, a recorded seed reproduces exactly the sequence it always has — `max_ops` only adds
+    /// a second, independent stop condition (`remaining = cfg.max_ops.unwrap_or(usize::MAX)` on
+    /// the same `OpSource` fuzz/invariant already use) and does not perturb the draw itself.
+    ///
+    /// A [`FailureKind::Infra`] is tolerated (the op still counts, block-advance and the inter-op
+    /// delay still run, and the loop continues) while the consecutive-Infra streak stays below
+    /// `cfg.max_consecutive_infra`; a success resets the streak to zero; any other failure kind,
+    /// or an `Infra` once the streak is exhausted, ends the run immediately (skipping the final
+    /// sweep, like every other driver's failure exit). `cfg.stop`, when set, is polled at the top
+    /// of every iteration (never around an in-flight `apply`) — when it flips, the loop breaks,
+    /// the final sweep still runs, and the report is a pass ("stopped by signal" is logged, not
+    /// treated as a failure).
+    pub async fn run_with(
+        &mut self,
+        cfg: EnduranceConfig,
+        mix: KindMix<'_, H::OpKind>,
+    ) -> RunReport<H::Operation> {
         let EnduranceConfig {
             duration,
             base_delay,
@@ -386,6 +474,10 @@ impl<H: Harness> Runner<H, Endurance> {
             check_every,
             advance_blocks,
             block_jitter,
+            max_ops,
+            max_consecutive_infra,
+            heartbeat,
+            stop,
         } = cfg;
         let Self {
             harness,
@@ -405,16 +497,72 @@ impl<H: Harness> Runner<H, Endurance> {
         }
         let mut builder = ReportBuilder::new(seed, Endurance::LABEL, harness);
 
-        let report = 'run: {
-            let deadline = Instant::now() + duration;
-            let mut steps = 0usize;
+        let remaining = max_ops.unwrap_or(usize::MAX);
+        let mut source = match mix {
+            // `kinds: None` is the exact shape `Runner::run` has always built; `next()` calls
+            // `harness.generate` directly, so the draw stream is unchanged (see this method's
+            // doc comment).
+            KindMix::Harness => OpSource::Generated {
+                kinds: None,
+                remaining,
+            },
+            // Same empty-mix guard fuzz/invariant use: surface an infra failure instead of
+            // panicking inside the rng.
+            KindMix::Restricted([]) => {
+                let report = empty_mix_report(builder);
+                log_summary(&report, stats.as_ref());
+                return report;
+            }
+            KindMix::Restricted(ks) => OpSource::Generated {
+                kinds: Some(ks),
+                remaining,
+            },
+            KindMix::Weighted(pairs)
+                if pairs.is_empty()
+                    || pairs.iter().map(|&(_, w)| w as u64).sum::<u64>() == 0 =>
+            {
+                let report = empty_mix_report(builder);
+                log_summary(&report, stats.as_ref());
+                return report;
+            }
+            KindMix::Weighted(pairs) => {
+                let (kinds, weights) = pairs.iter().copied().unzip();
+                OpSource::Weighted {
+                    kinds,
+                    weights,
+                    remaining,
+                }
+            }
+        };
 
-            while Instant::now() < deadline {
-                let op = harness.generate(rng, world);
+        let report = 'run: {
+            let started = Instant::now();
+            let deadline = started + duration;
+            let mut steps = 0usize;
+            let mut infra_streak = 0usize;
+            let mut last_heartbeat = started;
+            let mut stopped_by_signal = false;
+
+            loop {
+                // Cooperative cancellation: polled only here, at the top of the loop, never
+                // around an in-flight `apply` (a wallet lock or broadcast is never severed).
+                if stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
+                    tracing::info!(steps, "endurance stopped by signal");
+                    stopped_by_signal = true;
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                // `max_ops` bound: `source` starts with `remaining = max_ops.unwrap_or(MAX)` and
+                // yields `None` once exhausted.
+                let Some(op) = source.next(harness, rng, world) else {
+                    break;
+                };
                 builder.history.push(op.clone());
                 steps += 1;
                 let do_check = check_every > 0 && steps.is_multiple_of(check_every);
-                if let Err(kind) = step(
+                match step(
                     harness,
                     ctx,
                     world,
@@ -425,7 +573,23 @@ impl<H: Harness> Runner<H, Endurance> {
                 )
                 .await
                 {
-                    break 'run builder.fail(steps, Some(op), kind);
+                    Ok(()) => infra_streak = 0,
+                    // Tolerated: the streak grows but stays under the ceiling. Falls through to
+                    // the same block-advance/heartbeat/delay code a success runs, so a tolerated
+                    // Infra still costs one op's worth of pacing.
+                    Err(FailureKind::Infra(e)) if infra_streak < max_consecutive_infra => {
+                        infra_streak += 1;
+                        tracing::warn!(
+                            streak = infra_streak,
+                            max = max_consecutive_infra,
+                            error = %e,
+                            "endurance tolerating infra failure"
+                        );
+                    }
+                    // Any other failure kind, or an Infra once the streak is exhausted (including
+                    // the `max_consecutive_infra == 0` default, where the guard above never
+                    // holds): fail immediately, matching every other driver's failure exit.
+                    Err(kind) => break 'run builder.fail(steps, Some(op), kind),
                 }
 
                 if let Some(base) = advance_blocks {
@@ -440,6 +604,18 @@ impl<H: Harness> Runner<H, Endurance> {
                     }
                 }
 
+                if !heartbeat.is_zero() && last_heartbeat.elapsed() >= heartbeat {
+                    tracing::info!(
+                        steps,
+                        elapsed = ?started.elapsed(),
+                        infra_streak,
+                        coverage = ?builder.coverage,
+                        stats = ?stats.as_ref(),
+                        "endurance heartbeat"
+                    );
+                    last_heartbeat = Instant::now();
+                }
+
                 let jitter = if max_delay.is_zero() {
                     0
                 } else {
@@ -451,12 +627,16 @@ impl<H: Harness> Runner<H, Endurance> {
                 }
             }
 
-            // Final invariant sweep: catches drift accumulated since the last mid-run check.
+            // Final invariant sweep: catches drift accumulated since the last mid-run check, and
+            // still runs whether the loop stopped on the deadline, `max_ops`, or a signal.
             if let Err(kind) = sweep(harness, ctx, world, &mut builder.coverage).await {
                 let last = builder.history.last().cloned();
                 break 'run builder.fail(steps, last, kind);
             }
 
+            if stopped_by_signal {
+                tracing::info!(steps, "endurance stopped by signal after {steps} ops");
+            }
             builder.pass(steps)
         };
         log_summary(&report, stats.as_ref());
