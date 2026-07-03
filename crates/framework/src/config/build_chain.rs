@@ -368,10 +368,19 @@ mod tests {
             panic!("bad spec_id must error");
         };
         let msg = err.to_string();
-        assert!(msg.contains("cancn"), "message should echo the bad input: {msg}");
+        assert!(
+            msg.contains("cancn"),
+            "message should echo the bad input: {msg}"
+        );
         // The message must list the valid hardfork names so the user can self-correct.
-        assert!(msg.contains("cancun"), "message should list valid names: {msg}");
-        assert!(msg.contains("prague"), "message should list valid names: {msg}");
+        assert!(
+            msg.contains("cancun"),
+            "message should list valid names: {msg}"
+        );
+        assert!(
+            msg.contains("prague"),
+            "message should list valid names: {msg}"
+        );
     }
 
     #[cfg(feature = "tron")]
@@ -383,9 +392,18 @@ mod tests {
             panic!("bad spec_id must error");
         };
         let msg = err.to_string();
-        assert!(msg.contains("cancn"), "message should echo the bad input: {msg}");
-        assert!(msg.contains("cancun"), "message should list valid names: {msg}");
-        assert!(msg.contains("prague"), "message should list valid names: {msg}");
+        assert!(
+            msg.contains("cancn"),
+            "message should echo the bad input: {msg}"
+        );
+        assert!(
+            msg.contains("cancun"),
+            "message should list valid names: {msg}"
+        );
+        assert!(
+            msg.contains("prague"),
+            "message should list valid names: {msg}"
+        );
     }
 
     #[cfg(feature = "solana")]
@@ -398,11 +416,23 @@ mod tests {
         };
         let msg = err.to_string();
         // Quoted form so this does not trivially pass on the "finalized" in the valid list.
-        assert!(msg.contains("\"final\""), "message should echo the bad input: {msg}");
+        assert!(
+            msg.contains("\"final\""),
+            "message should echo the bad input: {msg}"
+        );
         // The message must list the valid commitment names so the user can self-correct.
-        assert!(msg.contains("finalized"), "message should list valid names: {msg}");
-        assert!(msg.contains("confirmed"), "message should list valid names: {msg}");
-        assert!(msg.contains("processed"), "message should list valid names: {msg}");
+        assert!(
+            msg.contains("finalized"),
+            "message should list valid names: {msg}"
+        );
+        assert!(
+            msg.contains("confirmed"),
+            "message should list valid names: {msg}"
+        );
+        assert!(
+            msg.contains("processed"),
+            "message should list valid names: {msg}"
+        );
     }
 
     #[cfg(any(feature = "evm", feature = "tron"))]

@@ -1436,7 +1436,12 @@ kinds = ["Boom"]
         // This run fails on `Boom`, so `run_selected` writes a replay artifact; pin its dir to a
         // gitignored `tests_result` path so it never leaks into the source-tree `target/cross-vm`.
         let args = RunArgs {
-            artifacts_dir: Some(temp_artifacts_dir("bug-is-one").to_str().unwrap().to_string()),
+            artifacts_dir: Some(
+                temp_artifacts_dir("bug-is-one")
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            ),
             ..Default::default()
         };
         assert_eq!(cli.run_with_config(&cfg, &args).await, 1);

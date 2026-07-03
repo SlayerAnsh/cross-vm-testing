@@ -20,8 +20,8 @@ use super::bridge::{read_string, read_u64, write_string, write_u64};
 // the wrapper body below stay unchanged while sourcing every ABI, message type, and Solana
 // constant from the one shared place. `evm_pp` is re-exported publicly so the bridge's event
 // parser can reuse the generated `SolEvent` types.
-use cross_vm_common::mocks::ping_pong::{cw as cosmos_pp, svm, tron as tron_pp};
 pub use cross_vm_common::mocks::ping_pong::evm as evm_pp;
+use cross_vm_common::mocks::ping_pong::{cw as cosmos_pp, svm, tron as tron_pp};
 
 const SOLANA_PROGRAM_ID: &str = svm::PROGRAM_ID;
 const DISC_INITIALIZE: [u8; 8] = svm::DISC_INITIALIZE;

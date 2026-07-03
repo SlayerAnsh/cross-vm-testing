@@ -36,7 +36,12 @@ fn validate_passes_on_the_counter_config() {
 #[test]
 fn list_reports_the_counter_harness() {
     let out = cross_vm(&["list", config_path().to_str().unwrap()]);
-    assert_eq!(exit_code(&out), 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]

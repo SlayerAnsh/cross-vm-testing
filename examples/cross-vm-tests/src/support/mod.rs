@@ -10,6 +10,4 @@ pub use vault::Vault;
 // Wallet/funding helpers and the tracing initializer now live in `cross-vm-common` (shared by all
 // example test crates); re-exported here so existing `support::` call-sites compile unchanged.
 pub use cross_vm_common::init_tracing;
-pub use cross_vm_common::wallets::{
-    empty_wallets, fund_alice, fund_evm, fund_user, test_wallets,
-};
+pub use cross_vm_common::wallets::{empty_wallets, fund_alice, fund_evm, fund_user, test_wallets};

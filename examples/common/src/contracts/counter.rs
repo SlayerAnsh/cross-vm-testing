@@ -124,7 +124,9 @@ impl Counter {
         let chain = self.base.evm()?;
         let addr = self.base.evm_addr()?;
         let calldata = Bytes::from(evm_counter::Counter::incrementCall {}.abi_encode());
-        let exec = chain.call(&addr, calldata, WalletLabel::wrap(wallet)).await?;
+        let exec = chain
+            .call(&addr, calldata, WalletLabel::wrap(wallet))
+            .await?;
         Ok(AppResponse::evm((), exec.output, exec.logs))
     }
 
@@ -172,7 +174,9 @@ impl Counter {
         let chain = self.base.tron()?;
         let addr = self.base.tron_addr()?;
         let calldata = Bytes::from(tron_counter::Counter::incrementCall {}.abi_encode());
-        let exec = chain.call(&addr, calldata, WalletLabel::wrap(wallet)).await?;
+        let exec = chain
+            .call(&addr, calldata, WalletLabel::wrap(wallet))
+            .await?;
         Ok(AppResponse::tron((), exec.output, exec.logs))
     }
 
