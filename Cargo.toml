@@ -10,6 +10,8 @@ members = [
     "crates/tron",
     "crates/framework",
     "crates/macros",
+    # Reusable contract bindings (mocks) + shared test helpers for the example test crates.
+    "examples/common",
     # Multi-chain integration & example tests, co-located with the contract artifacts they embed.
     "examples/integration-tests",
 ]

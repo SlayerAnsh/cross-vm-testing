@@ -1,0 +1,41 @@
+[package]
+name = "cross-vm-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reusable contract bindings (mocks) and shared helpers for the example test crates"
+publish = false
+
+[features]
+# Empty by default so a bare `cargo check -p cross-vm-common` needs no built artifacts.
+default = []
+# CosmWasm bindings: message types + in-process `ContractWrapper` factories. No compiled artifact
+# needed (the contracts are consumed as rlib path-deps).
+cw = ["dep:counter", "dep:ping-pong", "dep:vault", "dep:cosmwasm-std", "dep:cw-multi-test"]
+# EVM ABI bindings + creation bytecode; needs `make compile-solidity` (forge artifacts under
+# contracts/solidity/out).
+evm = ["dep:alloy"]
+# Solana program ids, instruction discriminators, and embedded `.so`; needs `make compile-solana`
+# (cargo-build-sbf output under contracts/solana/target/deploy).
+solana = []
+# Tron ABI bindings + TVM creation bytecode; needs `make compile-tron` (tronbox build under
+# contracts/tron/build).
+tron = ["dep:alloy"]
+# Embedded counter.wasm for on-chain deploys. Separate from `cw` because the wasm is Docker-built
+# and gitignored (absent in CI); only on-chain flows (examples/scripts) enable it.
+cw-artifacts = ["cw"]
+
+[dependencies]
+# CosmWasm contract crates, consumed as host rlibs (not wasm). `counter` needs its `cross-vm`
+# feature for the `ExecuteMsgFns` / `QueryMsgFns` derives; vault / ping-pong use raw message enums.
+counter   = { path = "../../contracts/cosmwasm/counter", features = ["cross-vm"], optional = true }
+ping-pong = { path = "../../contracts/cosmwasm/ping-pong", optional = true }
+vault     = { path = "../../contracts/cosmwasm/vault", optional = true }
+cosmwasm-std  = { workspace = true, optional = true }
+cw-multi-test = { workspace = true, optional = true }
+alloy = { workspace = true, optional = true }
+
+[lints]
+workspace = true
