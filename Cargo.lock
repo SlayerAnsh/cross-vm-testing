@@ -2123,6 +2123,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosmos-tests"
+version = "0.1.0"
+dependencies = [
+ "cross-vm-common",
+ "cross-vm-framework",
+ "cross-vm-macros",
+ "rstest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "cosmrs"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7662,6 +7675,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "solana-tests"
+version = "0.1.0"
+dependencies = [
+ "cross-vm-common",
+ "cross-vm-framework",
+ "cross-vm-macros",
+ "cross-vm-solana",
+ "rstest",
+ "serde",
+ "serde_json",
+ "solana-instruction",
+ "solana-system-interface 2.0.0",
+ "tokio",
+]
+
+[[package]]
 name = "solana-transaction"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8504,6 +8533,21 @@ dependencies = [
  "sha1",
  "thiserror 2.0.18",
  "utf-8",
+]
+
+[[package]]
+name = "tvm-tests"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "cross-vm-common",
+ "cross-vm-framework",
+ "cross-vm-macros",
+ "cross-vm-tron",
+ "rstest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

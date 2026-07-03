@@ -14,6 +14,9 @@ members = [
     "examples/common",
     # Per-VM example test crates: one Counter harness each, driven three ways (harness/config/CLI).
     "examples/evm-tests",
+    "examples/cosmos-tests",
+    "examples/solana-tests",
+    "examples/tvm-tests",
     # Multi-chain integration & example tests, co-located with the contract artifacts they embed.
     "examples/cross-vm-tests",
 ]
