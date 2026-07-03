@@ -3,8 +3,8 @@
 //!
 //! `main` wraps each target chain in an `AnyChain` and runs one identical `setup -> increment ->
 //! count` flow ([`run`]); the `#[cross_vm_contract]` macro dispatches each call to the matching VM
-//! hook at runtime. The logical contract and its per-VM hooks live in [`contract`]; the embedded
-//! artifacts in [`artifacts`].
+//! hook at runtime. The logical contract and its per-VM hooks live in [`contract`]; the contract
+//! bindings come from `cross_vm_common::mocks`.
 //!
 //! Prerequisites (artifacts embedded at compile time; wallet funded at run time):
 //!   make compile-solidity   # contracts/solidity/out/Counter.sol/Counter.json
@@ -16,7 +16,6 @@
 //! Run:
 //!   cargo run --manifest-path examples/scripts/Cargo.toml --bin deploy_counter
 
-mod artifacts;
 mod contract;
 
 use std::rc::Rc;
