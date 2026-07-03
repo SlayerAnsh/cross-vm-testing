@@ -36,7 +36,7 @@ jobs:
       MNEMONIC_TEST: ${{ secrets.MNEMONIC_TEST }}
       ON_CHAIN_WALLET: ${{ secrets.ON_CHAIN_WALLET }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check secrets
         id: secrets
         run: |
