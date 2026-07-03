@@ -31,3 +31,6 @@ artifacts/
 
 # AI
 .claude/
+# Stray per-crate target dirs (e.g. replay artifacts written to <crate>/target/cross-vm by CLI e2e tests)
+crates/*/target/
+examples/integration-tests/target/
