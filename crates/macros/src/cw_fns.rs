@@ -1,7 +1,8 @@
 //! CosmWasm typed message-handle derives: `CwExecuteFns` and `CwQueryFns`.
 //!
 //! Both run on an `ExecuteMsg` / `QueryMsg` enum in the contract crate and generate a local
-//! `pub trait <Name>Fns` plus an `impl` of it for `::cross_vm_cosmwasm::CwContract`, one method
+//! `pub trait <Name>Fns` plus an `impl` of it for `::cross_vm_cosmwasm::CwContract<I>` where
+//! `I: CwInterface<ExecuteMsg = ThisEnum>` (or `QueryMsg = ThisEnum`), one method
 //! per variant. Generated code uses absolute paths (`::cross_vm_cosmwasm::*`,
 //! `::cosmwasm_std::Coin`) so the contract crate needs no imports beyond the deps it gains under
 //! its `cross-vm` feature.
@@ -57,7 +58,8 @@ pub fn expand_execute_fns(input: DeriveInput) -> syn::Result<TokenStream> {
         pub trait #trait_ident {
             #(#sigs)*
         }
-        impl #trait_ident for ::cross_vm_cosmwasm::CwContract {
+        impl<I: ::cross_vm_cosmwasm::CwInterface<ExecuteMsg = #enum_ident>> #trait_ident
+            for ::cross_vm_cosmwasm::CwContract<I> {
             #(#methods)*
         }
     })
@@ -93,7 +95,8 @@ pub fn expand_query_fns(input: DeriveInput) -> syn::Result<TokenStream> {
         pub trait #trait_ident {
             #(#sigs)*
         }
-        impl #trait_ident for ::cross_vm_cosmwasm::CwContract {
+        impl<I: ::cross_vm_cosmwasm::CwInterface<QueryMsg = #enum_ident>> #trait_ident
+            for ::cross_vm_cosmwasm::CwContract<I> {
             #(#methods)*
         }
     })
@@ -223,7 +226,8 @@ mod tests {
     fn execute_one_method_per_variant_snake_cased() {
         let out = exec("enum ExecuteMsg { Increment {}, Reset {} }").unwrap();
         assert!(out.contains("trait ExecuteMsgFns"));
-        assert!(out.contains("for :: cross_vm_cosmwasm :: CwContract"));
+        assert!(out.contains("for :: cross_vm_cosmwasm :: CwContract < I >"));
+        assert!(out.contains("CwInterface < ExecuteMsg = ExecuteMsg >"));
         assert!(out.contains("fn increment"));
         assert!(out.contains("fn reset"));
         // Non-payable: no funds and the plain execute path.
@@ -251,6 +255,8 @@ mod tests {
     fn query_uses_returns_type_and_no_wallet() {
         let out = query("enum QueryMsg { #[returns(CountResponse)] GetCount {} }").unwrap();
         assert!(out.contains("trait QueryMsgFns"));
+        assert!(out.contains("for :: cross_vm_cosmwasm :: CwContract < I >"));
+        assert!(out.contains("CwInterface < QueryMsg = QueryMsg >"));
         assert!(out.contains("fn get_count"));
         assert!(out.contains("CountResponse"));
         // Queries are unsigned: no wallet arg.
@@ -299,7 +305,8 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains("trait CrossVmExecuteFns"));
-        assert!(out.contains("impl CrossVmExecuteFns for"));
+        assert!(out.contains("CwInterface < ExecuteMsg = ExecuteMsg >"));
+        assert!(out.contains("CrossVmExecuteFns for :: cross_vm_cosmwasm :: CwContract < I >"));
         // The default name must not leak so it can coexist with cw-orch's `ExecuteMsgFns`.
         assert!(!out.contains("trait ExecuteMsgFns"));
     }

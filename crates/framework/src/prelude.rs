@@ -27,7 +27,9 @@ pub use cross_vm_macros::{
 #[cfg(feature = "cw")]
 pub use cross_vm_cosmwasm::chains::{COSMOS_HUB, JUNO, LOCAL as CW_LOCAL, NEUTRON, OSMOSIS};
 #[cfg(feature = "cw")]
-pub use cross_vm_cosmwasm::{CwAsset, CwChain, CwContract, CwMockProvider, CwRpcProvider, CwSerde};
+pub use cross_vm_cosmwasm::{
+    CwAsset, CwChain, CwContract, CwInterface, CwMockProvider, CwRpcProvider, CwSerde,
+};
 
 // EVM
 #[cfg(feature = "evm")]

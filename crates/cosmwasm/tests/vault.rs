@@ -55,7 +55,7 @@ async fn payable_deposit_attaches_funds_then_borrow_and_query() {
         )
         .await
         .expect("instantiate");
-    let vault = chain.contract(addr);
+    let vault = chain.contract_as::<vault::VaultContract>(addr);
 
     let before = chain.balance(&alice).await.expect("balance before");
     vault

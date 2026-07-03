@@ -6,10 +6,12 @@
 //! a failed execute (the rejection path a property test exercises). Identical LTV math across
 //! all three VMs lets one shadow model validate every chain.
 
-use cosmwasm_std::{Addr, Deps, DepsMut, Response, StdError, StdResult, Uint128};
+use cosmwasm_std::{
+    to_json_binary, Addr, Binary, Deps, DepsMut, Response, StdError, StdResult, Uint128,
+};
 
-use crate::msg::{AmountResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
-use crate::state::{COLLATERAL, DEBT};
+use crate::msg::{AmountResponse, ExecuteMsg, InstantiateMsg, QueryMsg, VersionResponse};
+use crate::state::{COLLATERAL, DEBT, VERSION};
 
 /// Loan-to-value, in basis points (5000 = 50%): max debt is `collateral * LTV_BPS / 10000`.
 const LTV_BPS: u128 = 5000;
@@ -42,6 +44,7 @@ pub fn execute(deps: DepsMut, sender: Addr, msg: ExecuteMsg) -> StdResult<Respon
         ExecuteMsg::Withdraw { amount } => withdraw(deps, sender, amount),
         ExecuteMsg::Borrow { amount } => borrow(deps, sender, amount),
         ExecuteMsg::Repay { amount } => repay(deps, sender, amount),
+        ExecuteMsg::SetVersion { version } => set_version(deps, version),
     }
 }
 
@@ -107,20 +110,32 @@ fn repay(deps: DepsMut, sender: Addr, amount: Uint128) -> StdResult<Response> {
         .add_attribute("amount", amount.to_string()))
 }
 
-/// Read a user's collateral or debt.
-pub fn query(deps: Deps, msg: QueryMsg) -> StdResult<AmountResponse> {
+/// Store the contract version.
+fn set_version(deps: DepsMut, version: u64) -> StdResult<Response> {
+    VERSION.save(deps.storage, &version)?;
+    Ok(Response::new()
+        .add_attribute("action", "set_version")
+        .add_attribute("version", version.to_string()))
+}
+
+/// Read a user's collateral or debt, or the stored version.
+pub fn query(deps: Deps, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::Collateral { who } => {
             let who = deps.api.addr_validate(&who)?;
-            Ok(AmountResponse {
+            to_json_binary(&AmountResponse {
                 amount: load(COLLATERAL, &deps, &who)?,
             })
         }
         QueryMsg::Debt { who } => {
             let who = deps.api.addr_validate(&who)?;
-            Ok(AmountResponse {
+            to_json_binary(&AmountResponse {
                 amount: load(DEBT, &deps, &who)?,
             })
+        }
+        QueryMsg::GetVersion {} => {
+            let version = VERSION.may_load(deps.storage)?.unwrap_or(0);
+            to_json_binary(&VersionResponse { version })
         }
     }
 }

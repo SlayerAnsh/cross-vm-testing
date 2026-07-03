@@ -29,7 +29,8 @@ cross-vm-macros.workspace = true
 # Load `.env` into the process environment for the live onchain test.
 dotenvy.workspace = true
 # The canonical counter contract from `examples/`, consumed as an rlib and wrapped in-process.
-counter = { path = "../../contracts/cosmwasm/contracts/counter" }
+# `cross-vm` on so its messages carry the typed-handle derives (needed for the collision test).
+counter = { path = "../../contracts/cosmwasm/contracts/counter", features = ["cross-vm"] }
 # The vault contract, with the `cross-vm` feature on so its messages carry the typed-handle
 # derives (exercises CwExecuteFns `#[payable]` + CwQueryFns end to end).
 vault = { path = "../../contracts/cosmwasm/contracts/vault", features = ["cross-vm"] }

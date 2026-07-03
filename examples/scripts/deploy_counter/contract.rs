@@ -27,7 +27,7 @@ impl Counter {
     async fn cw_setup(&self, wallet: &str) -> Result<(), CrossVmError> {
         // One stateful handle threads `code_id` then address through the lifecycle: `store_code`
         // records the code id internally, `instantiate` records the resulting address.
-        let contract = CwContract::new(self.base.cosmwasm()?.clone())
+        let contract = CwContract::<cw::CounterContract>::new(self.base.cosmwasm()?.clone())
             .store_code(COUNTER_WASM.to_vec(), WalletLabel::wrap(wallet))
             .await?
             .instantiate(
@@ -52,7 +52,7 @@ impl Counter {
         let raw = self
             .base
             .cosmwasm()?
-            .contract(self.base.cw_addr()?)
+            .contract_as::<cw::CounterContract>(self.base.cw_addr()?)
             .increment(wallet)
             .await?;
         Ok(AppResponse::cosmwasm((), raw))
@@ -63,7 +63,7 @@ impl Counter {
         let resp = self
             .base
             .cosmwasm()?
-            .contract(self.base.cw_addr()?)
+            .contract_as::<cw::CounterContract>(self.base.cw_addr()?)
             .get_count()
             .await?;
         Ok(resp.count)

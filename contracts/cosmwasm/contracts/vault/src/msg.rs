@@ -25,6 +25,9 @@ pub enum ExecuteMsg {
     Repay {
         amount: Uint128,
     },
+    SetVersion {
+        version: u64,
+    },
 }
 
 /// Read a user's collateral or debt by address.
@@ -36,6 +39,8 @@ pub enum QueryMsg {
     Collateral { who: String },
     #[cfg_attr(feature = "cross-vm", returns(AmountResponse))]
     Debt { who: String },
+    #[cfg_attr(feature = "cross-vm", returns(VersionResponse))]
+    GetVersion {},
 }
 
 /// A single `Uint128` amount, returned by both queries.
@@ -43,3 +48,12 @@ pub enum QueryMsg {
 pub struct AmountResponse {
     pub amount: Uint128,
 }
+
+/// The stored contract version.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct VersionResponse {
+    pub version: u64,
+}
+
+#[cfg(feature = "cross-vm")]
+cross_vm_macros::cross_vm_cw_interface!(pub VaultContract, InstantiateMsg, ExecuteMsg, QueryMsg);

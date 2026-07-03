@@ -18,6 +18,7 @@ use syn::{
 
 mod config_runner;
 mod cw_fns;
+mod cw_interface;
 mod runner_macros;
 mod wallet_roster;
 
@@ -42,9 +43,27 @@ pub fn cross_vm_contract(args: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Declare a zero-sized [`cross_vm_cosmwasm::CwInterface`] marker for one contract.
+///
+/// ```ignore
+/// cross_vm_cw_interface!(pub CounterContract, InstantiateMsg, ExecuteMsg, QueryMsg);
+/// ```
+///
+/// Emits the marker struct and a `CwInterface` impl that ties the three message types together.
+/// Typed `CwExecuteFns` / `CwQueryFns` impls are scoped to `CwContract<I>` where
+/// `I: CwInterface<ExecuteMsg = ...>` / `QueryMsg = ...`.
+#[proc_macro]
+pub fn cross_vm_cw_interface(input: TokenStream) -> TokenStream {
+    match cw_interface::expand(input.into()) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// Generate typed, per-variant execute methods from a CosmWasm `ExecuteMsg` enum.
 ///
-/// `#[derive(CwExecuteFns)]` emits a `pub trait <Name>Fns` and `impl <Name>Fns for CwContract`,
+/// `#[derive(CwExecuteFns)]` emits a `pub trait <Name>Fns` and
+/// `impl <Name>Fns for CwContract<I>` where `I: CwInterface<ExecuteMsg = ThisEnum>`,
 /// one `async fn` per variant (snake_cased; named fields become args; tuple fields become
 /// positional `arg0`, `arg1`, ... args). A variant marked
 /// `#[payable]` gains a trailing `funds: &[Coin]` arg routed through `execute_with_funds`.
@@ -160,7 +179,8 @@ pub fn config_runner(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Generate typed, per-variant query methods from a CosmWasm `QueryMsg` enum.
 ///
-/// `#[derive(CwQueryFns)]` emits a `pub trait <Name>Fns` and `impl <Name>Fns for CwContract`,
+/// `#[derive(CwQueryFns)]` emits a `pub trait <Name>Fns` and
+/// `impl <Name>Fns for CwContract<I>` where `I: CwInterface<QueryMsg = ThisEnum>`,
 /// one `async fn` per variant returning the variant's `#[returns(T)]` type (named fields become
 /// args; tuple fields become positional `arg0`, `arg1`, ... args). Every variant must
 /// carry `#[returns(T)]`.

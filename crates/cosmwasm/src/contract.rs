@@ -1,22 +1,26 @@
 //! A CosmWasm contract handle that threads `code_id` and address through the deploy lifecycle.
 //!
-//! [`CwContract`] removes the address-passing boilerplate from contract calls. It is also the
-//! receiver the `CwExecuteFns` / `CwQueryFns` derives (in `cross-vm-macros`) generate typed,
-//! per-variant methods for, so a caller writes `contract.increment(wallet)` instead of building
-//! an `ExecuteMsg` and naming the address.
+//! [`CwContract`] removes the address-passing boilerplate from contract calls. Typed per-contract
+//! methods come from `CwExecuteFns` / `CwQueryFns` derives scoped to a [`CwInterface`] marker:
+//! `chain.contract_as::<CounterContract>(addr).increment(wallet)` only resolves when the handle
+//! carries the matching interface type.
 //!
 //! A handle can start unbound and walk the full lifecycle, carrying `code_id` then address
 //! internally (cw-orch style):
 //!
 //! ```ignore
-//! let counter = CwContract::new(chain)
+//! let counter = CwContract::<CounterContract>::new(chain)
 //!     .store_code(wasm, wallet).await?       // stores code_id internally
 //!     .instantiate(msg, wallet, &[], "counter").await?;  // stores address internally
 //! counter.increment(wallet.as_str()).await?; // typed call, no address passing
 //! let n = counter.get_count().await?.count;
 //! ```
 //!
-//! or bind to an already-deployed address with [`CwContract::bound`] (via [`CwChain::contract`]).
+//! For dynamic message construction (no typed `*Fns` in scope), bind with
+//! [`CwChain::contract`] to get an untyped [`CwContract<()>`] and call
+//! [`execute`](Self::execute) / [`query`](Self::query) directly.
+
+use std::marker::PhantomData;
 
 use cosmwasm_std::{Addr, Coin};
 use cross_vm_core::WalletLabel;
@@ -26,19 +30,37 @@ use crate::error::CwError;
 use crate::msg::CwSerde;
 use crate::CwAppResponse;
 
+/// Compile-time marker tying a CosmWasm contract's message types to a zero-sized handle tag.
+///
+/// Declare one per contract with [`cross_vm_macros::cross_vm_cw_interface`]; typed
+/// `CwExecuteFns` / `CwQueryFns` impls are scoped to `CwContract<I>` where
+/// `I: CwInterface<ExecuteMsg = ...>` / `I: CwInterface<QueryMsg = ...>`.
+pub trait CwInterface {
+    /// The contract's instantiate message type.
+    type InstantiateMsg: CwSerde;
+    /// The contract's execute message type.
+    type ExecuteMsg: CwSerde;
+    /// The contract's query message type.
+    type QueryMsg: CwSerde;
+}
+
 /// A [`CwChain`] plus the deploy state (`code_id`, address) of one contract.
+///
+/// The type parameter `I` is a zero-sized [`CwInterface`] marker that scopes typed `*Fns`
+/// methods to this contract. Use `I = ()` for an untyped handle (dynamic `execute` / `query`).
 ///
 /// Cheap to construct: `CwChain` is `Rc`-backed, so the handle owns a clone and shares the
 /// underlying chain state. `code_id` is set by [`store_code`](Self::store_code) and the address by
 /// [`instantiate`](Self::instantiate); both are `None` on a fresh unbound handle.
 #[derive(Clone)]
-pub struct CwContract {
+pub struct CwContract<I = ()> {
     chain: CwChain,
     code_id: Option<u64>,
     addr: Option<Addr>,
+    _marker: PhantomData<I>,
 }
 
-impl CwContract {
+impl<I> CwContract<I> {
     /// A fresh, unbound handle on `chain`: no stored code, no address. Walk the lifecycle with
     /// [`store_code`](Self::store_code) then [`instantiate`](Self::instantiate).
     pub fn new(chain: CwChain) -> Self {
@@ -46,6 +68,7 @@ impl CwContract {
             chain,
             code_id: None,
             addr: None,
+            _marker: PhantomData,
         }
     }
 
@@ -55,6 +78,7 @@ impl CwContract {
             chain,
             code_id: None,
             addr: Some(addr),
+            _marker: PhantomData,
         }
     }
 

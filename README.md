@@ -136,7 +136,10 @@ impl Counter {
     async fn cw_increment(&self, wallet: &str) -> Result<AppResponse<()>, CrossVmError> {
         let chain = self.base.cosmwasm()?;          // typed handle, WrongVm on mismatch
         let addr  = self.base.cw_addr()?;           // typed deployed address
-        let raw = chain.contract(addr).increment(wallet).await?;   // typed call (see below)
+        let raw = chain
+            .contract_as::<CounterContract>(addr)
+            .increment(wallet)
+            .await?;   // typed call (see below)
         Ok(AppResponse::cosmwasm((), raw))          // typed payload + raw per-VM result
     }
     // evm_increment / svm_increment own their native encoding the same way.
@@ -147,7 +150,12 @@ A call site brings the spec trait into scope (`use ...::CounterSpec;`) to reach 
 
 **Typed CosmWasm calls.** Instead of hand building `ExecuteMsg` / `query_wasm_smart`, derive `CwExecuteFns` / `CwQueryFns` on the contract's message enums (behind a `cross-vm` feature so the wasm build stays clean):
 
+Declare a per-contract marker with `cross_vm_cw_interface!` (cw-orch's `#[interface]` analogue), then derive the handles:
+
 ```rust
+#[cfg(feature = "cross-vm")]
+cross_vm_macros::cross_vm_cw_interface!(pub CounterContract, InstantiateMsg, ExecuteMsg, QueryMsg);
+
 #[derive(Serialize, Deserialize, /* ... */)]
 #[cfg_attr(feature = "cross-vm", derive(cross_vm_macros::CwExecuteFns))]
 pub enum ExecuteMsg {
@@ -163,7 +171,7 @@ pub enum QueryMsg {
 }
 ```
 
-That emits `ExecuteMsgFns` / `QueryMsgFns` traits implemented for `CwContract`, one typed `async fn` per variant: `chain.contract(addr).increment(wallet)` and `chain.contract(addr).get_count()`. Named or tuple variant fields become method args (tuple fields as positional `arg0`, `arg1`, ...); query variants need `#[returns(T)]`; a variant marked `#[payable]` gains a trailing `funds: &[Coin]` arg. Add `#[cross_vm(trait_name = "...")]` on the enum to rename the generated trait, e.g. to run alongside cw-orch's `ExecuteFns` / `QueryFns` without a name clash. EVM gets typed calls from `alloy::sol!`; Solana has no schema, so its hooks stay hand written.
+That emits `ExecuteMsgFns` / `QueryMsgFns` traits implemented for `CwContract<I>` where `I: CwInterface<ExecuteMsg = ...>` / `QueryMsg = ...`, one typed `async fn` per variant: `chain.contract_as::<CounterContract>(addr).increment(wallet)` and `.get_count()`. Named or tuple variant fields become method args (tuple fields as positional `arg0`, `arg1`, ...); query variants need `#[returns(T)]`; a variant marked `#[payable]` gains a trailing `funds: &[Coin]` arg. Add `#[cross_vm(trait_name = "...")]` on the enum to rename the generated trait, e.g. to run alongside cw-orch's `ExecuteFns` / `QueryFns` without a name clash. For dynamic message construction (no typed `*Fns`), use the untyped `chain.contract(addr)` handle (`CwContract<()>`) and call `execute` / `query` directly. EVM gets typed calls from `alloy::sol!`; Solana has no schema, so its hooks stay hand written.
 
 **Transaction hooks.** A wrapper can run side logic (an indexer, a bridge relay, an event listener) before and after each transaction. Register with `on_before` / `on_after`; the dispatcher fires them around the per VM execution. An after hook receives the uniform `AppResponse`, so it reacts to the result independent of the VM:
 
@@ -260,6 +268,7 @@ Two honest v1 limits remain in the mock. The mock's `CREATE` / `CREATE2` use rev
 | Macro | Kind | Purpose |
 | --- | --- | --- |
 | `#[cross_vm_contract(Name)]` | attribute | Turn a spec trait into a contract wrapper that dispatches each method to the matching `cw_*` / `evm_*` / `svm_*` / `tron_*` hook |
+| `cross_vm_cw_interface!` | function-like | Declare a zero-sized `CwInterface` marker for one contract (scopes typed `*Fns` to `CwContract<I>`) |
 | `#[derive(CwExecuteFns)]` | derive | Typed per variant `async fn` execute methods from a CosmWasm `ExecuteMsg` enum (named or tuple fields become args; `#[payable]` adds a `funds` arg) |
 | `#[derive(CwQueryFns)]` | derive | Typed per variant `async fn` query methods from a `QueryMsg` enum (each variant needs `#[returns(T)]`) |
 | `define_wallet_roster!` | function-like | Compile time wallet roster with typed `WalletLabel` fields |

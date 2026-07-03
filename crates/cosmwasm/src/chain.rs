@@ -63,9 +63,15 @@ impl From<CwRpcProvider> for CwChain {
 }
 
 impl CwChain {
-    /// Bind this chain to a deployed contract `addr`, returning a [`crate::CwContract`] handle
-    /// that carries the address for every `execute` / `query` call.
-    pub fn contract(&self, addr: Addr) -> crate::CwContract {
+    /// Bind this chain to a deployed contract `addr`, returning an untyped [`crate::CwContract`]
+    /// handle for dynamic `execute` / `query` calls.
+    pub fn contract(&self, addr: Addr) -> crate::CwContract<()> {
+        crate::CwContract::bound(self.clone(), addr)
+    }
+
+    /// Bind this chain to a deployed contract `addr`, returning a typed [`crate::CwContract`]
+    /// handle scoped to the [`crate::CwInterface`] marker `I`.
+    pub fn contract_as<I: crate::CwInterface>(&self, addr: Addr) -> crate::CwContract<I> {
         crate::CwContract::bound(self.clone(), addr)
     }
 

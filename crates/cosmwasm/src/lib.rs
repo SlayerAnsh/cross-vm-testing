@@ -30,7 +30,7 @@ mod tests;
 pub use asset::CwAsset;
 pub use chain::CwChain;
 pub use chains::CosmosChainInfo;
-pub use contract::CwContract;
+pub use contract::{CwContract, CwInterface};
 pub use cosmwasm_std::{Addr, Event};
 pub use error::CwError;
 pub use msg::CwSerde;

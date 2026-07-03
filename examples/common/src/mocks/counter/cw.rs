@@ -8,7 +8,7 @@ use cw_multi_test::{Contract, ContractWrapper};
 // the message enums (counter's `cross-vm` feature). Leading `::` disambiguates the extern crate
 // from this crate's `mocks::counter` module under uniform-path resolution.
 pub use ::counter::{
-    CountResponse, ExecuteMsg, ExecuteMsgFns, InstantiateMsg, QueryMsg, QueryMsgFns,
+    CountResponse, CounterContract, ExecuteMsg, ExecuteMsgFns, InstantiateMsg, QueryMsg, QueryMsgFns,
 };
 
 /// A `cw-multi-test` wrapper over the counter contract's entry points, for in-process deployment.

@@ -82,7 +82,7 @@ impl Counter {
         let raw = self
             .base
             .cosmwasm()?
-            .contract(self.base.cw_addr()?)
+            .contract_as::<cosmos_counter::CounterContract>(self.base.cw_addr()?)
             .increment(wallet)
             .await?;
         Ok(AppResponse::cosmwasm((), raw))
@@ -94,7 +94,7 @@ impl Counter {
         let resp = self
             .base
             .cosmwasm()?
-            .contract(self.base.cw_addr()?)
+            .contract_as::<cosmos_counter::CounterContract>(self.base.cw_addr()?)
             .get_count()
             .await?;
         Ok(resp.count)
