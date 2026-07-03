@@ -12,9 +12,8 @@ contracts/solidity/lib/
 contracts/solana/target/
 contracts/solana/.anchor/
 
-# CosmWasm
-contracts/cosmwasm/counter/target/
-contracts/cosmwasm/vault/target/
+# CosmWasm (single workspace at contracts/cosmwasm/)
+contracts/cosmwasm/target/
 
 # Tron (Tronbox)
 contracts/tron/generated/

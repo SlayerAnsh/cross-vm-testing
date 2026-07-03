@@ -310,7 +310,7 @@ cargo test  --workspace
 
 The integration tests embed compiled contract artifacts, so build those first with `make compile` (or a single ecosystem: `make compile-cosmwasm` / `compile-solidity` / `compile-solana`), then run `make test`. A fresh checkout will not compile the integration tests until the artifacts exist:
 
-* CosmWasm: the `contracts/cosmwasm/*` crates are consumed as rlibs (no artifact build strictly needed for counter, but `make compile-cosmwasm` builds the wasm).
+* CosmWasm: the `contracts/cosmwasm/contracts/*` crates are consumed as rlibs (no artifact build strictly needed for counter, but `make compile-cosmwasm` builds the wasm into `contracts/cosmwasm/artifacts/`).
 * EVM: `sol!` parses the forge build JSON for the ABI and creation bytecode (`forge build`).
 * Solana: `include_bytes!` loads the `cargo-build-sbf` output (`.so`).
 

@@ -63,8 +63,8 @@ ContractA → pongs_received += 1
 ## Build commands
 
 ```bash
-# CosmWasm
-cd contracts/cosmwasm/ping-pong && make build
+# CosmWasm (builds every contract in the workspace into contracts/cosmwasm/artifacts/)
+cd contracts/cosmwasm && make build
 
 # Solidity
 cd contracts/solidity && forge build && forge test
@@ -98,6 +98,6 @@ The cross-VM relayer test `examples/cross-vm-tests/tests/cross_vm/ping_pong.rs` 
 
 | VM | Path |
 | --- | --- |
-| CosmWasm | `contracts/cosmwasm/ping-pong/` |
+| CosmWasm | `contracts/cosmwasm/contracts/ping-pong/` |
 | Solidity | `contracts/solidity/src/PingPong.sol` |
 | Solana | `contracts/solana/programs/ping-pong/` |

@@ -18,9 +18,7 @@ compile-solana:
 	$(MAKE) -C contracts/solana build
 
 compile-cosmwasm:
-	$(MAKE) -C contracts/cosmwasm/counter build
-	$(MAKE) -C contracts/cosmwasm/vault build
-	$(MAKE) -C contracts/cosmwasm/ping-pong build
+	$(MAKE) -C contracts/cosmwasm build
 
 compile-tron:
 	$(MAKE) -C contracts/tron build

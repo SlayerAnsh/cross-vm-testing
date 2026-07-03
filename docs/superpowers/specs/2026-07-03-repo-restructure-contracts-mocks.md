@@ -89,7 +89,7 @@ Features and their artifact requirements:
 | `evm` | `alloy` | `contracts/solidity/out/*.json` | `make compile-solidity` |
 | `solana` | none | `contracts/solana/target/deploy/*.so` | `make compile-solana` |
 | `tron` | `alloy` | `contracts/tron/build/*.json` | `make compile-tron` |
-| `cw-artifacts` (implies `cw`) | | `contracts/cosmwasm/counter/artifacts/counter.wasm` | Docker optimizer |
+| `cw-artifacts` (implies `cw`) | | `contracts/cosmwasm/artifacts/counter.wasm` | Docker optimizer |
 
 Module tree: `cross_vm_common::mocks::{counter,ping_pong,vault}::{cw,evm,svm,tron}`,
 each per-VM submodule gated behind its feature. Content is migrated verbatim from the

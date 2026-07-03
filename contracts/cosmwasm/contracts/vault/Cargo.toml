@@ -1,0 +1,19 @@
+[package]
+name = "vault"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cosmwasm-std.workspace = true
+cw-storage-plus.workspace = true
+serde.workspace = true
+# Cross-VM typed message handles (off for the wasm build; on for host tests).
+cross-vm-cosmwasm = { workspace = true, optional = true }
+cross-vm-macros = { workspace = true, optional = true }
+
+[features]
+# Derive `CwExecuteFns` / `CwQueryFns` on the messages so test wrappers get typed calls.
+cross-vm = ["dep:cross-vm-cosmwasm", "dep:cross-vm-macros"]

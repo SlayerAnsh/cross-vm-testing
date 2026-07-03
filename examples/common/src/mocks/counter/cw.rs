@@ -25,5 +25,5 @@ pub fn contract() -> Box<dyn Contract<Empty, Empty>> {
 #[cfg(feature = "cw-artifacts")]
 pub const COUNTER_WASM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../contracts/cosmwasm/counter/artifacts/counter.wasm"
+    "/../../contracts/cosmwasm/artifacts/counter.wasm"
 ));
