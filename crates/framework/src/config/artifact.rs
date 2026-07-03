@@ -426,24 +426,51 @@ ops = 1
         );
 
         // The sidecar's own bytes (what write_replay_artifact itself produced) must hold the
-        // u64-range amount exactly, with no precision loss: parsed as raw JSON, not re-routed
-        // through cross_vm_config's loader. (cross_vm_config::load funnels every input format,
-        // JSON included, through an internal `toml::Value` — which, like TOML text, has no
-        // integer representation above i64::MAX — so a *second* hop through that loader would
-        // itself downgrade this value to a float; that is a pre-existing limitation of the
-        // `cross-vm-config` crate's JSON-to-toml::Value bridge, not of this artifact writer, and
-        // is out of this task's scope. This assertion targets exactly what `write_replay_artifact`
-        // is responsible for: the JSON it writes, read as JSON, is lossless.)
+        // u64-range amount exactly, with no precision loss: parsed as raw JSON.
         let raw = std::fs::read_to_string(&path).expect("sidecar file exists");
         let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
         let amount = &value["profile"]["replay"]["steps"][0]["op"]["Deposit"]["amount"];
         assert_eq!(amount.as_u64(), Some(huge), "raw JSON bytes: {raw}");
 
-        // It must still *load* (spec §10: run/replay accept .json config input from day one):
-        // the file is a syntactically valid config and dispatches through the same loader as
-        // every other config, `.json` extension included.
+        // It must load AND round-trip the out-of-i64-range amount losslessly (spec §10): the
+        // loader now processes JSON input natively as `serde_json::Value`, so the reloaded op
+        // still carries the EXACT u64 integer — not a float, not a rounded value.
         let reloaded = cross_vm_config::load(&path, &|_| None).expect("sidecar reloads");
         assert!(reloaded.profiles.contains_key("replay"));
+        let cross_vm_config::Profile::Scenario(p) = &reloaded.profiles["replay"] else {
+            panic!("expected the replay profile to be a scenario profile");
+        };
+        let reloaded_op = &p.steps[0].op;
+        let reloaded_amount = &reloaded_op["Deposit"]["amount"];
+        assert!(
+            reloaded_amount.is_u64(),
+            "reloaded op amount must survive as an integer, got {reloaded_amount:?}"
+        );
+        assert_eq!(
+            reloaded_amount.as_u64(),
+            Some(huge),
+            "reloaded op must carry the exact u64 amount (no float downgrade), got {reloaded_amount:?}"
+        );
+
+        // And it must typed-deserialize into a harness op whose `amount` is a `u64` field — the
+        // exact step that used to fail with `invalid type: floating point, expected u64` and
+        // exit `cross-vm replay` with a config error (3) instead of reproducing the failure.
+        // Deserializing straight from the reloaded op mirrors what the registry's scenario site
+        // (`H::Operation::deserialize(raw.op.clone())`) does at replay time.
+        #[derive(serde::Deserialize)]
+        enum SidecarOp {
+            Deposit {
+                #[allow(dead_code)]
+                chain: String,
+                #[allow(dead_code)]
+                user: u64,
+                amount: u64,
+            },
+        }
+        let op = <SidecarOp as serde::Deserialize>::deserialize(reloaded_op.clone())
+            .expect("reloaded op deserializes into a u64-amount harness op (no config error)");
+        let SidecarOp::Deposit { amount, .. } = op;
+        assert_eq!(amount, huge, "typed u64 op amount must equal the original");
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -927,7 +927,7 @@ mod tests {
     /// deserializes into it exactly like `H::OpKind::deserialize` does for `kinds`/`weights`).
     fn mock_step(op: &str, expect: cross_vm_config::ExpectStr) -> cross_vm_config::ScenarioStepRaw {
         cross_vm_config::ScenarioStepRaw {
-            op: toml::Value::String(op.to_string()),
+            op: serde_json::Value::String(op.to_string()),
             expect,
             delay: std::time::Duration::ZERO,
             check: true,

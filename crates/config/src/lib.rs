@@ -3,7 +3,21 @@
 //! This is a pure data crate: no framework, tokio, or chain-provider dependency. It parses a
 //! config document (TOML or JSON) into a typed [`RunConfig`], so it stays unit-testable with
 //! plain string fixtures and is safe for a later proc-macro to reuse verbatim. Kind names stay
-//! `String`, and scenario ops stay raw [`toml::Value`]; this crate never sees harness types.
+//! `String`, and scenario ops stay raw [`serde_json::Value`] (a format-agnostic value that keeps
+//! full integer precision for JSON input, unlike `toml::Value`); this crate never sees harness
+//! types.
+//!
+//! ## Format-agnostic loading and integer precision
+//! TOML and JSON input run the same pipeline over a small `Doc` value abstraction (see the
+//! private `value` module), so TOML input keeps `toml::Value` behavior exactly while JSON input
+//! is processed natively as `serde_json::Value`. This matters for the `.replay.json` sidecar
+//! (spec §10): a scenario `op` amount in `(i64::MAX, u64::MAX]` survives a JSON round-trip
+//! losslessly, because it never passes through `toml::Value` (whose integers are signed 64-bit).
+//! Integers `> u64::MAX` are **not** supported: `serde_json` (built without its
+//! `arbitrary_precision` feature) already parses such a literal into an `f64` at
+//! `serde_json::from_str` time, before this crate sees it, so precision is lost at parse. In
+//! practice replay histories only carry `u64`-range amounts (they originate from
+//! `serde_json::to_value`, which requires a value fit `u64`), so this range covers the real use.
 //!
 //! The full five-stage loader pipeline (parse, interpolate, merge, typed deserialize,
 //! structural validate) is implemented; see [`from_toml_str`] for the stage order. The `vars`
@@ -20,6 +34,7 @@ mod schema;
 mod seed;
 mod target;
 mod validate;
+mod value;
 
 pub use chain::{missing_required_fields, ChainDecl};
 pub use duration::{humantime_duration, humantime_opt};
@@ -31,6 +46,7 @@ pub use schema::{
 pub use seed::SeedSpec;
 pub use target::{parse_target_str, resolve_chain_target, TargetOverrides};
 
+use crate::value::{Doc, DocMap};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -209,21 +225,26 @@ pub enum ConfigError {
 /// explicitly "ignored by the run schema". It is parsed here (as an untyped table) purely so
 /// `deny_unknown_fields` doesn't reject it, then dropped in [`build_run_config`]; it never
 /// reaches [`RunConfig`].
+///
+/// Generic over the document value type `V` ([`toml::Value`] or [`serde_json::Value`]) so
+/// profile tables keep the source format's native number representation until they are dispatched
+/// into a per-mode struct; this is what lets a JSON scenario `op` keep `u64`-range precision.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawRunConfig {
+#[serde(bound(deserialize = "V: serde::de::DeserializeOwned"))]
+struct RawRunConfig<V> {
     harness: HarnessRef,
     #[serde(rename = "chain", default)]
     chain: Vec<ChainDecl>,
     #[serde(default)]
     env: EnvSpec,
     #[serde(rename = "profile", default)]
-    profile: BTreeMap<String, toml::Table>,
+    profile: BTreeMap<String, V>,
     #[serde(rename = "suite", default)]
     suite: BTreeMap<String, Suite>,
     /// Tolerated but ignored; see the struct doc comment.
     #[serde(default)]
-    replay: Option<toml::Table>,
+    replay: Option<V>,
 }
 
 /// Parses a TOML document string into a [`RunConfig`], running the full five-stage pipeline:
@@ -240,26 +261,31 @@ pub fn from_toml_str(
 /// Parses a JSON document string into a [`RunConfig`], running the same pipeline as
 /// [`from_toml_str`].
 ///
-/// The schema is format agnostic: the JSON value is converted to the same [`toml::Value`]
-/// representation `from_toml_str` uses, so both inputs share one dispatch path and produce
-/// equal [`RunConfig`]s for equivalent documents.
+/// The schema is format agnostic, but JSON input is processed **natively** as
+/// [`serde_json::Value`] (not downgraded through [`toml::Value`]) so integer precision survives:
+/// a scenario `op` amount in `(i64::MAX, u64::MAX]` round-trips exactly, which is what the
+/// `.replay.json` sidecar relies on. Equivalent TOML and JSON documents still produce equal
+/// [`RunConfig`]s.
 pub fn from_json_str(
     s: &str,
     vars: &dyn Fn(&str) -> Option<String>,
 ) -> Result<RunConfig, ConfigError> {
-    let json_value: serde_json::Value =
+    let value: serde_json::Value =
         serde_json::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?;
-    let value = json_to_toml_value(json_value)?;
     load_from_value(value, vars)
 }
 
 /// Runs stages 2 through 5 of the loader pipeline over an already-parsed document: interpolate,
 /// merge (collecting defaults-strip warnings), typed deserialize, structural validate.
-fn load_from_value(
-    mut value: toml::Value,
+///
+/// Generic over the document value type so TOML ([`toml::Value`]) and JSON
+/// ([`serde_json::Value`]) share one implementation; the existing `toml::Value`-based unit tests
+/// pin the TOML path's behavior exactly.
+fn load_from_value<V: Doc>(
+    mut value: V,
     vars: &dyn Fn(&str) -> Option<String>,
 ) -> Result<RunConfig, ConfigError> {
-    interpolate::interpolate_value(&mut value, vars)?;
+    interpolate::interpolate_doc(&mut value, vars)?;
     let warnings = merge::merge(&mut value)?;
     let mut cfg = build_run_config(value)?;
     validate::validate(&cfg)?;
@@ -282,33 +308,46 @@ pub fn load(path: &Path, vars: &dyn Fn(&str) -> Option<String>) -> Result<RunCon
 
 /// Deserializes the stable-shaped parts of the document, then dispatches every profile table
 /// into its per-mode struct by mode name.
-fn build_run_config(value: toml::Value) -> Result<RunConfig, ConfigError> {
-    let raw = RawRunConfig::deserialize(value).map_err(|e| ConfigError::Deserialize {
-        path: "<root>".to_string(),
-        message: e.to_string(),
-    })?;
+fn build_run_config<V: Doc>(value: V) -> Result<RunConfig, ConfigError> {
+    let raw: RawRunConfig<V> =
+        value
+            .deserialize_into()
+            .map_err(|message| ConfigError::Deserialize {
+                path: "<root>".to_string(),
+                message,
+            })?;
     // `[replay]` is parsed only so `deny_unknown_fields` tolerates it; it is not part of the
     // run schema and is intentionally dropped here.
     let _ = raw.replay;
 
     let mut profiles = BTreeMap::new();
-    for (name, mut table) in raw.profile {
-        let mode_value = table.remove("mode").ok_or_else(|| ConfigError::Deserialize {
-            path: format!("profile.{name}"),
-            message: "missing required key `mode`".to_string(),
-        })?;
-        let mode = mode_value
-            .as_str()
-            .ok_or_else(|| ConfigError::Deserialize {
-                path: format!("profile.{name}.mode"),
-                message: "`mode` must be a string".to_string(),
-            })?
-            .to_string();
-        let profile =
-            Profile::from_mode_table(&mode, table).map_err(|message| ConfigError::Deserialize {
+    for (name, mut profile_value) in raw.profile {
+        let mode = {
+            let table =
+                profile_value
+                    .as_object_mut()
+                    .ok_or_else(|| ConfigError::Deserialize {
+                        path: format!("profile.{name}"),
+                        message: "a profile must be a table".to_string(),
+                    })?;
+            let mode_value = table.remove("mode").ok_or_else(|| ConfigError::Deserialize {
+                path: format!("profile.{name}"),
+                message: "missing required key `mode`".to_string(),
+            })?;
+            mode_value
+                .as_str()
+                .ok_or_else(|| ConfigError::Deserialize {
+                    path: format!("profile.{name}.mode"),
+                    message: "`mode` must be a string".to_string(),
+                })?
+                .to_string()
+        };
+        let profile = Profile::from_mode_table(&mode, profile_value).map_err(|message| {
+            ConfigError::Deserialize {
                 path: format!("profile.{name}"),
                 message,
-            })?;
+            }
+        })?;
         profiles.insert(name, profile);
     }
 
@@ -319,46 +358,5 @@ fn build_run_config(value: toml::Value) -> Result<RunConfig, ConfigError> {
         profiles,
         suites: raw.suite,
         warnings: Vec::new(),
-    })
-}
-
-/// Converts a `serde_json::Value` into an equivalent `toml::Value`, so JSON input can reuse
-/// the exact same typed-deserialize path as TOML input. JSON `null` has no TOML equivalent and
-/// is rejected; every config field this crate defines is either required or `Option`, so a
-/// valid document never needs to express `null`.
-fn json_to_toml_value(json: serde_json::Value) -> Result<toml::Value, ConfigError> {
-    Ok(match json {
-        serde_json::Value::Null => {
-            return Err(ConfigError::Parse(
-                "JSON `null` has no TOML equivalent; omit the key instead".to_string(),
-            ))
-        }
-        serde_json::Value::Bool(b) => toml::Value::Boolean(b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                toml::Value::Integer(i)
-            } else if let Some(f) = n.as_f64() {
-                toml::Value::Float(f)
-            } else {
-                return Err(ConfigError::Parse(format!(
-                    "number `{n}` is out of range for TOML"
-                )));
-            }
-        }
-        serde_json::Value::String(s) => toml::Value::String(s),
-        serde_json::Value::Array(items) => {
-            let converted = items
-                .into_iter()
-                .map(json_to_toml_value)
-                .collect::<Result<Vec<_>, _>>()?;
-            toml::Value::Array(converted)
-        }
-        serde_json::Value::Object(map) => {
-            let mut table = toml::value::Table::new();
-            for (k, v) in map {
-                table.insert(k, json_to_toml_value(v)?);
-            }
-            toml::Value::Table(table)
-        }
     })
 }

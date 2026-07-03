@@ -83,7 +83,12 @@ pub enum ExpectStr {
 #[serde(deny_unknown_fields)]
 pub struct ScenarioStepRaw {
     /// The externally tagged op, deserialized into `H::Operation` in the framework.
-    pub op: toml::Value,
+    ///
+    /// Held as a format-agnostic [`serde_json::Value`] rather than a [`toml::Value`] so a
+    /// JSON-sourced op amount in `(i64::MAX, u64::MAX]` keeps full integer precision (TOML
+    /// integers are signed 64-bit). TOML-sourced ops deserialize into this value type losslessly
+    /// (TOML integers are `i64`, a subset).
+    pub op: serde_json::Value,
     /// Expected verdict; defaults to `Accepted`.
     #[serde(default)]
     pub expect: ExpectStr,
@@ -427,23 +432,30 @@ impl Profile {
         }
     }
 
-    /// Dispatches a profile's TOML table (with its `mode` key already popped) into the
-    /// matching per-mode struct, rejecting unknown fields with a precise error path.
-    pub(crate) fn from_mode_table(mode: &str, table: toml::Table) -> Result<Profile, String> {
-        let value = toml::Value::Table(table);
+    /// Dispatches a profile's table value (with its `mode` key already popped) into the matching
+    /// per-mode struct, rejecting unknown fields with a precise error path.
+    ///
+    /// Generic over the document value type ([`toml::Value`] or [`serde_json::Value`]): the
+    /// value is deserialized natively into the per-mode wire struct, so a JSON scenario `op`
+    /// keeps its precise integer representation instead of being downgraded through
+    /// `toml::Value`.
+    pub(crate) fn from_mode_table<V: crate::value::Doc>(
+        mode: &str,
+        value: V,
+    ) -> Result<Profile, String> {
         match mode {
-            "fuzz" => FuzzProfileWire::deserialize(value)
-                .map(|w| Profile::Fuzz(w.into()))
-                .map_err(|e| e.to_string()),
-            "invariant" => InvariantProfileWire::deserialize(value)
-                .map(|w| Profile::Invariant(w.into()))
-                .map_err(|e| e.to_string()),
-            "endurance" => EnduranceProfileWire::deserialize(value)
-                .map(|w| Profile::Endurance(w.into()))
-                .map_err(|e| e.to_string()),
-            "scenario" => ScenarioProfileWire::deserialize(value)
-                .map(|w| Profile::Scenario(w.into()))
-                .map_err(|e| e.to_string()),
+            "fuzz" => value
+                .deserialize_into::<FuzzProfileWire>()
+                .map(|w| Profile::Fuzz(w.into())),
+            "invariant" => value
+                .deserialize_into::<InvariantProfileWire>()
+                .map(|w| Profile::Invariant(w.into())),
+            "endurance" => value
+                .deserialize_into::<EnduranceProfileWire>()
+                .map(|w| Profile::Endurance(w.into())),
+            "scenario" => value
+                .deserialize_into::<ScenarioProfileWire>()
+                .map(|w| Profile::Scenario(w.into())),
             other => Err(format!(
                 "unknown mode `{other}`, expected one of \"fuzz\", \"invariant\", \"endurance\", \"scenario\""
             )),

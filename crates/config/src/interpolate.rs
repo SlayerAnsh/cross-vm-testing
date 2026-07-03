@@ -11,6 +11,7 @@
 //! Values may carry RPC secrets, so no error path in this module ever includes a resolved or
 //! literal value; only variable names and TOML paths are named.
 
+use crate::value::{Doc, DocMap};
 use crate::ConfigError;
 
 /// Walks every string value in `value` (recursively through tables and arrays) and
@@ -18,46 +19,57 @@ use crate::ConfigError;
 ///
 /// Errors name the offending variable and its TOML path (e.g. `chain[1].rpc_url`); the
 /// string's contents are never echoed, since they may carry RPC secrets.
+///
+/// Public entry point retained for the TOML value type; the loader itself calls the
+/// format-agnostic `interpolate_doc` worker so JSON input is interpolated identically.
 pub fn interpolate_value(
     value: &mut toml::Value,
+    vars: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), ConfigError> {
+    interpolate_doc(value, vars)
+}
+
+/// Format-agnostic interpolation entry point: runs over any [`Doc`] value ([`toml::Value`] or
+/// [`serde_json::Value`]) with byte-identical `${VAR}` / `${VAR:-default}` / `$${` semantics.
+pub(crate) fn interpolate_doc<V: Doc>(
+    value: &mut V,
     vars: &dyn Fn(&str) -> Option<String>,
 ) -> Result<(), ConfigError> {
     interpolate_at(value, vars, "")
 }
 
-/// Recursive worker for [`interpolate_value`]; `path` is the dotted/indexed TOML path to
+/// Recursive worker for [`interpolate_doc`]; `path` is the dotted/indexed document path to
 /// `value` so far (empty string at the document root).
-fn interpolate_at(
-    value: &mut toml::Value,
+fn interpolate_at<V: Doc>(
+    value: &mut V,
     vars: &dyn Fn(&str) -> Option<String>,
     path: &str,
 ) -> Result<(), ConfigError> {
-    match value {
-        toml::Value::String(s) => {
-            *s = interpolate_str(s, vars, path)?;
-            Ok(())
-        }
-        toml::Value::Array(items) => {
-            for (i, item) in items.iter_mut().enumerate() {
-                let child_path = format!("{path}[{i}]");
-                interpolate_at(item, vars, &child_path)?;
-            }
-            Ok(())
-        }
-        toml::Value::Table(table) => {
-            for (k, v) in table.iter_mut() {
-                let child_path = if path.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{path}.{k}")
-                };
-                interpolate_at(v, vars, &child_path)?;
-            }
-            Ok(())
-        }
-        // Booleans, integers, floats, and datetimes cannot carry `${...}` syntax.
-        _ => Ok(()),
+    if let Some(s) = value.as_str_mut() {
+        let interpolated = interpolate_str(s, vars, path)?;
+        *s = interpolated;
+        return Ok(());
     }
+    if let Some(items) = value.as_array_mut() {
+        for (i, item) in items.iter_mut().enumerate() {
+            let child_path = format!("{path}[{i}]");
+            interpolate_at(item, vars, &child_path)?;
+        }
+        return Ok(());
+    }
+    if let Some(table) = value.as_object_mut() {
+        for (k, v) in table.iter_mut() {
+            let child_path = if path.is_empty() {
+                k.clone()
+            } else {
+                format!("{path}.{k}")
+            };
+            interpolate_at(v, vars, &child_path)?;
+        }
+        return Ok(());
+    }
+    // Booleans, integers, floats, and datetimes cannot carry `${...}` syntax.
+    Ok(())
 }
 
 /// Interpolates a single string value, scanning character by character so `$${` escapes and
