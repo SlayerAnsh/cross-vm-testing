@@ -1,0 +1,19 @@
+# A tiny, deterministically-failing config used only by `tests/cli_e2e.rs`'s replay-artifact /
+# shrink / `replay` subcommand end-to-end coverage (see `src/boom.rs`'s module docs for why the
+# vault harness alone cannot exercise this path as a real `cross-vm` subprocess test).
+
+[harness]
+name = "boom"
+
+[defaults]
+seed = 1
+check_every = 1
+
+# Mixes Noop/Boom so the failing history has real Noops to shrink away; shrink is on, so the CLI
+# both writes a minimized artifact and the JSON report's failure.shrunk = true.
+[profile.fails]
+mode = "fuzz"
+cases = 1
+ops = 20
+kinds = ["Noop", "Boom"]
+shrink = true

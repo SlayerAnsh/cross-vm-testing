@@ -137,13 +137,36 @@ cargo run -p cross-vm-integration-tests --bin cross-vm -- list examples/integrat
 
 `examples/integration-tests/vault.cross-vm.toml` declares the same three chains (`osmosis`/`eth`/`solana`) `vault_setup` hard codes, plus a `smoke` / `deep` / `invariant-long` / `mixed-targets` profile set; `vault.no-chains.cross-vm.toml` has no `[[chain]]` entries at all, exercising `vault_config_setup`'s backward-compatible fallback (hard code the three mocks, exactly like `vault_setup`) when a config declares none. Exit codes follow the CI contract in spec section 8: `0` every run passed, `1` a run failed with a `Bug`/invariant violation, `2` an `Infra`-only failure, `3` a config or usage error (an unknown profile, an unresolvable `${VAR}`, or `--target-chain LABEL=rpc` on a chain with no `rpc_url`).
 
+## The failure to replay loop
+
+Any fuzz, invariant, or endurance profile that fails writes a self contained artifact under its `artifacts_dir` (default `target/cross-vm`, overridable with `--artifacts-dir`): `<harness>-<profile>-<seed>-<timestamp>.replay.toml`. The artifact is itself a valid config file, so closing the loop needs no bespoke tooling.
+
+```sh
+cargo run -p cross-vm-integration-tests --bin cross-vm -- run examples/integration-tests/vault.cross-vm.toml --profile deep
+# ... fails; the log prints: wrote replay artifact: target/cross-vm/vault-deep-6021349-....replay.toml
+
+cargo run -p cross-vm-integration-tests --bin cross-vm -- replay target/cross-vm/vault-deep-6021349-....replay.toml
+```
+
+`cross-vm replay <artifact>` is sugar for `run <artifact> --profile replay`, reusing the ordinary run path end to end. Exit code `0` means the artifact's failure no longer reproduces (a fix landed since the artifact was written); a nonzero code means it still does.
+
+What the artifact holds, and why it is safe to commit next to a config:
+
+* `[harness]`, the resolved `[[chain]]` declarations (the RESOLVED `mock`/`rpc` target and `rpc_url` per chain), and `[env]` (target plus the selected chain labels). Mnemonics and keys are never part of a chain spec in the first place, so the artifact carries nothing to leak; the resolved `rpc_url` string is written on purpose, since the artifact's entire point is reproduction.
+* `[replay]`, provenance only (source profile, source mode, a short failure summary, whether the history was shrunk, the `framework_version` that wrote it); the loader parses and drops this block, so it never affects a replay.
+* `[profile.replay]`, a `mode = "scenario"` profile with `seed` and one `[[profile.replay.steps]]` per recorded op, the shrunk history when `shrink` was enabled for the run, the raw history otherwise.
+
+When a profile's failing history contains an amount too large for TOML's signed 64 bit integers (a `u128` amount over `i64::MAX`, which still fits the `u64` range the JSON failure history already requires), the writer falls back to a sibling `*.replay.json` with the exact same structure; `run` and `replay` both accept `.json` config input, dispatched purely by file extension.
+
+Shrinking is what usually makes an artifact worth reading: `shrink = true` (the default for fuzz and invariant profiles, `false` for endurance unless set explicitly) re-drives the failing sequence on a fresh setup for each candidate, dropping windows of ops and then single ops, keeping a candidate only when it still fails the exact same way. `shrink_limit` (default 256) bounds how many replay attempts that costs; a tiny limit still returns a reproducing sequence, just not necessarily a minimal one.
+
 ## Property-testing harness diagnostics
 
 The `Runner` that drives a `Harness` (fuzz, invariant, endurance, scenario) exposes three diagnostics on top of the minimal API.
 
 * Per-invariant coverage (always on, zero config). Every `RunReport` carries a `coverage` field: a per-invariant tally of `held` / `skipped` / `violated`, keyed by the invariant's `Debug` name and seeded from `Harness::invariants()` at run start. An invariant with a zero total never ran on that path (critical on multi-VM runs where one chain's path can silently skip an invariant). `Coverage::uncovered()` lists them and the end-of-run log flags them. The aggregate `RunReport::skipped` equals `coverage.total_skipped()`.
 * Opt-in per-op stats (off by default). Call `runner.with_stats()` before running to collect, per op variant name, the outcome counts (accepted, rejected, bug, infra), `apply` timing (min, avg, max, stddev), and an error breakdown grouped by reason. Read them back with `runner.stats()`. Use it when a generator may be producing mostly-rejected ops (for example most swaps reverting), which quietly tests very little. Stats are strictly per-run: each driver resets them at entry, and a shrink parks them for its duration, so the tallies always describe exactly the run that produced the report.
-* Sequence shrinking. `runner.shrink(failing, rebuild)` greedily minimizes a failing operation sequence to a near-minimal one that still fails the same way, re-driving on a fresh `(Ctx, World)` from the async `rebuild` closure each attempt. "Same way" means: a `Bug` must carry the same detail string (emit stable, state-independent bug messages from `apply`), an invariant failure the same invariant name. `run_and_shrink(ops, rebuild)` runs a sequence and, on failure, returns a report whose `failure.history` is already minimized. If the original failure surfaced under a sparser check cadence, use `shrink_with` / `run_and_shrink_with` with the same `check_every` so candidates are judged under the schedule that produced the failure. Replay attempts are capped at `DEFAULT_SHRINK_LIMIT` (256); on exhaustion the best sequence found so far is returned.
+* Sequence shrinking. `runner.shrink(failing, rebuild)` greedily minimizes a failing operation sequence to a near-minimal one that still fails the same way, re-driving on a fresh `(Ctx, World)` from the async `rebuild` closure each attempt. "Same way" means: a `Bug` must carry the same detail string (emit stable, state-independent bug messages from `apply`), an invariant failure the same invariant name. `run_and_shrink(ops, rebuild)` runs a sequence and, on failure, returns a report whose `failure.history` is already minimized. If the original failure surfaced under a sparser check cadence, use `shrink_with` / `run_and_shrink_with` with the same `check_every` so candidates are judged under the schedule that produced the failure. Replay attempts are capped at `DEFAULT_SHRINK_LIMIT` (256) by default; `shrink_with_limit` takes the budget as an explicit parameter instead, so a profile's own `shrink_limit` key (see "The failure to replay loop" above) can override it. On exhaustion the best sequence found so far is returned, never an error.
 
 Transition invariants (comparing on-chain state before vs after one op) need no extra API. Because a step runs `apply` then `check` for the same op, snapshot the pre-state inside `apply` (it is async and holds `Ctx`, so it can query a chain), stash it in `World`, and diff the live post-state against it in `check`. Do not reach for the `ContractBase` before/after hooks for this: they are synchronous `FnMut`, hold no chain handle, and see only the `AppResponse`, so they cannot capture chain state. The `vault.rs` harness `DepositTransition` invariant demonstrates the `World`-stash pattern.
 

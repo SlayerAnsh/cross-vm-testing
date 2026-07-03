@@ -100,6 +100,33 @@ pub fn parse_spec_id(s: &str) -> Result<SpecId, HarnessError> {
     }
 }
 
+/// The reverse of [`parse_spec_id`]: the canonical short name for a [`SpecId`], for the replay
+/// artifact writer (`crate::config::artifact`). Several short names collide on one `SpecId`
+/// (see `parse_spec_id`'s per-arm docs); this returns the first-listed (canonical) name for each,
+/// so `spec_id_to_str(parse_spec_id(s)?)` need not equal `s` for `"constantinople"`/`"muir"`, but
+/// always round-trips through `parse_spec_id` to the same `SpecId`. Any `SpecId` variant not in
+/// the 15-name table (a hardfork newer than this crate's parse table) falls back to `"cancun"`
+/// rather than failing the artifact write outright — a replay still loads and runs, just against
+/// a possibly-different (but recent) hardfork.
+pub(crate) fn spec_id_to_str(id: SpecId) -> &'static str {
+    match id {
+        SpecId::FRONTIER => "frontier",
+        SpecId::HOMESTEAD => "homestead",
+        SpecId::TANGERINE => "tangerine",
+        SpecId::SPURIOUS_DRAGON => "spurious",
+        SpecId::BYZANTIUM => "byzantium",
+        SpecId::PETERSBURG => "petersburg",
+        SpecId::ISTANBUL => "istanbul",
+        SpecId::BERLIN => "berlin",
+        SpecId::LONDON => "london",
+        SpecId::MERGE => "paris",
+        SpecId::SHANGHAI => "shanghai",
+        SpecId::CANCUN => "cancun",
+        SpecId::PRAGUE => "prague",
+        _ => "cancun",
+    }
+}
+
 /// Builds one [`AnyChain`] from a resolved [`ChainSpecData`], dispatching on `spec.kind`.
 ///
 /// Each VM arm constructs the owned `*ChainInfo` from `spec`'s fields (interning the owned
@@ -362,6 +389,20 @@ mod tests {
         assert_eq!(parse_spec_id("muir").unwrap(), SpecId::ISTANBUL);
         assert_eq!(parse_spec_id("paris").unwrap(), SpecId::MERGE);
         assert_eq!(parse_spec_id("constantinople").unwrap(), SpecId::PETERSBURG);
+    }
+
+    #[test]
+    fn spec_id_to_str_round_trips_through_parse_spec_id() {
+        // Every canonical name (the ones parse_spec_id's collapsed variants pick as their reverse
+        // mapping) must parse back to the exact same SpecId it was produced from.
+        let canonical = [
+            "frontier", "homestead", "tangerine", "spurious", "byzantium", "petersburg",
+            "istanbul", "berlin", "london", "paris", "shanghai", "cancun", "prague",
+        ];
+        for name in canonical {
+            let id = parse_spec_id(name).unwrap();
+            assert_eq!(spec_id_to_str(id), name, "{name} did not round-trip");
+        }
     }
 
     #[test]

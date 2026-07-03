@@ -4,11 +4,13 @@
 //!
 //! [`Cli`] wraps a [`Registry`]: a user binary calls
 //! [`Cli::new`]/[`Cli::env_file`]/[`Cli::register`] to build one up, then `.main().await` to parse
-//! `std::env::args()`, dispatch, and return a [`std::process::ExitCode`]. No `replay` subcommand
-//! lives here (Task 12: `cross-vm replay` is sugar for `run --profile replay`, built later);
-//! `--json-report` (spec section 9) accumulates every selected profile's [`ErasedReport`] and
-//! writes the envelope once, after the whole invocation finishes, in the private `run_selected`
-//! helper.
+//! `std::env::args()`, dispatch, and return a [`std::process::ExitCode`]. `cross-vm replay
+//! <artifact>` is sugar for `run <artifact> --profile replay` (spec section 10): both dispatch
+//! through the same `dispatch_run`/`run_with_config` path, so an artifact's `.toml`/`.json`
+//! extension, the registry, and the exit-code contract are all unchanged. `--json-report` (spec
+//! section 9) accumulates every selected profile's [`ErasedReport`] and writes the envelope once,
+//! after the whole invocation finishes, in the private `run_selected` helper, which also writes a
+//! replay artifact (spec section 10) for any fuzz/invariant/endurance profile that failed.
 //!
 //! Precedence (spec section 8), highest first: CLI flag, `CROSS_VM_*` env var, profile key,
 //! `[defaults]`, built-in default. The last two tiers are already merged by the loader and
@@ -30,8 +32,8 @@ use std::time::Duration;
 use clap::Parser;
 
 use crate::config::{
-    resolve_profile, write_json_report, ErasedReport, Registry, ResolvedProfile, RunError,
-    RunOptions, SetupFuture, SetupRequest, Target,
+    resolve_profile, write_json_report, write_replay_artifact, ErasedReport, Registry,
+    ResolvedProfile, RunError, RunOptions, SetupFuture, SetupRequest, Target,
 };
 use crate::harness::{FailureKind, Harness};
 
@@ -149,6 +151,7 @@ impl Cli {
             Command::Run(run_args) => self.dispatch_run(run_args).await,
             Command::Validate(cfg_args) => self.dispatch_validate(cfg_args),
             Command::List(cfg_args) => self.dispatch_list(cfg_args),
+            Command::Replay(replay_args) => self.dispatch_replay(replay_args).await,
         };
         std::process::ExitCode::from(code)
     }
@@ -165,6 +168,21 @@ impl Cli {
             }
         };
         self.run_with_config(&cfg, &args).await
+    }
+
+    /// `cross-vm replay <artifact>` (spec section 10): sugar for `run <artifact> --profile
+    /// replay`. Reuses [`Cli::dispatch_run`] verbatim — an artifact is a valid config file with
+    /// exactly one `[profile.replay]` scenario profile holding the (possibly shrunk) failing
+    /// history, so this needs no bespoke loading, registry, or exit-code logic of its own. Exit
+    /// code `0` means the artifact's failure no longer reproduces (the bug was fixed); non-zero
+    /// means it still does.
+    async fn dispatch_replay(&self, args: ReplayArgs) -> u8 {
+        self.dispatch_run(RunArgs {
+            config: args.artifact,
+            profile: vec!["replay".to_string()],
+            ..Default::default()
+        })
+        .await
     }
 
     /// The testable body of [`Cli::dispatch_run`]: everything after the config is already
@@ -346,7 +364,7 @@ struct CliArgs {
     command: Command,
 }
 
-/// `run` / `validate` / `list`. No `replay` variant: `cross-vm replay` is Task 12's job.
+/// `run` / `validate` / `list` / `replay`.
 #[derive(Debug, clap::Subcommand)]
 enum Command {
     /// Run one or more profiles (or a suite) against a config file.
@@ -355,6 +373,9 @@ enum Command {
     Validate(ConfigArgs),
     /// List registered harnesses and a config file's profiles/suites.
     List(ConfigArgs),
+    /// Replay a `*.replay.toml`/`*.replay.json` artifact: sugar for `run <artifact> --profile
+    /// replay` (spec section 10).
+    Replay(ReplayArgs),
 }
 
 /// Shared by `validate` and `list`: just the config path.
@@ -362,6 +383,13 @@ enum Command {
 struct ConfigArgs {
     /// Path to the `*.cross-vm.toml` (or `.json`) config file.
     config: PathBuf,
+}
+
+/// `cross-vm replay <artifact>` (spec section 10).
+#[derive(Debug, Clone, Default, clap::Args)]
+struct ReplayArgs {
+    /// Path to a `*.replay.toml` (or `*.replay.json`) artifact written by a prior failing run.
+    artifact: PathBuf,
 }
 
 /// `cross-vm run <config> [--profile NAME]... [--suite NAME] ...` (spec section 8).
@@ -668,6 +696,29 @@ async fn run_selected(
             Ok(report) => {
                 let this_code = exit_code_for(&report);
                 log_profile_result(&report);
+
+                // A replay artifact only makes sense for a generative failure (fuzz/invariant/
+                // endurance): a scenario is already a concrete, checked-in sequence, and a
+                // passing run has no failure to reproduce.
+                if report.failure.is_some() && report.mode != "scenario" {
+                    match write_replay_artifact(Path::new(&resolved.artifacts_dir), cfg, &resolved, &report)
+                    {
+                        Ok(path) => tracing::info!(
+                            "wrote replay artifact: {}; reproduce with: cross-vm replay {}",
+                            path.display(),
+                            path.display()
+                        ),
+                        // Non-fatal to the exit code: the run already failed and reported that
+                        // failure; a write error here (bad directory, permissions, disk full) is
+                        // a secondary concern, logged but never overriding `this_code`.
+                        Err(e) => tracing::warn!(
+                            profile = %resolved.name,
+                            error = %e,
+                            "failed to write replay artifact"
+                        ),
+                    }
+                }
+
                 reports.push(report);
 
                 code = combine([code, this_code]);
@@ -945,10 +996,12 @@ mod tests {
     }
 
     #[test]
-    fn no_replay_subcommand_exists() {
-        let err = CliArgs::try_parse_from(["cross-vm", "replay", "f.toml"]).unwrap_err();
-        assert!(err.to_string().to_lowercase().contains("unrecognized")
-            || err.to_string().to_lowercase().contains("invalid"));
+    fn replay_subcommand_parses() {
+        let args = CliArgs::try_parse_from(["cross-vm", "replay", "f.replay.toml"]).unwrap();
+        let Command::Replay(replay) = args.command else {
+            panic!("expected Replay subcommand");
+        };
+        assert_eq!(replay.artifact, PathBuf::from("f.replay.toml"));
     }
 
     #[test]
@@ -1509,5 +1562,135 @@ kinds = ["Ping"]
         };
         assert_eq!(cli.run_with_config(&cfg, &args).await, 0);
         assert!(!path.exists(), "no --json-report flag was given; nothing should be written");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Replay artifacts (spec section 10): written on a generative failure by `run_selected`,
+    // never for a pass or a scenario run; `cross-vm replay <artifact>` (`dispatch_replay`) is
+    // sugar for `run <artifact> --profile replay` and reproduces the same failure.
+    // -----------------------------------------------------------------------------------------
+
+    /// A fresh temp directory under the OS temp dir, unique per test invocation, so parallel test
+    /// runs never collide and there is nothing left over to accidentally reuse.
+    fn temp_artifacts_dir(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "cross-vm-cli-replay-artifact-{}-{}-{label}",
+            std::process::id(),
+            n
+        ))
+    }
+
+    #[tokio::test]
+    async fn run_with_config_writes_a_replay_artifact_on_a_generative_failure() {
+        let cfg = load(
+            r#"
+[harness]
+name = "vault"
+
+[profile.smoke]
+mode = "fuzz"
+cases = 1
+ops = 1
+kinds = ["Boom"]
+"#,
+        );
+        let cli = cli_with_mock();
+        let dir = temp_artifacts_dir("on-failure");
+        let args = RunArgs {
+            config: PathBuf::from("vault.cross-vm.toml"),
+            artifacts_dir: Some(dir.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        assert_eq!(cli.run_with_config(&cfg, &args).await, 1);
+
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .expect("artifacts dir was created")
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1, "exactly one artifact for one failing profile");
+        let path = entries[0].path();
+        assert!(
+            path.to_string_lossy().ends_with(".replay.toml"),
+            "{path:?}"
+        );
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("vault-smoke-"),
+            "filename must start with <harness>-<profile>-: {path:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn run_with_config_writes_no_artifact_on_a_pass_or_a_scenario_run() {
+        let cfg = load(
+            r#"
+[harness]
+name = "vault"
+
+[profile.smoke]
+mode = "fuzz"
+cases = 1
+ops = 1
+kinds = ["Ping"]
+"#,
+        );
+        let cli = cli_with_mock();
+        let dir = temp_artifacts_dir("no-artifact-on-pass");
+        let args = RunArgs {
+            config: PathBuf::from("vault.cross-vm.toml"),
+            artifacts_dir: Some(dir.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        assert_eq!(cli.run_with_config(&cfg, &args).await, 0);
+        assert!(!dir.exists(), "a passing run must not create the artifacts dir at all");
+    }
+
+    #[tokio::test]
+    async fn replay_subcommand_reproduces_the_same_failure_the_artifact_recorded() {
+        let cfg = load(
+            r#"
+[harness]
+name = "vault"
+
+[profile.smoke]
+mode = "fuzz"
+cases = 1
+ops = 1
+kinds = ["Boom"]
+"#,
+        );
+        let cli = cli_with_mock();
+        let dir = temp_artifacts_dir("replay-e2e");
+        let args = RunArgs {
+            config: PathBuf::from("vault.cross-vm.toml"),
+            artifacts_dir: Some(dir.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        assert_eq!(cli.run_with_config(&cfg, &args).await, 1);
+
+        let artifact_path = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .expect("one artifact written")
+            .unwrap()
+            .path();
+
+        // `cross-vm replay <artifact>` must reproduce the exact same failure (still-broken SUT
+        // means it still fails; exit code 1, same as the original run).
+        let code = cli
+            .dispatch_replay(ReplayArgs {
+                artifact: artifact_path,
+            })
+            .await;
+        assert_eq!(code, 1, "the recorded Boom must still reproduce on replay");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

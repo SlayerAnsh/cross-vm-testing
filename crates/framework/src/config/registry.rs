@@ -23,7 +23,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::harness::{
-    sub_seed, Endurance, EnduranceConfig, Expectation, Fuzz, Harness, Invariant, KindMix,
+    sub_seed, Endurance, EnduranceConfig, Expectation, Failure, Fuzz, Harness, Invariant, KindMix,
     RunReport, Runner, Scenario, ScenarioStep, Stats,
 };
 
@@ -346,6 +346,60 @@ fn build_setup_request(resolved: &ResolvedProfile, seed: u64) -> SetupRequest {
     }
 }
 
+/// If `resolved.shrink` is set and `report` failed, greedily shrinks the failing history (spec
+/// section 10 / this task) before it ever reaches [`erase_report`]: rebuilds a fresh `(Ctx,
+/// World)` from `setup`/`seed` for every replay attempt via a scenario-mode [`Runner`], replaces
+/// the failure's `history` with the minimized sequence (keeping every other `Failure` field —
+/// `step`/`op`/`kind` — exactly as the original run reported them), and returns `(report, true)`.
+/// Returns `(report, false)` unchanged when shrink is disabled or the run passed.
+///
+/// `seed` is the concrete seed the *failing* run was driven with: the per-case sub-seed for fuzz
+/// (the case that actually failed, not the profile's base seed), the profile's own resolved seed
+/// for invariant/endurance. Shrink candidates must rebuild under the exact starting state the
+/// original failure surfaced under, or a "still fails" verdict would compare apples to oranges.
+///
+/// Shrinking is expensive (every candidate re-drives a fresh setup), so this only ever runs on an
+/// actual failure with `resolved.shrink` enabled — never on a passing run or when shrink is off
+/// (scenario profiles never call this at all: concrete steps are not generative).
+async fn maybe_shrink<H, F, S>(
+    mut report: RunReport<H::Operation>,
+    make_harness: &F,
+    setup: &S,
+    resolved: &ResolvedProfile,
+    seed: u64,
+) -> (RunReport<H::Operation>, bool)
+where
+    H: Harness,
+    F: Fn() -> H,
+    S: Fn(SetupRequest) -> SetupFuture<'static, H::World>,
+{
+    if !resolved.shrink || report.failure.is_none() {
+        return (report, false);
+    }
+    let failure = report.failure.take().expect("checked is_some above");
+    let history = failure.history;
+
+    let rebuild = || {
+        let req = build_setup_request(resolved, seed);
+        async move {
+            setup(req)
+                .await
+                .expect("shrink rebuild: setup failed")
+        }
+    };
+
+    let mut runner = Runner::<H, Scenario>::scenario(make_harness(), seed);
+    let shrunk_history = runner
+        .shrink_with_limit(history, resolved.check_every, resolved.shrink_limit, rebuild)
+        .await;
+
+    report.failure = Some(Failure {
+        history: shrunk_history,
+        ..failure
+    });
+    (report, true)
+}
+
 /// The generic body every registered harness's `run` closure calls into (spec section 7's `run`
 /// bullet list). No `dyn Harness` exists here: `H`, `F`, `S` are all concrete at the call site.
 async fn run_profile<H, F, S>(
@@ -380,7 +434,7 @@ where
             // report stands in for the profile (there is no single meaningful "combined" report
             // across independent cases, and the last case is as representative as any — see the
             // task report for the alternative considered and rejected).
-            let mut last: Option<(RunReport<H::Operation>, Option<Stats>)> = None;
+            let mut last: Option<(RunReport<H::Operation>, Option<Stats>, u64)> = None;
             for case in 0..cases {
                 let seed_i = sub_seed(base_seed, case);
                 tracing::info!(case, seed = seed_i, cases, "fuzz case starting");
@@ -399,13 +453,15 @@ where
                     .await;
                 let stats = runner.stats().cloned();
                 let failed = !report.passed();
-                last = Some((report, stats));
+                last = Some((report, stats, seed_i));
                 if failed {
                     break;
                 }
             }
             // `cases > 0` is checked above, so the loop always ran at least once.
-            let (report, stats) = last.expect("fuzz loop ran at least one case");
+            let (report, stats, failing_seed) = last.expect("fuzz loop ran at least one case");
+            let (report, shrunk) =
+                maybe_shrink(report, make_harness, setup, resolved, failing_seed).await;
             erase_report(
                 report,
                 harness_name,
@@ -413,6 +469,7 @@ where
                 "fuzz".to_string(),
                 stats,
                 started.elapsed(),
+                shrunk,
             )
             .map_err(|e| RunError::Serialize(e.to_string()))
         }
@@ -434,6 +491,7 @@ where
                 .await;
             let stats = runner.stats().cloned();
 
+            let (report, shrunk) = maybe_shrink(report, make_harness, setup, resolved, base_seed).await;
             erase_report(
                 report,
                 harness_name,
@@ -441,6 +499,7 @@ where
                 "invariant".to_string(),
                 stats,
                 started.elapsed(),
+                shrunk,
             )
             .map_err(|e| RunError::Serialize(e.to_string()))
         }
@@ -485,6 +544,10 @@ where
             let report = runner.run_with(cfg, selection.as_mix()).await;
             let stats = runner.stats().cloned();
 
+            // Shrink defaults to `false` for endurance (spec section 4.3); `resolved.shrink`
+            // already carries that mode-dependent default, so `maybe_shrink` only actually
+            // shrinks when a profile opted in explicitly.
+            let (report, shrunk) = maybe_shrink(report, make_harness, setup, resolved, base_seed).await;
             erase_report(
                 report,
                 harness_name,
@@ -492,6 +555,7 @@ where
                 "endurance".to_string(),
                 stats,
                 started.elapsed(),
+                shrunk,
             )
             .map_err(|e| RunError::Serialize(e.to_string()))
         }
@@ -527,6 +591,8 @@ where
             let report = runner.run_steps(steps, resolved.check_every).await;
             let stats = runner.stats().cloned();
 
+            // Scenario never shrinks: its steps are concrete, not generative, so there is nothing
+            // to minimize.
             erase_report(
                 report,
                 harness_name,
@@ -534,6 +600,7 @@ where
                 "scenario".to_string(),
                 stats,
                 started.elapsed(),
+                false,
             )
             .map_err(|e| RunError::Serialize(e.to_string()))
         }
@@ -684,6 +751,15 @@ mod tests {
             shrink_limit: 256,
             artifacts_dir: "target/cross-vm".to_string(),
             json_report: None,
+        }
+    }
+
+    /// [`resolved`] with `shrink`/`shrink_limit` overridden; every other field matches.
+    fn resolved_with_shrink(profile: Profile, shrink: bool, shrink_limit: usize) -> ResolvedProfile {
+        ResolvedProfile {
+            shrink,
+            shrink_limit,
+            ..resolved(profile)
         }
     }
 
@@ -1043,5 +1119,153 @@ mod tests {
             .await
             .expect("run ok");
         assert_eq!(report.steps, 4);
+    }
+
+    // ----- shrink-on-failure integration (Task 12) -----
+    //
+    // `MockHarness::Boom` fails the exact same way ("boom", state-independent) no matter what
+    // Pings preceded it, so any failing history containing a Boom must shrink down to exactly
+    // `[Boom]` — the single-op pass drops every other op and each drop still reproduces the same
+    // `FailureKind::Bug("boom")`. This makes the minimized length ("1") a deterministic assertion
+    // independent of the seeded rng stream, unlike asserting an exact *raw* history length would
+    // be.
+
+    #[tokio::test]
+    async fn fuzz_shrink_true_minimizes_the_failing_history_and_marks_it_shrunk() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        let profile = fuzz_profile(
+            1,
+            20,
+            Some(vec!["Ping".to_string(), "Boom".to_string()]),
+            None,
+        );
+
+        let no_shrink = resolved(profile.clone());
+        let report = registry
+            .run("mock", &no_shrink, &RunOptions::default())
+            .await
+            .expect("run ok");
+        let failure = report.failure.expect("must fail");
+        assert!(!failure.shrunk);
+        let raw_len = failure.history.as_array().expect("array").len();
+
+        let shrink = resolved_with_shrink(profile, true, 256);
+        let report = registry
+            .run("mock", &shrink, &RunOptions::default())
+            .await
+            .expect("run ok");
+        let failure = report.failure.expect("must fail");
+        assert!(failure.shrunk);
+        assert!(matches!(failure.kind, FailureKind::Bug(ref m) if m == "boom"));
+        let shrunk_len = failure.history.as_array().expect("array").len();
+        assert_eq!(shrunk_len, 1, "a lone Boom already reproduces; must shrink to it");
+        assert!(shrunk_len <= raw_len);
+    }
+
+    #[tokio::test]
+    async fn fuzz_shrink_false_leaves_the_raw_history_unshrunk() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        let profile = fuzz_profile(
+            1,
+            20,
+            Some(vec!["Ping".to_string(), "Boom".to_string()]),
+            None,
+        );
+        let resolved = resolved(profile);
+        let report = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .expect("run ok");
+        let failure = report.failure.expect("must fail");
+        assert!(!failure.shrunk);
+    }
+
+    #[tokio::test]
+    async fn invariant_shrink_true_minimizes_the_failing_history() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        let profile = invariant_profile(20, Some(vec!["Ping".to_string(), "Boom".to_string()]));
+        let resolved = resolved_with_shrink(profile, true, 256);
+
+        let report = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .expect("run ok");
+        let failure = report.failure.expect("must fail");
+        assert!(failure.shrunk);
+        assert_eq!(failure.history.as_array().expect("array").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tiny_shrink_limit_still_returns_a_reproducing_sequence() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        let profile = fuzz_profile(
+            1,
+            20,
+            Some(vec!["Ping".to_string(), "Boom".to_string()]),
+            None,
+        );
+        // A budget of 1 replay attempt: shrink_inner must still return *some* sequence (possibly
+        // not fully minimized) that reproduces the exact same failure, never panic or hang.
+        let resolved = resolved_with_shrink(profile, true, 1);
+
+        let report = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .expect("run ok");
+        let failure = report.failure.expect("must fail");
+        assert!(failure.shrunk);
+        assert!(matches!(failure.kind, FailureKind::Bug(ref m) if m == "boom"));
+        assert!(!failure.history.as_array().expect("array").is_empty());
+    }
+
+    #[tokio::test]
+    async fn endurance_shrink_defaults_to_false_and_never_shrinks() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        let profile = endurance_profile(
+            Some(std::time::Duration::from_secs(5)),
+            None,
+            Some(vec!["Ping".to_string(), "Boom".to_string()]),
+        );
+        // `resolved()` hardcodes `shrink: false`, matching endurance's mode default (spec section
+        // 4.3: `shrink` defaults to `false` for endurance, unlike fuzz/invariant).
+        let resolved = resolved(profile);
+
+        let report = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .expect("run ok");
+        let failure = report.failure.expect("must fail");
+        assert!(!failure.shrunk);
+    }
+
+    #[tokio::test]
+    async fn endurance_shrink_true_shrinks_when_explicitly_enabled() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        let profile = endurance_profile(
+            Some(std::time::Duration::from_secs(5)),
+            None,
+            Some(vec!["Ping".to_string(), "Boom".to_string()]),
+        );
+        let resolved = resolved_with_shrink(profile, true, 256);
+
+        let report = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .expect("run ok");
+        let failure = report.failure.expect("must fail");
+        assert!(failure.shrunk);
+        assert_eq!(failure.history.as_array().expect("array").len(), 1);
     }
 }

@@ -825,6 +825,10 @@ impl<H: Harness> Runner<H, Scenario> {
     ///
     /// Returns the minimized sequence. If `failing` does not actually fail, it is returned unchanged.
     ///
+    /// Shorthand for [`shrink_with_limit`](Runner::shrink_with_limit) with `limit =
+    /// [`DEFAULT_SHRINK_LIMIT`]; use `shrink_with_limit` directly when a profile's own
+    /// `shrink_limit` (spec `docs/config-runs-spec.md` section 4.3) overrides the default.
+    ///
     /// ```ignore
     /// let min = runner.shrink_with(report.failure.unwrap().history, check_every, || async {
     ///     vault_setup(seed).await.expect("setup")
@@ -840,10 +844,34 @@ impl<H: Harness> Runner<H, Scenario> {
         F: Fn() -> Fut,
         Fut: core::future::Future<Output = (Ctx, H::World)>,
     {
+        self.shrink_with_limit(failing, check_every, DEFAULT_SHRINK_LIMIT, rebuild)
+            .await
+    }
+
+    /// [`shrink_with`](Runner::shrink_with) under a configurable replay budget: the profile's own
+    /// `shrink_limit` (spec `docs/config-runs-spec.md` section 4.3) in place of the hardcoded
+    /// [`DEFAULT_SHRINK_LIMIT`]. `shrink_with` is sugar over this with `limit =
+    /// DEFAULT_SHRINK_LIMIT`; both park [`Stats`] for the duration and share every other
+    /// semantic (chunked-then-single-op delta-debug, same-failure-kind check, cadence, `rebuild`).
+    ///
+    /// A tiny `limit` still returns a reproducing sequence (unminimized, or partially minimized,
+    /// once the budget runs out) rather than failing outright: `shrink_inner` always returns the
+    /// best candidate found so far, never an error.
+    pub async fn shrink_with_limit<F, Fut>(
+        &mut self,
+        failing: Vec<H::Operation>,
+        check_every: usize,
+        limit: usize,
+        rebuild: F,
+    ) -> Vec<H::Operation>
+    where
+        F: Fn() -> Fut,
+        Fut: core::future::Future<Output = (Ctx, H::World)>,
+    {
         // Park stats for the whole shrink: replays are throwaway diagnostics-wise, and the caller's
         // tallies must keep describing the run they came from.
         let parked = self.stats.take();
-        let minimized = self.shrink_inner(failing, check_every, &rebuild).await;
+        let minimized = self.shrink_inner(failing, check_every, limit, &rebuild).await;
         self.stats = parked;
         minimized
     }
@@ -852,6 +880,7 @@ impl<H: Harness> Runner<H, Scenario> {
         &mut self,
         failing: Vec<H::Operation>,
         check_every: usize,
+        limit: usize,
         rebuild: &F,
     ) -> Vec<H::Operation>
     where
@@ -871,7 +900,7 @@ impl<H: Harness> Runner<H, Scenario> {
         };
 
         let mut current = failing;
-        let mut budget = DEFAULT_SHRINK_LIMIT;
+        let mut budget = limit;
 
         // Chunked pass: remove contiguous windows, largest first (classic ddmin coarse phase).
         let mut size = current.len() / 2;
@@ -886,7 +915,7 @@ impl<H: Harness> Runner<H, Scenario> {
                     .collect();
                 if !candidate.is_empty() {
                     let Some(fails) = self
-                        .try_candidate(&candidate, &ref_kind, check_every, rebuild, &mut budget)
+                        .try_candidate(&candidate, &ref_kind, check_every, rebuild, &mut budget, limit)
                         .await
                     else {
                         return current; // Budget exhausted: best so far.
@@ -908,7 +937,7 @@ impl<H: Harness> Runner<H, Scenario> {
             let mut candidate = current.clone();
             candidate.remove(i);
             let Some(fails) = self
-                .try_candidate(&candidate, &ref_kind, check_every, rebuild, &mut budget)
+                .try_candidate(&candidate, &ref_kind, check_every, rebuild, &mut budget, limit)
                 .await
             else {
                 return current; // Budget exhausted: best so far.
@@ -923,7 +952,9 @@ impl<H: Harness> Runner<H, Scenario> {
     }
 
     /// Run one shrink candidate against the budget: `None` when the budget is exhausted, else
-    /// `Some(fails_the_same_way)`. Each attempt re-drives on a fresh env from `rebuild`.
+    /// `Some(fails_the_same_way)`. Each attempt re-drives on a fresh env from `rebuild`. `limit`
+    /// is only used for the exhaustion log message (the actual budget is tracked by `budget`).
+    #[allow(clippy::too_many_arguments)]
     async fn try_candidate<F, Fut>(
         &mut self,
         candidate: &[H::Operation],
@@ -931,6 +962,7 @@ impl<H: Harness> Runner<H, Scenario> {
         check_every: usize,
         rebuild: &F,
         budget: &mut usize,
+        limit: usize,
     ) -> Option<bool>
     where
         F: Fn() -> Fut,
@@ -938,7 +970,7 @@ impl<H: Harness> Runner<H, Scenario> {
     {
         if *budget == 0 {
             tracing::warn!(
-                limit = DEFAULT_SHRINK_LIMIT,
+                limit,
                 "shrink replay budget exhausted; returning best sequence found so far"
             );
             return None;

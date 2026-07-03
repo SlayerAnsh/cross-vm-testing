@@ -64,10 +64,12 @@ pub struct ErasedFailure {
     /// failure (no op was in flight).
     pub op_debug: Option<String>,
     /// The full operation history up to and including the failing op, serialized as JSON; feeds
-    /// the replay artifact writer (a later task).
+    /// the replay artifact writer. The shrunk sequence when `erase_report`'s `shrunk` argument
+    /// is `true`, the raw history otherwise.
     pub history: serde_json::Value,
-    /// Always `false` here: shrinking a failing history before the artifact write is a later
-    /// task's concern (P4/shrink), not this one's.
+    /// Whether `history` above is the auto-shrunk sequence (`resolved.shrink` was `true` and the
+    /// run failed) or the raw, unshrunk history. Set by `erase_report`'s caller
+    /// (`crate::config::registry`), never derived here.
     pub shrunk: bool,
 }
 
@@ -80,6 +82,11 @@ pub struct ErasedFailure {
 ///
 /// Errors only if `Op`'s `Serialize` impl fails on the failure history (an out-of-range integer,
 /// a non-string map key, ...); a well-behaved op enum never hits this.
+///
+/// `shrunk` is the caller's own determination (`crate::config::registry`'s `maybe_shrink`): `true`
+/// when `report.failure.history` is already the auto-shrunk sequence, `false` when it is the raw
+/// history (shrink disabled, or this profile's mode never shrinks). This function does not shrink
+/// anything itself; it only stamps the flag onto the erased failure.
 pub(crate) fn erase_report<Op>(
     report: RunReport<Op>,
     harness: String,
@@ -87,6 +94,7 @@ pub(crate) fn erase_report<Op>(
     mode: String,
     stats: Option<Stats>,
     elapsed: std::time::Duration,
+    shrunk: bool,
 ) -> Result<ErasedReport, serde_json::Error>
 where
     Op: serde::Serialize + core::fmt::Debug,
@@ -99,7 +107,7 @@ where
                 op_debug: f.op.as_ref().map(|o| format!("{o:?}")),
                 history: serde_json::to_value(&f.history)?,
                 kind: f.kind,
-                shrunk: false,
+                shrunk,
             })
         })
         .transpose()?;

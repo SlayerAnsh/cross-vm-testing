@@ -18,6 +18,28 @@ fn no_chains_config_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vault.no-chains.cross-vm.toml")
 }
 
+/// The `boom.cross-vm.toml` fixture: a tiny, deterministically-failing harness (`src/boom.rs`)
+/// registered alongside `vault`, used only by the replay-artifact/shrink/`replay`-subcommand
+/// tests below (the vault harness has no reachable bug to exercise them with).
+fn boom_config_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("boom.cross-vm.toml")
+}
+
+/// A fresh temp directory under the OS temp dir, unique per test invocation, so parallel `cargo
+/// test` runs of this file never collide on the same `--artifacts-dir`.
+fn temp_artifacts_dir(label: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "cross-vm-cli-e2e-artifacts-{}-{}-{label}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp artifacts dir");
+    dir
+}
+
 /// Runs the `cross-vm` bin built by this same `cargo test` invocation (`CARGO_BIN_EXE_cross-vm`,
 /// set by Cargo for every integration test in a crate that has the `[[bin]]`) with `args`.
 fn cross_vm(args: &[&str]) -> Output {
@@ -184,6 +206,132 @@ fn run_with_json_report_writes_a_schema_version_one_envelope() {
     assert!(profiles[0]["steps"].as_u64().unwrap() > 0);
 
     std::fs::remove_file(&path).ok();
+}
+
+// -------------------------------------------------------------------------------------------
+// Replay artifacts + shrink + `replay` subcommand (spec `docs/config-runs-spec.md` section 10),
+// over the deterministically-failing `boom` harness (`src/boom.rs`).
+// -------------------------------------------------------------------------------------------
+
+#[test]
+fn a_failing_fuzz_profile_writes_a_shrunk_replay_artifact() {
+    let dir = temp_artifacts_dir("shrink-and-write");
+    let out = cross_vm(&[
+        "run",
+        boom_config_path().to_str().unwrap(),
+        "--profile",
+        "fails",
+        "--artifacts-dir",
+        dir.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        exit_code(&out),
+        1,
+        "the boom harness must fail (Bug): stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("artifacts dir exists")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 1, "exactly one artifact for one failing profile");
+    let artifact_path = entries[0].path();
+    assert!(
+        artifact_path.to_string_lossy().ends_with(".replay.toml"),
+        "{artifact_path:?}"
+    );
+
+    let text = std::fs::read_to_string(&artifact_path).expect("read artifact");
+    // `boom.cross-vm.toml`'s `fails` profile sets `shrink = true` and mixes Noop/Boom over 20
+    // ops; Boom fails the exact same way regardless of any Noops before it, so the artifact's
+    // history must be minimized down to the one op that actually matters.
+    assert!(text.contains("shrunk = true"), "{text}");
+    assert_eq!(
+        text.matches("op = ").count(),
+        1,
+        "shrink must minimize the history to a single step: {text}"
+    );
+    assert!(text.contains(r#"op = "Boom""#), "{text}");
+
+    // The artifact must be a valid config on its own: `cross-vm validate` never touches a chain.
+    let validate_out = cross_vm(&["validate", artifact_path.to_str().unwrap()]);
+    assert_eq!(
+        exit_code(&validate_out),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&validate_out.stderr)
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn replay_subcommand_reproduces_the_recorded_failure() {
+    let dir = temp_artifacts_dir("replay-e2e");
+    let first = cross_vm(&[
+        "run",
+        boom_config_path().to_str().unwrap(),
+        "--profile",
+        "fails",
+        "--artifacts-dir",
+        dir.to_str().unwrap(),
+    ]);
+    assert_eq!(exit_code(&first), 1);
+
+    let artifact_path = std::fs::read_dir(&dir)
+        .unwrap()
+        .next()
+        .expect("one artifact written")
+        .unwrap()
+        .path();
+
+    // `cross-vm replay <artifact>` is sugar for `run <artifact> --profile replay`: the recorded
+    // Boom must still reproduce (exit code 1), since nothing about the (nonexistent) bug was
+    // fixed between the original run and the replay.
+    let replay_out = cross_vm(&["replay", artifact_path.to_str().unwrap()]);
+    assert_eq!(
+        exit_code(&replay_out),
+        1,
+        "stderr: {}",
+        String::from_utf8_lossy(&replay_out.stderr)
+    );
+    // `tracing_subscriber::fmt()`'s default writer is stdout, not stderr.
+    assert!(
+        String::from_utf8_lossy(&replay_out.stdout).contains("boom: deterministic failure"),
+        "stdout: {}",
+        String::from_utf8_lossy(&replay_out.stdout)
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_passing_profile_writes_no_replay_artifact() {
+    // The vault `smoke` profile deterministically passes on mocks (see
+    // `run_smoke_profile_passes_on_mocks` above); reused here to exercise the "no artifact on a
+    // pass" contract with the same `--artifacts-dir` wiring the failing tests above use.
+    let dir = temp_artifacts_dir("no-artifact-on-pass");
+    let out = cross_vm(&[
+        "run",
+        config_path().to_str().unwrap(),
+        "--profile",
+        "smoke",
+        "--artifacts-dir",
+        dir.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !dir.exists() || std::fs::read_dir(&dir).unwrap().next().is_none(),
+        "a passing run must write no replay artifact"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
