@@ -24,7 +24,7 @@ define_wallet_roster! {
 alloy::sol!(
     #[sol(abi)]
     Counter,
-    "../../examples/solidity-contracts/out/Counter.sol/Counter.json"
+    "../../contracts/solidity/out/Counter.sol/Counter.json"
 );
 
 const ENV_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");

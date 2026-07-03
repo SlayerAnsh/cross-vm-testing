@@ -25,7 +25,7 @@ define_wallet_roster! {
 const ENV_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");
 const COUNTER_ARTIFACT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/solidity-contracts/out/Counter.sol/Counter.json"
+    "/../../contracts/solidity/out/Counter.sol/Counter.json"
 );
 
 /// Read the Counter creation bytecode from the forge artifact at runtime (so this file compiles

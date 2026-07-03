@@ -15,7 +15,7 @@ env:
   # Incremental compilation bloats the cache without helping a cold CI runner.
   CARGO_INCREMENTAL: 0
   # Single source of truth for the pinned Agave toolchain (install URL + caches).
-  # Its platform-tools Cargo must keep parsing the committed solana-contracts
+  # Its platform-tools Cargo must keep parsing the committed solana
   # lockfile; see the comment on the Install Solana step before bumping.
   SOLANA_VERSION: v4.0.0
   # Keep in step with [workspace.package] rust-version in Cargo.toml.
@@ -111,10 +111,10 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Solana artifacts: install+cache pinned Agave v4.0.0, cargo build-sbf in the
-  # ISOLATED solana-contracts workspace, upload the 3 .so. This is light: the
-  # root workspace excludes examples/ and solana-contracts is its own workspace
+  # ISOLATED solana workspace, upload the 3 .so. This is light: the
+  # root workspace excludes examples/ and solana is its own workspace
   # (members = ["programs/*"]), so build-sbf compiles ONLY the 3 SBF programs
-  # under platform-tools, never the main target. Do NOT add solana-contracts to
+  # under platform-tools, never the main target. Do NOT add solana to
   # the root workspace or this job balloons.
   # ---------------------------------------------------------------------------
   solana-artifacts:
@@ -134,7 +134,7 @@ jobs:
           key: solana-${{ env.SOLANA_VERSION }}-${{ runner.os }}
       # The SOLANA_VERSION pin (workflow env, single knob): its platform-tools
       # Cargo understands edition2024, required by a transitive dep (toml_parser)
-      # in the committed solana-contracts/Cargo.lock. Older lines (v2.1.0 ships
+      # in the committed solana/Cargo.lock. Older lines (v2.1.0 ships
       # Cargo 1.79) fail to parse it. Keep in step with the lock. cargo-build-sbf
       # builds the .so directly (no Anchor CLI: its version handshake silently
       # produced no .so).
@@ -148,7 +148,7 @@ jobs:
       # Cache the isolated SBF workspace target + registry, keyed on its own lock.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: examples/solana-contracts
+          workspaces: contracts/solana
           shared-key: solana-sbf-${{ env.SOLANA_VERSION }}
           cache-on-failure: true
       - name: cargo build-sbf
@@ -156,14 +156,14 @@ jobs:
       - name: Verify .so exist
         run: |
           for so in counter ping_pong vault; do
-            test -f "examples/solana-contracts/target/deploy/$so.so" \
+            test -f "contracts/solana/target/deploy/$so.so" \
               || { echo "missing $so.so after compile-solana"; exit 1; }
           done
       - name: Upload Solana artifacts
         uses: actions/upload-artifact@v7
         with:
           name: solana-so
-          path: examples/solana-contracts/target/deploy/*.so
+          path: contracts/solana/target/deploy/*.so
           if-no-files-found: error
           retention-days: 1
 
@@ -180,14 +180,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: foundry-rs/foundry-toolchain@v1
       - name: forge fmt
-        working-directory: examples/solidity-contracts
+        working-directory: contracts/solidity
         run: forge fmt --check
       - name: forge build
         run: make compile-solidity
       - name: Verify JSON exist
         run: |
           for c in Counter PingPong Vault; do
-            test -f "examples/solidity-contracts/out/$c.sol/$c.json" \
+            test -f "contracts/solidity/out/$c.sol/$c.json" \
               || { echo "missing $c.json after compile-solidity"; exit 1; }
           done
       # Upload the whole out/ dir so the Name.sol/Name.json nesting that sol!
@@ -196,13 +196,13 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: solidity-out
-          path: examples/solidity-contracts/out
+          path: contracts/solidity/out
           if-no-files-found: error
           retention-days: 1
 
   # ---------------------------------------------------------------------------
   # Tron artifacts: Node + pnpm + tronbox (TRON's solc fork, "tronc"). Mirrors the
-  # solidity-contracts src/*.sol into a gitignored generated/ (prepare-contracts.sh)
+  # solidity src/*.sol into a gitignored generated/ (prepare-contracts.sh)
   # and compiles them to build/*.json. The 3 JSON are embedded by sol! in the
   # integration-tests support files (only the TVM creation BYTECODE is taken; the
   # ABI matches the EVM build). pnpm fetches tronbox + the tron solc binary on a
@@ -221,20 +221,20 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: examples/tron-contracts/pnpm-lock.yaml
+          cache-dependency-path: contracts/tron/pnpm-lock.yaml
       - name: tronbox compile
         run: make compile-tron
       - name: Verify JSON exist
         run: |
           for c in Counter PingPong Vault; do
-            test -f "examples/tron-contracts/build/$c.json" \
+            test -f "contracts/tron/build/$c.json" \
               || { echo "missing $c.json after compile-tron"; exit 1; }
           done
       - name: Upload Tron artifacts
         uses: actions/upload-artifact@v7
         with:
           name: tron-build
-          path: examples/tron-contracts/build
+          path: contracts/tron/build
           if-no-files-found: error
           retention-days: 1
 
@@ -259,38 +259,38 @@ jobs:
         with:
           shared-key: cross-vm-main   # SHARED with the lint job
           cache-on-failure: true
-      # Solana .so -> examples/solana-contracts/target/deploy/  (include_bytes!)
+      # Solana .so -> contracts/solana/target/deploy/  (include_bytes!)
       - name: Download Solana artifacts
         uses: actions/download-artifact@v8
         with:
           name: solana-so
-          path: examples/solana-contracts/target/deploy
-      # Solidity .json -> examples/solidity-contracts/out/  (sol!, consumed by
+          path: contracts/solana/target/deploy
+      # Solidity .json -> contracts/solidity/out/  (sol!, consumed by
       # both crates/solidity/tests and the integration-tests support files).
       - name: Download Solidity artifacts
         uses: actions/download-artifact@v8
         with:
           name: solidity-out
-          path: examples/solidity-contracts/out
-      # Tron .json -> examples/tron-contracts/build/  (sol!, consumed by the
+          path: contracts/solidity/out
+      # Tron .json -> contracts/tron/build/  (sol!, consumed by the
       # integration-tests support files for the TVM creation bytecode).
       - name: Download Tron artifacts
         uses: actions/download-artifact@v8
         with:
           name: tron-build
-          path: examples/tron-contracts/build
+          path: contracts/tron/build
       - name: Verify embedded artifacts are in place
         run: |
           for so in counter ping_pong vault; do
-            test -f "examples/solana-contracts/target/deploy/$so.so" \
+            test -f "contracts/solana/target/deploy/$so.so" \
               || { echo "missing $so.so"; exit 1; }
           done
           for c in Counter PingPong Vault; do
-            test -f "examples/solidity-contracts/out/$c.sol/$c.json" \
+            test -f "contracts/solidity/out/$c.sol/$c.json" \
               || { echo "missing $c.json"; exit 1; }
           done
           for c in Counter PingPong Vault; do
-            test -f "examples/tron-contracts/build/$c.json" \
+            test -f "contracts/tron/build/$c.json" \
               || { echo "missing tron $c.json"; exit 1; }
           done
       # Clippy over EVERY target (tests, examples, benches): the artifact-free

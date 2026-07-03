@@ -5,29 +5,29 @@
 compile: compile-solidity compile-solana compile-cosmwasm compile-tron
 
 compile-solidity:
-	$(MAKE) -C examples/solidity-contracts build
+	$(MAKE) -C contracts/solidity build
 
 compile-solana:
-	$(MAKE) -C examples/solana-contracts build
+	$(MAKE) -C contracts/solana build
 
 compile-cosmwasm:
-	$(MAKE) -C examples/cosmwasm-contracts/counter build
-	$(MAKE) -C examples/cosmwasm-contracts/vault build
-	$(MAKE) -C examples/cosmwasm-contracts/ping-pong build
+	$(MAKE) -C contracts/cosmwasm/counter build
+	$(MAKE) -C contracts/cosmwasm/vault build
+	$(MAKE) -C contracts/cosmwasm/ping-pong build
 
 compile-tron:
-	$(MAKE) -C examples/tron-contracts build
+	$(MAKE) -C contracts/tron build
 
 setup-solidity:
-	cd examples/solidity-contracts && forge install foundry-rs/forge-std
+	cd contracts/solidity && forge install foundry-rs/forge-std
 
 setup-tron:
-	$(MAKE) -C examples/tron-contracts setup
+	$(MAKE) -C contracts/tron setup
 
 # FORMAT
 fmt:
 	cargo fmt --all
-	cd examples/solidity-contracts && forge fmt
+	cd contracts/solidity && forge fmt
 
 # TESTS
 # Pass extra cargo/libtest args via ARGS, e.g.

@@ -1,6 +1,6 @@
 //! Integration test: full store_code -> instantiate -> execute -> query path through the
 //! CosmWasm provider, driving the canonical counter contract from
-//! `examples/cosmwasm-contracts/counter`. The example crate is consumed as an rlib and wrapped
+//! `contracts/cosmwasm/counter`. The example crate is consumed as an rlib and wrapped
 //! in-process via `ContractWrapper`, so no external wasm artifact is required.
 
 use std::rc::Rc;

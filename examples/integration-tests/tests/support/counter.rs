@@ -40,7 +40,7 @@ mod evm_counter {
     alloy::sol!(
         #[sol(abi)]
         Counter,
-        "../solidity-contracts/out/Counter.sol/Counter.json"
+        "../../contracts/solidity/out/Counter.sol/Counter.json"
     );
 }
 
@@ -50,7 +50,7 @@ mod tron_counter {
     alloy::sol!(
         #[sol(abi)]
         Counter,
-        "../tron-contracts/build/Counter.json"
+        "../../contracts/tron/build/Counter.json"
     );
 }
 
@@ -63,7 +63,7 @@ const DISC_INCREMENT: [u8; 8] = [11, 18, 104, 9, 104, 174, 59, 33];
 /// Built by `make compile-solana` (`cargo-build-sbf`).
 const COUNTER_SO: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../solana-contracts/target/deploy/counter.so"
+    "/../../contracts/solana/target/deploy/counter.so"
 ));
 
 /// The cross-VM counter's logical methods. `#[cross_vm_contract(Counter)]` turns this into the

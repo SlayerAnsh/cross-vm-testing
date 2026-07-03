@@ -38,7 +38,7 @@ pub mod evm_pp {
     alloy::sol!(
         #[sol(abi)]
         PingPong,
-        "../solidity-contracts/out/PingPong.sol/PingPong.json"
+        "../../contracts/solidity/out/PingPong.sol/PingPong.json"
     );
 }
 
@@ -48,7 +48,7 @@ mod tron_pp {
     alloy::sol!(
         #[sol(abi)]
         PingPong,
-        "../tron-contracts/build/PingPong.json"
+        "../../contracts/tron/build/PingPong.json"
     );
 }
 
@@ -65,7 +65,7 @@ const DISC_ACKNOWLEDGE_PACKET: [u8; 8] = [232, 102, 184, 27, 48, 4, 54, 252];
 /// Built by `make compile-solana` (`anchor build` / `cargo-build-sbf`).
 const PING_PONG_SO: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../solana-contracts/target/deploy/ping_pong.so"
+    "/../../contracts/solana/target/deploy/ping_pong.so"
 ));
 
 /// A VM-agnostic snapshot of a ping-pong contract's counters.

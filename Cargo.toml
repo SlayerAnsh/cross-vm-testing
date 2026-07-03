@@ -13,10 +13,11 @@ members = [
     # Multi-chain integration & example tests, co-located with the contract artifacts they embed.
     "examples/integration-tests",
 ]
-# Example contracts are standalone crates (their own workspaces / build toolchains); they are
-# consumed by tests via path dependencies but must not be workspace members. The explicit
-# `integration-tests` member above overrides this exclude for that one subdirectory.
+# Example contracts (now under `contracts/`) are standalone crates (their own workspaces / build
+# toolchains); they are consumed by tests via path dependencies but must not be workspace members.
+# The explicit `integration-tests` member above overrides this exclude for that one subdirectory.
 exclude = [
+    "contracts",
     "examples",
 ]
 

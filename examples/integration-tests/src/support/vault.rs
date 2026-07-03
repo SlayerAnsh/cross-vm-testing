@@ -29,7 +29,7 @@ mod evm_vault {
     alloy::sol!(
         #[sol(abi)]
         Vault,
-        "../solidity-contracts/out/Vault.sol/Vault.json"
+        "../../contracts/solidity/out/Vault.sol/Vault.json"
     );
 }
 
@@ -39,7 +39,7 @@ mod tron_vault {
     alloy::sol!(
         #[sol(abi)]
         Vault,
-        "../tron-contracts/build/Vault.json"
+        "../../contracts/tron/build/Vault.json"
     );
 }
 
@@ -52,7 +52,7 @@ const VDISC_REPAY: [u8; 8] = [234, 103, 67, 82, 208, 234, 219, 166];
 /// Built by `make compile-solana` (`cargo-build-sbf`).
 const VAULT_SO: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../solana-contracts/target/deploy/vault.so"
+    "/../../contracts/solana/target/deploy/vault.so"
 ));
 
 /// A cross-VM collateralized-debt vault: deposit / withdraw / borrow / repay, identical on any

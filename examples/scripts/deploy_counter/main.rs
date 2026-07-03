@@ -7,8 +7,8 @@
 //! artifacts in [`artifacts`].
 //!
 //! Prerequisites (artifacts embedded at compile time; wallet funded at run time):
-//!   make compile-solidity   # examples/solidity-contracts/out/Counter.sol/Counter.json
-//!   make compile-cosmwasm   # examples/cosmwasm-contracts/counter/artifacts/counter.wasm
+//!   make compile-solidity   # contracts/solidity/out/Counter.sol/Counter.json
+//!   make compile-cosmwasm   # contracts/cosmwasm/counter/artifacts/counter.wasm
 //! A workspace `.env` must define `MNEMONIC_TEST`, funded on BOTH the EVM address (BIP-44 coin 60)
 //! and the Osmosis address (coin 118) derived from it. If a wallet is unfunded, `setup` fails and
 //! the per-chain error is reported (the run continues to the next chain and exits non-zero).

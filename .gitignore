@@ -4,22 +4,22 @@
 !.env.example
 
 # Solidity (Foundry)
-examples/solidity-contracts/out/
-examples/solidity-contracts/cache/
-examples/solidity-contracts/lib/
+contracts/solidity/out/
+contracts/solidity/cache/
+contracts/solidity/lib/
 
 # Solana (Anchor)
-examples/solana-contracts/target/
-examples/solana-contracts/.anchor/
+contracts/solana/target/
+contracts/solana/.anchor/
 
 # CosmWasm
-examples/cosmwasm-contracts/counter/target/
-examples/cosmwasm-contracts/vault/target/
+contracts/cosmwasm/counter/target/
+contracts/cosmwasm/vault/target/
 
 # Tron (Tronbox)
-examples/tron-contracts/generated/
-examples/tron-contracts/build/
-examples/tron-contracts/node_modules/
+contracts/tron/generated/
+contracts/tron/build/
+contracts/tron/node_modules/
 
 # Example scripts (Rust build output)
 examples/scripts/target/
