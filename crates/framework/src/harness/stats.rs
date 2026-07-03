@@ -27,17 +27,14 @@ pub(crate) enum OpOutcome<'a> {
 
 /// Timing and outcome tally for one op label.
 ///
-/// Serializes (behind the `serde` feature) with all fields, including the private `_ns`
-/// accumulators (`total_ns`/`sum_sq_ns`/`min_ns`/`max_ns`): every field here is already a plain
-/// `usize`/`u128`/`BTreeMap<String, usize>`, all natively `Serialize`, so nothing needs
-/// `#[serde(skip)]` or a `serialize_with` conversion. Field visibility does not affect what a
-/// derive emits, so the raw nanosecond totals appear in a JSON report by their internal names
-/// rather than as `Duration`s; this keeps the derive a plain, lossless mirror of the struct
-/// instead of re-deriving `min()`/`max()`/`avg()`/`stddev()` by hand. A JSON consumer wanting
-/// `Duration`-shaped values can convert `*_ns` (nanoseconds) itself, the same computation these
-/// accessor methods do.
+/// Serializes (behind the `serde` feature) via a hand-written `Serialize` impl into a
+/// consumer-meaningful shape: `count`, the four outcome tallies, `errors`, and derived timing
+/// (`total_ns`/`mean_ns`/`min_ns`/`max_ns`/`stddev_ns`), all as nanosecond `u64`s computed through
+/// the same [`OpStat::total`]/[`OpStat::avg`]/[`OpStat::min`]/[`OpStat::max`]/[`OpStat::stddev`]
+/// accessors a caller would use directly. The internal variance accumulator (`sum_sq_ns`) is a
+/// pure computation artifact with no meaning to a report consumer, so it is never serialized
+/// under its raw name; `stddev_ns` is what it exists to produce.
 #[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct OpStat {
     /// Legitimate acceptances.
     pub accepted: usize,
@@ -65,6 +62,11 @@ impl OpStat {
         } else {
             self.rejected as f64 / self.count as f64
         }
+    }
+
+    /// Sum of all `apply` wall-clock times.
+    pub fn total(&self) -> Duration {
+        ns_to_duration(self.total_ns)
     }
 
     /// Minimum `apply` wall-clock, or zero if nothing was recorded.
@@ -99,6 +101,33 @@ impl OpStat {
         let mean = self.total_ns as f64 / n;
         let var = (self.sum_sq_ns as f64 / n) - mean * mean;
         Duration::from_nanos(var.max(0.0).sqrt() as u64)
+    }
+}
+
+/// Consumer-facing JSON shape for [`OpStat`]: outcome tallies plus derived nanosecond timing
+/// (`total_ns`/`mean_ns`/`min_ns`/`max_ns`/`stddev_ns`), computed via the same accessors a Rust
+/// caller would use. Deliberately hand-written rather than derived so the internal `sum_sq_ns`
+/// variance accumulator never leaks into the wire format under its raw name.
+#[cfg(feature = "serde")]
+impl serde::Serialize for OpStat {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut out = serializer.serialize_struct("OpStat", 11)?;
+        out.serialize_field("count", &self.count)?;
+        out.serialize_field("accepted", &self.accepted)?;
+        out.serialize_field("rejected", &self.rejected)?;
+        out.serialize_field("bug", &self.bug)?;
+        out.serialize_field("infra", &self.infra)?;
+        out.serialize_field("total_ns", &(self.total().as_nanos() as u64))?;
+        out.serialize_field("mean_ns", &(self.avg().as_nanos() as u64))?;
+        out.serialize_field("min_ns", &(self.min().as_nanos() as u64))?;
+        out.serialize_field("max_ns", &(self.max().as_nanos() as u64))?;
+        out.serialize_field("stddev_ns", &(self.stddev().as_nanos() as u64))?;
+        out.serialize_field("errors", &self.errors)?;
+        out.end()
     }
 }
 
@@ -272,17 +301,32 @@ mod tests {
             let stat = stats.get("Deposit").unwrap();
             let value = serde_json::to_value(stat).unwrap();
 
+            assert_eq!(value["count"], 2);
             assert_eq!(value["accepted"], 1);
             assert_eq!(value["rejected"], 1);
             assert_eq!(value["bug"], 0);
             assert_eq!(value["infra"], 0);
-            assert_eq!(value["count"], 2);
             assert_eq!(value["errors"], serde_json::json!({"cap": 1}));
-            // Timing accumulators are plain, already-`Serialize` `u128` nanosecond totals (no
-            // field needed `#[serde(skip)]`/`serialize_with`): present, and consistent with
-            // `min()`/`max()`'s own nanosecond math.
+            // Derived, consumer-meaningful timing fields (nanoseconds), computed via the same
+            // accessors a Rust caller would use — not the raw internal accumulators.
+            assert_eq!(value["total_ns"], 20_000_000u64);
+            assert_eq!(value["mean_ns"], 10_000_000u64);
             assert_eq!(value["min_ns"], 5_000_000u64);
             assert_eq!(value["max_ns"], 15_000_000u64);
+            assert_eq!(value["stddev_ns"], stat.stddev().as_nanos() as u64);
+            // The raw variance accumulator must never leak into the wire format.
+            assert!(value.get("sum_sq_ns").is_none());
+            // Exactly the intended field set, nothing extra.
+            let obj = value.as_object().unwrap();
+            let expected: std::collections::BTreeSet<&str> = [
+                "count", "accepted", "rejected", "bug", "infra", "total_ns", "mean_ns", "min_ns",
+                "max_ns", "stddev_ns", "errors",
+            ]
+            .into_iter()
+            .collect();
+            let actual: std::collections::BTreeSet<&str> =
+                obj.keys().map(String::as_str).collect();
+            assert_eq!(actual, expected);
         }
 
         #[test]

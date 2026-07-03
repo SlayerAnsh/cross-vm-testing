@@ -639,9 +639,12 @@ async fn run_selected(
 ) -> u8 {
     let mut code = 0u8;
     let mut reports: Vec<ErasedReport> = Vec::new();
-    // CLI flag wins over a profile's own `json_report` key (same precedence every other
-    // `RunOptions` field follows); once a path is found it is never overwritten by a later
-    // profile's own key, since the envelope is written to exactly one file.
+    // `resolve_profile` already folds `opts.json_report.or(profile.json_report)` into
+    // `resolved.json_report`, so checking `opts.json_report` here first is only a fast path that
+    // skips resolving the first profile when the CLI flag alone already decides the path; the
+    // `is_none()` fallback below reaches the same value `resolved.json_report` would give. Once a
+    // path is found it is never overwritten by a later profile's own key, since the envelope is
+    // written to exactly one file.
     let mut json_report_path = opts.json_report.clone();
 
     for name in names {
