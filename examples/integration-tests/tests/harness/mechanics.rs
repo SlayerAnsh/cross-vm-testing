@@ -341,6 +341,130 @@ async fn run_case_on_good_bank_passes() {
 }
 
 #[tokio::test]
+async fn run_steps_expect_rejected_but_accepted_fails_with_exact_message() {
+    let (bank, _log) = Bank::new(1, Behavior::Good);
+    let (ctx, world) = bank_env(1).await.unwrap();
+    let mut r = Runner::scenario(bank, 0);
+    r.setup(ctx, world);
+    let steps = vec![ScenarioStep {
+        expect: Expectation::Rejected,
+        ..ScenarioStep::new(Op::Deposit {
+            user: 0,
+            amount: 10,
+        })
+    }];
+    let rep = r.run_steps(steps, 1).await;
+    let f = rep.failure.expect("must fail");
+    assert_eq!(f.step, 1);
+    match f.kind {
+        FailureKind::Bug(msg) => assert_eq!(
+            msg, "step 1: expected rejection, operation was accepted",
+            "exact mismatch message required"
+        ),
+        other => panic!("expected Bug, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn run_steps_expect_accepted_but_rejected_fails_with_exact_message() {
+    let (bank, _log) = Bank::new(1, Behavior::Good);
+    let (ctx, world) = bank_env(1).await.unwrap();
+    let mut r = Runner::scenario(bank, 0);
+    r.setup(ctx, world);
+    // Balance starts at 1_000; withdrawing 5_000 is a legitimate rejection.
+    let steps = vec![ScenarioStep::new(Op::Withdraw {
+        user: 0,
+        amount: 5_000,
+    })];
+    let rep = r.run_steps(steps, 1).await;
+    let f = rep.failure.expect("must fail");
+    assert_eq!(f.step, 1);
+    match f.kind {
+        FailureKind::Bug(msg) => assert_eq!(
+            msg, "step 1: expected acceptance, operation was rejected",
+            "exact mismatch message required"
+        ),
+        other => panic!("expected Bug, got {other:?}"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_steps_delay_advances_the_paused_clock() {
+    let (bank, _log) = Bank::new(1, Behavior::Good);
+    let (ctx, world) = bank_env(1).await.unwrap();
+    let mut r = Runner::scenario(bank, 0);
+    r.setup(ctx, world);
+    let start = tokio::time::Instant::now();
+    let steps = vec![ScenarioStep {
+        delay: Duration::from_millis(500),
+        ..ScenarioStep::new(Op::Deposit {
+            user: 0,
+            amount: 10,
+        })
+    }];
+    let rep = r.run_steps(steps, 1).await;
+    assert!(rep.passed(), "{:?}", rep.failure);
+    assert!(
+        start.elapsed() >= Duration::from_millis(500),
+        "virtual clock should have advanced by the step delay, elapsed = {:?}",
+        start.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn run_steps_check_false_skips_the_sweep_after_that_step() {
+    // DriftModel: a successful withdraw decrements chain but not the model. A checked sweep after
+    // the withdraw would catch the drift; `check = false` on that step must skip it.
+    let (bank, _log) = Bank::new(1, Behavior::DriftModel);
+    let (ctx, world) = bank_env(1).await.unwrap();
+    let mut r = Runner::scenario(bank, 0);
+    r.setup(ctx, world);
+    let steps = vec![
+        ScenarioStep::new(Op::Deposit {
+            user: 0,
+            amount: 50,
+        }),
+        ScenarioStep {
+            check: false,
+            ..ScenarioStep::new(Op::Withdraw {
+                user: 0,
+                amount: 20,
+            })
+        },
+    ];
+    let rep = r.run_steps(steps, 1).await;
+    assert!(
+        rep.passed(),
+        "drift after an unchecked step must not surface: {:?}",
+        rep.failure
+    );
+}
+
+#[tokio::test]
+async fn run_steps_check_every_zero_disables_all_sweeps() {
+    let (bank, _log) = Bank::new(1, Behavior::DriftModel);
+    let (ctx, world) = bank_env(1).await.unwrap();
+    let mut r = Runner::scenario(bank, 0);
+    r.setup(ctx, world);
+    let steps = vec![
+        ScenarioStep::new(Op::Deposit {
+            user: 0,
+            amount: 50,
+        }),
+        ScenarioStep::new(Op::Withdraw {
+            user: 0,
+            amount: 20,
+        }),
+    ];
+    let rep = r.run_steps(steps, 0).await;
+    assert!(
+        rep.passed(),
+        "check_every = 0 must disable every sweep, even on check = true steps: {:?}",
+        rep.failure
+    );
+}
+
+#[tokio::test]
 async fn coverage_reports_per_invariant_tallies() {
     // A checked run: `Untriggered` is always skipped (held 0), the others hold every check.
     let (bank, _log) = Bank::new(2, Behavior::Good);

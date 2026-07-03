@@ -22,7 +22,10 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::harness::{sub_seed, Fuzz, Harness, Invariant, KindMix, RunReport, Runner, Stats};
+use crate::harness::{
+    sub_seed, Expectation, Fuzz, Harness, Invariant, KindMix, RunReport, Runner, Scenario,
+    ScenarioStep, Stats,
+};
 
 use super::erased::{erase_report, LocalBoxFuture};
 use super::{ChainSpecData, ErasedReport, ResolvedProfile, RunOptions, SetupFuture, SetupRequest};
@@ -76,8 +79,8 @@ pub enum RunError {
     /// `--cases 0` override).
     #[error("{0}")]
     Invalid(String),
-    /// This run mode is not implemented yet: the scenario and endurance drivers land in a later
-    /// task (P3). `validate` still type-checks scenario `op`s today; only the `run` arm is
+    /// This run mode is not implemented yet: the endurance driver lands in a later task (P3).
+    /// `validate` still type-checks its `kinds`/`weights` today; only the `run` arm is
     /// unimplemented.
     #[error("{0}")]
     UnsupportedMode(String),
@@ -347,7 +350,7 @@ async fn run_profile<H, F, S>(
 ) -> Result<ErasedReport, RunError>
 where
     H: Harness,
-    H::Operation: serde::Serialize,
+    H::Operation: serde::Serialize + DeserializeOwned,
     H::OpKind: DeserializeOwned + Copy,
     F: Fn() -> H,
     S: Fn(SetupRequest) -> SetupFuture<'static, H::World>,
@@ -437,9 +440,48 @@ where
         cross_vm_config::Profile::Endurance(_) => Err(RunError::UnsupportedMode(
             "endurance not yet supported (P3)".to_string(),
         )),
-        cross_vm_config::Profile::Scenario(_) => Err(RunError::UnsupportedMode(
-            "scenario not yet supported (P3)".to_string(),
-        )),
+        cross_vm_config::Profile::Scenario(p) => {
+            let (ctx, world) = setup(build_setup_request(resolved, base_seed))
+                .await
+                .map_err(|e| RunError::Setup(e.to_string()))?;
+
+            let steps = p
+                .steps
+                .iter()
+                .map(|raw| {
+                    let op = H::Operation::deserialize(raw.op.clone())
+                        .map_err(|e| ValidationError(e.to_string()))?;
+                    Ok(ScenarioStep {
+                        op,
+                        expect: match raw.expect {
+                            cross_vm_config::ExpectStr::Accepted => Expectation::Accepted,
+                            cross_vm_config::ExpectStr::Rejected => Expectation::Rejected,
+                            cross_vm_config::ExpectStr::Any => Expectation::Any,
+                        },
+                        delay: raw.delay,
+                        check: raw.check,
+                    })
+                })
+                .collect::<Result<Vec<_>, ValidationError>>()?;
+
+            let mut runner = Runner::<H, Scenario>::scenario(make_harness(), base_seed);
+            if resolved.stats {
+                runner.with_stats();
+            }
+            runner.setup(ctx, world);
+            let report = runner.run_steps(steps, resolved.check_every).await;
+            let stats = runner.stats().cloned();
+
+            erase_report(
+                report,
+                harness_name,
+                resolved.name.clone(),
+                "scenario".to_string(),
+                stats,
+                started.elapsed(),
+            )
+            .map_err(|e| RunError::Serialize(e.to_string()))
+        }
     }
 }
 
@@ -740,6 +782,86 @@ mod tests {
         assert_eq!(report.steps, 4);
     }
 
+    // ----- scenario runs over the mock harness -----
+
+    fn scenario_profile(steps: Vec<cross_vm_config::ScenarioStepRaw>) -> Profile {
+        Profile::Scenario(cross_vm_config::ScenarioProfile {
+            common: common(),
+            steps,
+            export_world: None,
+        })
+    }
+
+    /// A step whose op is a bare unit-variant name (`MockOp` has no data, so a plain TOML string
+    /// deserializes into it exactly like `H::OpKind::deserialize` does for `kinds`/`weights`).
+    fn mock_step(op: &str, expect: cross_vm_config::ExpectStr) -> cross_vm_config::ScenarioStepRaw {
+        cross_vm_config::ScenarioStepRaw {
+            op: toml::Value::String(op.to_string()),
+            expect,
+            delay: std::time::Duration::ZERO,
+            check: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn scenario_run_drives_to_erased_report_with_scenario_mode() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        let steps = vec![
+            mock_step("Ping", cross_vm_config::ExpectStr::Accepted),
+            mock_step("Pong", cross_vm_config::ExpectStr::Accepted),
+        ];
+        let resolved = resolved(scenario_profile(steps));
+
+        let report = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .expect("run ok");
+        assert_eq!(report.mode, "scenario");
+        assert!(report.failure.is_none(), "{:?}", report.failure);
+        assert_eq!(report.steps, 2);
+    }
+
+    #[tokio::test]
+    async fn scenario_run_expect_mismatch_fails_with_exact_message() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        // Ping is always accepted; expecting a rejection must fail with the exact message.
+        let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Rejected)];
+        let resolved = resolved(scenario_profile(steps));
+
+        let report = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .expect("run resolves to a report, not a RunError");
+        let failure = report.failure.expect("must fail");
+        assert!(
+            matches!(
+                failure.kind,
+                FailureKind::Bug(ref m) if m == "step 1: expected rejection, operation was accepted"
+            ),
+            "{:?}",
+            failure.kind
+        );
+    }
+
+    #[tokio::test]
+    async fn scenario_run_rejects_an_op_that_fails_to_deserialize() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        let steps = vec![mock_step("NotAKind", cross_vm_config::ExpectStr::Accepted)];
+        let resolved = resolved(scenario_profile(steps));
+
+        let err = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Validation(_)), "{err:?}");
+    }
+
     #[tokio::test]
     async fn ops_and_cases_overrides_from_run_options_win() {
         let mut registry = Registry::new();
@@ -760,8 +882,8 @@ mod tests {
     #[test]
     fn unsupported_modes_are_reported_by_run_error_not_a_panic() {
         // Covered end-to-end via `run`; this just documents the expected message shape so a
-        // future scenario/endurance task notices if it changes silently.
-        let err = RunError::UnsupportedMode("scenario not yet supported (P3)".to_string());
-        assert_eq!(err.to_string(), "scenario not yet supported (P3)");
+        // future endurance task notices if it changes silently.
+        let err = RunError::UnsupportedMode("endurance not yet supported (P3)".to_string());
+        assert_eq!(err.to_string(), "endurance not yet supported (P3)");
     }
 }

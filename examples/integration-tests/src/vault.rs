@@ -19,8 +19,22 @@ use std::collections::HashMap;
 
 use cross_vm_framework::config::{build_chain, SetupFuture, SetupRequest, Target};
 use cross_vm_framework::prelude::*;
+use serde::Deserialize;
 
 use crate::support::{fund_user, test_wallets, Vault};
+
+/// TOML has no native 128-bit integer, and `toml::Value`'s `Deserializer` impl only overrides
+/// `deserialize_*` up through `u64`/`i64` (see its `forward_to_deserialize_any!` list); a bare
+/// `u128` field's derived `Deserialize` always hits serde's default `deserialize_u128`, which
+/// errors `"u128 is not supported"` regardless of the value's actual magnitude. Every scenario
+/// `amount` in practice fits a `u64` (see the [`VaultOp`] docs); deserialize as `u64` and widen,
+/// so a `[[profile.<name>.steps]]` TOML step round-trips.
+fn deserialize_u128_from_u64<'de, D>(deserializer: D) -> Result<u128, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u64::deserialize(deserializer).map(u128::from)
+}
 
 /// Chain labels the hard coded (no `[[chain]]`) path injects, in iteration order.
 const LABELS: [&str; 3] = ["osmosis", "eth", "solana"];
@@ -34,8 +48,10 @@ const LTV_BPS: u128 = 5000;
 /// Externally tagged (serde default) so a TOML scenario step writes
 /// `op = { Deposit = { chain = "eth", user = 0, amount = 1000 } }` (spec section 7.1). `amount` is
 /// `u128`; TOML cannot hold a `u128` literal directly, but every scenario amount in practice fits
-/// an `i64`, and fuzz/invariant-generated amounts are never round-tripped through TOML (they are
-/// only ever serialized into the JSON failure-history artifact, which handles `u128` natively).
+/// a `u64` (see [`deserialize_u128_from_u64`]), and fuzz/invariant-generated amounts are never
+/// round-tripped through TOML (they are only ever serialized into the JSON failure-history
+/// artifact, which handles `u128` natively — the `deserialize_with` below only narrows the TOML
+/// read path, `Serialize` is untouched).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum VaultOp {
     /// Credit `amount` of collateral to `user` on `chain`.
@@ -45,6 +61,7 @@ pub enum VaultOp {
         /// Index into the user roster (0 = alice, 1 = bob).
         user: usize,
         /// The amount to deposit.
+        #[serde(deserialize_with = "deserialize_u128_from_u64")]
         amount: u128,
     },
     /// Withdraw `amount` of free collateral for `user` on `chain`.
@@ -54,6 +71,7 @@ pub enum VaultOp {
         /// Index into the user roster (0 = alice, 1 = bob).
         user: usize,
         /// The amount to withdraw.
+        #[serde(deserialize_with = "deserialize_u128_from_u64")]
         amount: u128,
     },
     /// Borrow `amount` of debt against `user`'s collateral on `chain`.
@@ -63,6 +81,7 @@ pub enum VaultOp {
         /// Index into the user roster (0 = alice, 1 = bob).
         user: usize,
         /// The amount to borrow.
+        #[serde(deserialize_with = "deserialize_u128_from_u64")]
         amount: u128,
     },
     /// Repay `amount` of `user`'s debt on `chain`.
@@ -72,6 +91,7 @@ pub enum VaultOp {
         /// Index into the user roster (0 = alice, 1 = bob).
         user: usize,
         /// The amount to repay.
+        #[serde(deserialize_with = "deserialize_u128_from_u64")]
         amount: u128,
     },
 }

@@ -59,6 +59,10 @@ serde.workspace = true
 # can load the expander (re-exports through the framework prelude break RA expansion).
 cross-vm-macros = { path = "../../crates/macros" }
 rstest.workspace = true
+# `test-util` powers `#[tokio::test(start_paused = true)]`, used to assert `ScenarioStep::delay`
+# advances the virtual clock without a real sleep (see `mechanics.rs`'s
+# `run_steps_delay_advances_the_paused_clock`).
+tokio = { workspace = true, features = ["test-util"] }
 counter = { path = "../cosmwasm-contracts/counter", features = ["cross-vm"] }
 ping-pong = { path = "../cosmwasm-contracts/ping-pong" }
 # Load the workspace `.env` (funded mnemonic) for the opt-in `rpc-endurance` live test.

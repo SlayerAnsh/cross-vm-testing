@@ -100,6 +100,23 @@ fn run_smoke_profile_with_a_fixed_seed_is_reproducible() {
 }
 
 #[test]
+fn run_deposit_then_overdraw_scenario_passes_on_mocks() {
+    let out = cross_vm(&[
+        "run",
+        config_path().to_str().unwrap(),
+        "--profile",
+        "deposit-then-overdraw",
+    ]);
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn run_with_target_chain_rpc_and_no_rpc_url_is_a_usage_error() {
     // `eth` declares no `rpc_url` in the fixture (every profile there defaults to mock), so
     // forcing it to `rpc` via `--target-chain` must hit the framework's "rpc target requires

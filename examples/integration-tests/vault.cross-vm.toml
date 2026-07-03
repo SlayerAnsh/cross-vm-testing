@@ -85,3 +85,17 @@ cases = 4
 ops = 10
 kinds = ["Deposit", "Withdraw"]
 env = { targets = { osmosis = "rpc" } }
+
+# Scenario mode demo (spec section 6.3): a concrete, ordered step sequence with per-step
+# expectations. Deposits 1_000 of collateral, then attempts to withdraw 5_000 (more than
+# deposited), which the vault's collateral model must reject.
+[profile.deposit-then-overdraw]
+mode = "scenario"
+
+  [[profile.deposit-then-overdraw.steps]]
+  op = { Deposit = { chain = "osmosis", user = 0, amount = 1000 } }
+  expect = "accepted"
+
+  [[profile.deposit-then-overdraw.steps]]
+  op = { Withdraw = { chain = "osmosis", user = 0, amount = 5000 } }
+  expect = "rejected"

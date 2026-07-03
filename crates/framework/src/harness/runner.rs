@@ -466,15 +466,139 @@ impl<H: Harness> Runner<H, Endurance> {
 
 // ----- scenario driver (fixed operations) -----
 
+/// The verdict a [`ScenarioStep`] asserts against its operation's applied [`Verdict`] (spec
+/// section 6.3). The config layer's `ExpectStr` defaults to `Accepted`; `Any` is what
+/// [`Runner::run_case`]/[`Runner::run_scenario`] use, preserving their longstanding "a legitimate
+/// rejection is not a failure" behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Expectation {
+    /// The operation must be accepted; a `Rejected` verdict fails the step.
+    Accepted,
+    /// The operation must be rejected; an `Accepted` verdict fails the step.
+    Rejected,
+    /// Either verdict is acceptable; no assertion is made.
+    Any,
+}
+
+/// One step of a [`Runner::run_steps`] sequence: a concrete operation, its expected verdict, an
+/// optional pre-op delay (live-chain pacing), and whether to run the invariant sweep after it.
+#[derive(Debug, Clone)]
+pub struct ScenarioStep<Op> {
+    /// The operation to apply.
+    pub op: Op,
+    /// Expected verdict; defaults to [`Expectation::Accepted`] at the config layer.
+    pub expect: Expectation,
+    /// Slept before applying this step (live-chain pacing under `target = "rpc"`); defaults to
+    /// [`Duration::ZERO`]. Advances a paused `tokio` clock under test.
+    pub delay: Duration,
+    /// Run the invariant sweep after this step, subject to [`Runner::run_steps`]'s `check_every`
+    /// gate too; defaults to `true`.
+    pub check: bool,
+}
+
+impl<Op> ScenarioStep<Op> {
+    /// A step with the defaults every other field takes at the config layer: expect `Accepted`,
+    /// no delay, checked.
+    pub fn new(op: Op) -> Self {
+        Self {
+            op,
+            expect: Expectation::Accepted,
+            delay: Duration::ZERO,
+            check: true,
+        }
+    }
+}
+
 impl<H: Harness> Runner<H, Scenario> {
     /// Run a single concrete operation over the loaded env+world, checking invariants after it.
+    /// Sugar over [`run_steps`](Runner::run_steps): the op runs as one step with
+    /// [`Expectation::Any`] (a legitimate rejection is not a failure).
     pub async fn run_case(&mut self, op: H::Operation) -> RunReport<H::Operation> {
-        self.run_fixed(vec![op], Scenario::LABEL, 1).await
+        self.run_scenario(vec![op]).await
     }
 
-    /// Run a fixed operation sequence, checking invariants after each.
+    /// Run a fixed operation sequence, checking invariants after each. Sugar over
+    /// [`run_steps`](Runner::run_steps): every op runs as an [`Expectation::Any`], undelayed,
+    /// checked step, with `check_every = 1` — this method's longstanding behavior.
     pub async fn run_scenario(&mut self, ops: Vec<H::Operation>) -> RunReport<H::Operation> {
-        self.run_fixed(ops, Scenario::LABEL, 1).await
+        let steps = ops
+            .into_iter()
+            .map(|op| ScenarioStep {
+                expect: Expectation::Any,
+                ..ScenarioStep::new(op)
+            })
+            .collect();
+        self.run_steps(steps, 1).await
+    }
+
+    /// Drive an ordered, concrete [`ScenarioStep`] sequence: sleep `step.delay`, apply `step.op`,
+    /// assert its [`Verdict`] against `step.expect` (a mismatch is a [`FailureKind::Bug`] naming
+    /// the 1-based step index), then — if the step wasn't a mismatch, `step.check` is `true`, and
+    /// `check_every` gates this step (`check_every > 0 && step_index % check_every == 0`) — run
+    /// the invariant sweep. Reports under the [`Scenario`] mode label.
+    ///
+    /// The primitive `run_case`/`run_scenario` are sugar over (both use `Expectation::Any`), and
+    /// the registry's scenario `RUN` arm drives directly for `target = "rpc"` deployment
+    /// scripting.
+    pub async fn run_steps(
+        &mut self,
+        steps: Vec<ScenarioStep<H::Operation>>,
+        check_every: usize,
+    ) -> RunReport<H::Operation> {
+        let Self {
+            harness,
+            ctx,
+            world,
+            seed,
+            stats,
+            ..
+        } = self;
+        let ctx = ctx.as_mut().expect(NOT_SET_UP);
+        let world = world.as_mut().expect(NOT_SET_UP);
+        // Fresh tallies per run: a report's stats always describe exactly this run.
+        if let Some(s) = stats.as_mut() {
+            *s = Stats::default();
+        }
+        let mut builder = ReportBuilder::new(*seed, Scenario::LABEL, harness);
+
+        let report = 'run: {
+            let mut count = 0usize;
+            for step in steps {
+                sleep(step.delay).await;
+                builder.history.push(step.op.clone());
+                count += 1;
+
+                let verdict =
+                    match apply_op(harness, ctx, world, &step.op, stats.as_mut()).await {
+                        Ok(v) => v,
+                        Err(kind) => break 'run builder.fail(count, Some(step.op), kind),
+                    };
+
+                let mismatch = match (step.expect, &verdict) {
+                    (Expectation::Accepted, Verdict::Rejected { .. }) => Some(format!(
+                        "step {count}: expected acceptance, operation was rejected"
+                    )),
+                    (Expectation::Rejected, Verdict::Accepted) => Some(format!(
+                        "step {count}: expected rejection, operation was accepted"
+                    )),
+                    _ => None,
+                };
+                if let Some(msg) = mismatch {
+                    break 'run builder.fail(count, Some(step.op), FailureKind::Bug(msg));
+                }
+
+                let do_check =
+                    step.check && check_every > 0 && count.is_multiple_of(check_every);
+                if do_check {
+                    if let Err(kind) = sweep(harness, ctx, world, &mut builder.coverage).await {
+                        break 'run builder.fail(count, Some(step.op), kind);
+                    }
+                }
+            }
+            builder.pass(count)
+        };
+        log_summary(&report, stats.as_ref());
+        report
     }
 
     /// Replay a recorded history deterministically (seed the runner with the recorded seed first).
@@ -923,23 +1047,23 @@ async fn sweep<H: Harness>(
 
 // ----- shared per-operation step -----
 
-/// Apply one operation and, if `check`, verify every invariant against the resulting state. Records
-/// each invariant outcome into `coverage` (keyed by its `Debug` name) and, when `stats` is `Some`,
-/// times the `apply` call and records its outcome. Maps a [`HarnessError`] or a
-/// [`CheckOutcome::Violated`] into a [`FailureKind`].
+/// Apply one operation, recording its outcome into `stats` (when `Some`) and returning its
+/// [`Verdict`] on success. Maps a [`HarnessError`] into a [`FailureKind`]. Golden-safe: the rng is
+/// never touched here (or in [`step`]/[`sweep`]) — it is only drawn in [`OpSource::next`] /
+/// [`Harness::generate`], so exposing the verdict to callers (the scenario driver) changes no
+/// fuzz/invariant/endurance op stream.
 ///
 /// A free function (not a method) so it borrows the harness disjointly from the runner's `ctx` and
-/// `world` fields.
-async fn step<H: Harness>(
+/// `world` fields. Shared by [`step`] (which discards the verdict after an optional sweep) and
+/// [`Runner::run_steps`], which inspects it against a [`ScenarioStep`]'s [`Expectation`].
+async fn apply_op<H: Harness>(
     harness: &H,
     ctx: &mut Ctx,
     world: &mut H::World,
     op: &H::Operation,
-    check: bool,
-    coverage: &mut Coverage,
     mut stats: Option<&mut Stats>,
-) -> Result<(), FailureKind> {
-    tracing::debug!(op = ?op, check, "apply op");
+) -> Result<Verdict, FailureKind> {
+    tracing::debug!(op = ?op, "apply op");
     let started = std::time::Instant::now();
     let result = harness.apply(ctx, world, op).await;
     let elapsed = started.elapsed();
@@ -953,13 +1077,14 @@ async fn step<H: Harness>(
                 s.record(&op_label(op), elapsed, outcome);
             }
             tracing::debug!(?verdict, op = ?op, "op applied");
+            Ok(verdict)
         }
         Err(HarnessError::Bug(m)) => {
             if let Some(s) = stats.as_mut() {
                 s.record(&op_label(op), elapsed, OpOutcome::Bug(&m));
             }
             tracing::debug!(op = ?op, detail = %m, "op surfaced a bug");
-            return Err(FailureKind::Bug(m));
+            Err(FailureKind::Bug(m))
         }
         Err(HarnessError::Infra(e)) => {
             let msg = e.to_string();
@@ -967,9 +1092,25 @@ async fn step<H: Harness>(
                 s.record(&op_label(op), elapsed, OpOutcome::Infra(&msg));
             }
             tracing::debug!(op = ?op, error = %e, "op infra error");
-            return Err(FailureKind::Infra(msg));
+            Err(FailureKind::Infra(msg))
         }
     }
+}
+
+/// Apply one operation and, if `check`, verify every invariant against the resulting state.
+/// Records each invariant outcome into `coverage` (keyed by its `Debug` name). `{ let _ =
+/// apply_op(..)?; if check { sweep(..)?; } Ok(()) }` — the verdict is discarded, matching this
+/// function's behavior before [`apply_op`] was split out.
+async fn step<H: Harness>(
+    harness: &H,
+    ctx: &mut Ctx,
+    world: &mut H::World,
+    op: &H::Operation,
+    check: bool,
+    coverage: &mut Coverage,
+    stats: Option<&mut Stats>,
+) -> Result<(), FailureKind> {
+    let _verdict = apply_op(harness, ctx, world, op, stats).await?;
     if check {
         sweep(harness, ctx, world, coverage).await?;
     }
