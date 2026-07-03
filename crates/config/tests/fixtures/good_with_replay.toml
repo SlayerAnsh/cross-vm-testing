@@ -1,0 +1,15 @@
+# A top-level [replay] block (spec section 4.2): provenance data written by `cross-vm replay`
+# into a P4 replay artifact. It is a valid top-level block, ignored by the run schema, and must
+# not be rejected by `deny_unknown_fields`.
+[harness]
+name = "h"
+
+[replay]
+seed = 12345
+recorded_at = "2024-01-01T00:00:00Z"
+source = "artifacts/run-42.json"
+
+[profile.p]
+mode = "fuzz"
+cases = 1
+ops = 1

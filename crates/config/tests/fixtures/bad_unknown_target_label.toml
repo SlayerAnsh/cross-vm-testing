@@ -1,0 +1,16 @@
+# env.targets names a label ("osmosis") that has no matching [[chain]] entry.
+[harness]
+name = "h"
+
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "1"
+
+[env]
+targets = { osmosis = "rpc" }
+
+[profile.p]
+mode = "fuzz"
+cases = 1
+ops = 1

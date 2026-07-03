@@ -120,7 +120,14 @@ impl From<Result<(), Violation>> for CheckOutcome {
 }
 
 /// Why a run failed.
+///
+/// Externally tagged when serialized (serde's default enum representation): `Bug(String)` ->
+/// `{"Bug": "..."}`, `Invariant { name, detail }` -> `{"Invariant": {"name": ..., "detail":
+/// ...}}`, `Infra(String)` -> `{"Infra": "..."}`. That tag is also the value stored in
+/// [`crate::config::ErasedFailure::kind`], so a JSON report reader can `match` on the same key a
+/// Rust caller would.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum FailureKind {
     /// `apply` reported a confirmed SUT bug.
     Bug(String),
@@ -156,6 +163,7 @@ pub struct Failure<Op> {
 /// A `held + skipped + violated` total of `0` means the invariant never ran — critical on multi-VM
 /// runs, where an invariant can silently never fire on one chain's path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct InvCoverage {
     /// Times the invariant was applicable and held.
     pub held: usize,
@@ -178,7 +186,13 @@ impl InvCoverage {
 /// Seeded with every invariant [`Harness::invariants`](crate::harness::Harness::invariants) reports
 /// at run start, so an invariant that is never checked (e.g. `check_every` skipped it, or the run
 /// was too short) still appears with an all-zero tally instead of vanishing.
+///
+/// Serializes transparently as the inner map (`#[serde(transparent)]`): a JSON object keyed by
+/// invariant name, e.g. `{"balances_never_negative": {"held": 12, "skipped": 0, "violated": 0}}`,
+/// rather than being wrapped in a newtype layer.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct Coverage(BTreeMap<String, InvCoverage>);
 
 impl Coverage {
@@ -355,5 +369,70 @@ mod tests {
         let e =
             classify::<()>(true, Err(CrossVmError::wallet("boom")), || {}, "a", "b").unwrap_err();
         assert!(matches!(e, HarnessError::Infra(_)));
+    }
+
+    // -------------------------------------------------------------------------------------
+    // serde (spec section 9): Coverage/InvCoverage/FailureKind shapes. Gated on `cli` rather
+    // than the narrower `serde` feature purely because `serde_json` (used here to assert the
+    // JSON shape) is only pulled in by `cli`; the `Serialize` derives themselves are gated on
+    // `serde` alone in the non-test code above.
+    // -------------------------------------------------------------------------------------
+
+    #[cfg(feature = "cli")]
+    mod serde_shapes {
+        use super::*;
+
+        #[test]
+        fn coverage_serializes_transparently_keyed_by_invariant_name() {
+            let mut cov = Coverage::seed(["balances_never_negative".to_string()]);
+            cov.record_held("balances_never_negative");
+            cov.record_held("balances_never_negative");
+            cov.record_skipped("balances_never_negative");
+
+            let value = serde_json::to_value(&cov).unwrap();
+            // Transparent: a bare object keyed by invariant name, no wrapper/newtype layer.
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "balances_never_negative": {"held": 2, "skipped": 1, "violated": 0}
+                })
+            );
+        }
+
+        #[test]
+        fn empty_coverage_serializes_as_an_empty_object() {
+            let cov = Coverage::default();
+            assert_eq!(serde_json::to_value(&cov).unwrap(), serde_json::json!({}));
+        }
+
+        #[test]
+        fn failure_kind_bug_and_infra_serialize_externally_tagged_with_a_string_payload() {
+            assert_eq!(
+                serde_json::to_value(FailureKind::Bug("over-withdraw accepted".to_string()))
+                    .unwrap(),
+                serde_json::json!({"Bug": "over-withdraw accepted"})
+            );
+            assert_eq!(
+                serde_json::to_value(FailureKind::Infra("rpc down".to_string())).unwrap(),
+                serde_json::json!({"Infra": "rpc down"})
+            );
+        }
+
+        #[test]
+        fn failure_kind_invariant_serializes_with_name_and_detail() {
+            let kind = FailureKind::Invariant {
+                name: "balances_never_negative".to_string(),
+                detail: "alice went negative".to_string(),
+            };
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                serde_json::json!({
+                    "Invariant": {
+                        "name": "balances_never_negative",
+                        "detail": "alice went negative"
+                    }
+                })
+            );
+        }
     }
 }

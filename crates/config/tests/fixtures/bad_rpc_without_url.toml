@@ -1,0 +1,16 @@
+# [env].target = "rpc" resolves "eth" to the rpc target, but it has no rpc_url.
+[harness]
+name = "h"
+
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "1"
+
+[env]
+target = "rpc"
+
+[profile.p]
+mode = "fuzz"
+cases = 1
+ops = 1

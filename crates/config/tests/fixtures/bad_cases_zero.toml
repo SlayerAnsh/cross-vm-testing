@@ -1,0 +1,8 @@
+# Fuzz `cases` must be greater than 0.
+[harness]
+name = "h"
+
+[profile.p]
+mode = "fuzz"
+cases = 0
+ops = 1

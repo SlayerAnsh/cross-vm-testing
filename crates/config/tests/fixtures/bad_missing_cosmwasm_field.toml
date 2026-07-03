@@ -1,0 +1,14 @@
+# `kind = "cosmwasm"` requires both bech32_prefix and native_denom; bech32_prefix is absent.
+[harness]
+name = "h"
+
+[[chain]]
+label = "osmosis"
+kind = "cosmwasm"
+chain_id = "osmosis-1"
+native_denom = "uosmo"
+
+[profile.p]
+mode = "fuzz"
+cases = 1
+ops = 1

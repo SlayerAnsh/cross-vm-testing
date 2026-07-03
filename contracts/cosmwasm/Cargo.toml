@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = ["contracts/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# Matches the repo license; keeps the contract crates non-"unlicensed" for cargo-deny, which sees
+# them as path deps in the root lock.
+license = "MIT"
+
+[workspace.dependencies]
+cosmwasm-std = "2"
+cw-storage-plus = "2"
+serde = { version = "1", default-features = false, features = ["derive"] }
+# Cross-VM typed message handles (off for the wasm build; on for host tests). Consumed by
+# counter + vault only, gated behind each crate's `cross-vm` feature. Paths reach up out of
+# this workspace into the root workspace's crates (cargo allows cross-workspace path deps).
+cross-vm-cosmwasm = { path = "../../crates/cosmwasm" }
+cross-vm-macros = { path = "../../crates/macros" }
+
+[profile.release]
+opt-level = "z"
+debug = false
+rpath = false
+lto = true
+debug-assertions = false
+codegen-units = 1
+panic = "abort"
+incremental = false
+overflow-checks = true
+
+[profile.release.package."*"]
+opt-level = "z"

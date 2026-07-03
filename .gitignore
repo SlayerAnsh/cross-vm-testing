@@ -4,22 +4,21 @@
 !.env.example
 
 # Solidity (Foundry)
-examples/solidity-contracts/out/
-examples/solidity-contracts/cache/
-examples/solidity-contracts/lib/
+contracts/solidity/out/
+contracts/solidity/cache/
+contracts/solidity/lib/
 
 # Solana (Anchor)
-examples/solana-contracts/target/
-examples/solana-contracts/.anchor/
+contracts/solana/target/
+contracts/solana/.anchor/
 
-# CosmWasm
-examples/cosmwasm-contracts/counter/target/
-examples/cosmwasm-contracts/vault/target/
+# CosmWasm (single workspace at contracts/cosmwasm/)
+contracts/cosmwasm/target/
 
 # Tron (Tronbox)
-examples/tron-contracts/generated/
-examples/tron-contracts/build/
-examples/tron-contracts/node_modules/
+contracts/tron/generated/
+contracts/tron/build/
+contracts/tron/node_modules/
 
 # Example scripts (Rust build output)
 examples/scripts/target/
@@ -31,3 +30,10 @@ artifacts/
 
 # AI
 .claude/
+# Stray per-crate target dirs (e.g. replay artifacts written to <crate>/target/cross-vm by CLI e2e tests)
+crates/*/target/
+examples/integration-tests/target/
+
+# Test-generated artifacts/reports (redirected to <crate>/tests_result/ instead of any target/ dir)
+tests_result/
+**/tests_result/

@@ -1,5 +1,5 @@
 //! Integration test: deploy_create -> call -> static_call a Solidity `Counter` through the EVM
-//! provider, using the canonical contract from `examples/solidity-contracts`. The `sol!` JSON
+//! provider, using the canonical contract from `contracts/solidity`. The `sol!` JSON
 //! form parses `out/Counter.sol/Counter.json` at compile time, generating the call bindings
 //! (`Counter::incrementCall`, ...) and the `Counter::BYTECODE` creation bytecode. Run
 //! `make compile-solidity` to (re)produce the artifact.
@@ -14,7 +14,7 @@ use cross_vm_solidity::{Address, Bytes, EvmMockProvider};
 alloy::sol!(
     #[sol(abi)]
     Counter,
-    "../../examples/solidity-contracts/out/Counter.sol/Counter.json"
+    "../../contracts/solidity/out/Counter.sol/Counter.json"
 );
 
 fn empty_wallets() -> Rc<WalletFactory> {

@@ -14,6 +14,10 @@ proc-macro = true
 syn = { workspace = true, features = ["full"] }
 quote.workspace = true
 proc-macro2.workspace = true
+# Parses the TOML config file at macro-expansion time (`#[config_runner]` reads it to learn a
+# fuzz profile's `cases` count and fan out one `#[tokio::test]` per case); this crate never
+# depends on `cross-vm-config` itself, just plain `toml::Value` parsing.
+toml.workspace = true
 
 [lints]
 workspace = true

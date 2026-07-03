@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/config",
     "crates/revm-common",
     "crates/cosmwasm",
     "crates/solidity",
@@ -9,13 +10,21 @@ members = [
     "crates/tron",
     "crates/framework",
     "crates/macros",
+    # Reusable contract bindings (mocks) + shared test helpers for the example test crates.
+    "examples/common",
+    # Per-VM example test crates: one Counter harness each, driven three ways (harness/config/CLI).
+    "examples/evm-tests",
+    "examples/cosmos-tests",
+    "examples/solana-tests",
+    "examples/tvm-tests",
     # Multi-chain integration & example tests, co-located with the contract artifacts they embed.
-    "examples/integration-tests",
+    "examples/cross-vm-tests",
 ]
-# Example contracts are standalone crates (their own workspaces / build toolchains); they are
-# consumed by tests via path dependencies but must not be workspace members. The explicit
-# `integration-tests` member above overrides this exclude for that one subdirectory.
+# Example contracts (now under `contracts/`) are standalone crates (their own workspaces / build
+# toolchains); they are consumed by tests via path dependencies but must not be workspace members.
+# The explicit `examples/` members above override this exclude for those subdirectories.
 exclude = [
+    "contracts",
     "examples",
 ]
 
@@ -47,6 +56,7 @@ large_enum_variant = "allow"
 # locally and the version on crates.io (path-only deps are stripped at publish time and fail
 # the dry run). Keep in step with [workspace.package] version.
 cross-vm-core = { path = "crates/core", version = "0.1.0" }
+cross-vm-config = { path = "crates/config", version = "0.1.0" }
 cross-vm-macros = { path = "crates/macros", version = "0.1.0" }
 cross-vm-revm-common = { path = "crates/revm-common", version = "0.1.0" }
 cross-vm-cosmwasm = { path = "crates/cosmwasm", version = "0.1.0" }
@@ -62,6 +72,13 @@ proc-macro2 = "1"
 # Shared
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+# TOML parsing for the declarative run-config crate (cross-vm-config).
+toml = "0.8"
+# Duration string parsing (humantime grammar) for the run-config crate.
+humantime = "2"
+# CLI argument parsing; only reached via the framework's `cli` feature in later phases.
+clap = { version = "4", features = ["derive"] }
 # Structured leveled logging: facade in the libs, subscriber wired by the test binary.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

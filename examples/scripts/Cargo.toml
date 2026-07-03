@@ -20,9 +20,10 @@ cross-vm-core = { path = "../../crates/core" }
 # Testnet chain presets + `Bytes` (the prelude only re-exports mainnet-ish presets).
 cross-vm-solidity = { path = "../../crates/solidity" }
 cross-vm-cosmwasm = { path = "../../crates/cosmwasm" }
-# CosmWasm counter message types + generated typed handles (CwExecuteFns/CwQueryFns under the
-# `cross-vm` feature: `contract.increment(wallet)` / `.get_count()`).
-counter = { path = "../cosmwasm-contracts/counter", features = ["cross-vm"] }
+# Contract bindings: EVM ABI/bytecode + the CosmWasm counter message types and typed handles
+# (CwExecuteFns/CwQueryFns), plus the embedded counter.wasm (cw-artifacts feature). The single
+# reuse point shared with the test crates; replaces the previously duplicated artifacts module.
+cross-vm-common = { path = "../common", features = ["evm", "cw-artifacts"] }
 alloy = { version = "1", features = ["full", "sol-types"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 # Load `.env` into the process environment before resolving the wallet roster.

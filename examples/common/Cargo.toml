@@ -1,0 +1,62 @@
+[package]
+name = "cross-vm-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reusable contract bindings (mocks) and shared helpers for the example test crates"
+publish = false
+
+[features]
+# Empty by default so a bare `cargo check -p cross-vm-common` needs no built artifacts.
+default = []
+# CosmWasm bindings: message types + in-process `ContractWrapper` factories. No compiled artifact
+# needed (the contracts are consumed as rlib path-deps).
+cw = ["dep:counter", "dep:ping-pong", "dep:vault", "dep:cosmwasm-std", "dep:cw-multi-test"]
+# EVM ABI bindings + creation bytecode; needs `make compile-solidity` (forge artifacts under
+# contracts/solidity/out). `alloy` powers the `Counter` wrapper's ABI encode/decode.
+evm = ["dep:alloy"]
+# Solana program ids, instruction discriminators, and embedded `.so`; needs `make compile-solana`
+# (cargo-build-sbf output under contracts/solana/target/deploy). The chain crate + instruction
+# builders drive the `Counter` wrapper's SVM hooks.
+solana = ["dep:cross-vm-solana", "dep:solana-instruction", "dep:solana-system-interface"]
+# Tron ABI bindings + TVM creation bytecode; needs `make compile-tron` (tronbox build under
+# contracts/tron/build). The chain crate carries the TVM `Bytes` the wrapper deploys with.
+tron = ["dep:alloy", "dep:cross-vm-tron"]
+# Embedded counter.wasm for on-chain deploys. Separate from `cw` because the wasm is Docker-built
+# and gitignored (absent in CI); only on-chain flows (examples/scripts) enable it.
+cw-artifacts = ["cw"]
+
+[dependencies]
+# Shared wallet/funding helpers (ungated): the funding matcher touches every `AnyChain` variant,
+# so it relies on the framework's default features (all VMs). The framework is a pure library, so
+# this does not pull in any compiled contract artifact.
+# `cli` pulls in the `config` module (`build_chain`, `SetupRequest`, `Target`) the shared
+# config-driven `Counter` setup registers with the `cross-vm` binary.
+cross-vm-framework = { path = "../../crates/framework", features = ["cli"] }
+cross-vm-solidity  = { path = "../../crates/solidity" }
+# `#[cross_vm_contract]` generates the shared `Counter` wrapper in `contracts::counter`.
+cross-vm-macros = { path = "../../crates/macros" }
+tracing-subscriber.workspace = true
+# `CounterOp` / `CounterOpKind` derive `Serialize`/`Deserialize` for the config-driven op shape.
+serde.workspace = true
+
+# Per-VM chain crates + instruction builders, gated to the matching feature so a single-VM crate
+# pulls only its VM (the `Counter` hooks for other VMs fall back to `#[cross_vm_contract]` defaults).
+cross-vm-solana = { path = "../../crates/solana", optional = true }
+cross-vm-tron   = { path = "../../crates/tron", optional = true }
+solana-instruction = { version = "3", optional = true }
+solana-system-interface = { version = "2", features = ["bincode"], optional = true }
+
+# CosmWasm contract crates, consumed as host rlibs (not wasm). `counter` needs its `cross-vm`
+# feature for the `ExecuteMsgFns` / `QueryMsgFns` derives; vault / ping-pong use raw message enums.
+counter   = { path = "../../contracts/cosmwasm/contracts/counter", features = ["cross-vm"], optional = true }
+ping-pong = { path = "../../contracts/cosmwasm/contracts/ping-pong", optional = true }
+vault     = { path = "../../contracts/cosmwasm/contracts/vault", optional = true }
+cosmwasm-std  = { workspace = true, optional = true }
+cw-multi-test = { workspace = true, optional = true }
+alloy = { workspace = true, optional = true }
+
+[lints]
+workspace = true

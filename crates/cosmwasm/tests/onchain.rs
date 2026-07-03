@@ -27,7 +27,7 @@ const ENV_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");
 
 const COUNTER_WASM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/cosmwasm-contracts/counter/artifacts/counter.wasm"
+    "/../../contracts/cosmwasm/artifacts/counter.wasm"
 ));
 
 #[tokio::test]

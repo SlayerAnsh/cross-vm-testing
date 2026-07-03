@@ -1,0 +1,51 @@
+# Config-driven run definitions for the single-VM (Solana) counter harness (`solana-tests`).
+#
+# Run with, e.g.:
+#   cargo run -p solana-tests --bin cross-vm -- validate examples/solana-tests/counter.cross-vm.toml
+#   cargo run -p solana-tests --bin cross-vm -- run examples/solana-tests/counter.cross-vm.toml --profile smoke
+
+[harness]
+name = "counter"
+
+[[chain]]
+label = "solana"
+kind = "svm"
+chain_id = "devnet"
+name = "Solana Devnet"
+native_symbol = "SOL"
+commitment = "finalized"
+rpc_url = "https://api.devnet.solana.com"
+ws_url = "wss://api.devnet.solana.com"
+
+[env]
+target = "mock"
+chains = ["solana"]
+
+[defaults]
+seed = 42
+check_every = 1
+
+# A fast, CI-friendly smoke profile: a few short fuzz cases over both op kinds.
+[profile.smoke]
+mode = "fuzz"
+cases = 4
+ops = 20
+kinds = ["Increment", "IncrementTwice"]
+
+# A single longer invariant run, checked every 5 ops.
+[profile.invariant-long]
+mode = "invariant"
+ops = 200
+check_every = 5
+
+# Scenario mode: a concrete, ordered step sequence. Both increments are always accepted.
+[profile.steps]
+mode = "scenario"
+
+  [[profile.steps.steps]]
+  op = "Increment"
+  expect = "accepted"
+
+  [[profile.steps.steps]]
+  op = "IncrementTwice"
+  expect = "accepted"

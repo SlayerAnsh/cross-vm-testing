@@ -1,0 +1,47 @@
+[package]
+name = "tvm-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Single-VM (Tron/TVM) example tests: attribute-macro harness, config-driven, and CLI styles"
+publish = false
+
+[lib]
+name = "tvm_tests"
+
+# The config-driven CLI binary: registers the counter harness and drives it against
+# `counter.cross-vm.toml`. Uniquely named (`tvm-cli`) so it never collides with the other example
+# crates' binaries; run it with `cargo run -p tvm-tests`.
+[[bin]]
+name = "tvm-cli"
+path = "src/bin/cross_vm.rs"
+
+# Heavier harness runs are opt-in so the default `cargo test` stays fast (the scenario test and the
+# config-driven fan-out always run). Enable per category, e.g. `cargo test -p tvm-tests --features fuzz`.
+[features]
+fuzz = []
+invariant = []
+endurance = []
+
+[dependencies]
+cross-vm-framework = { path = "../../crates/framework", features = ["cli"] }
+# The shared `Counter` wrapper + harness (TVM-native bytecode + tronbox ABI bindings, ops/world serde
+# derives) and the shared wallet/funding helpers; this crate only supplies the `TRON_NILE` preset +
+# label.
+cross-vm-common = { path = "../common", features = ["tron"] }
+# Needed by the `cross-vm` bin's `#[tokio::main(flavor = "current_thread")]`; bin targets cannot
+# use `[dev-dependencies]`.
+tokio.workspace = true
+
+[dev-dependencies]
+# Proc-macro attributes must be imported from the proc-macro crate directly so rust-analyzer can
+# load the expander (re-exports through the framework prelude break RA expansion).
+cross-vm-macros = { path = "../../crates/macros" }
+rstest.workspace = true
+# `tests/cli_e2e.rs` parses the `--json-report` file the `cross-vm` binary writes.
+serde_json.workspace = true
+
+[lints]
+workspace = true

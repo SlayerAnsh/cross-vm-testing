@@ -1,0 +1,21 @@
+[package]
+name = "counter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cosmwasm-std.workspace = true
+cw-storage-plus.workspace = true
+serde.workspace = true
+# Cross-VM typed message handles (off for the wasm build; on for host tests). Pulls the test
+# tooling only under the `cross-vm` feature, so `make compile-cosmwasm` stays wasm-clean.
+cross-vm-cosmwasm = { workspace = true, optional = true }
+cross-vm-macros = { workspace = true, optional = true }
+
+[features]
+# Derive `CwExecuteFns` / `CwQueryFns` on the messages so test wrappers get typed calls.
+cross-vm = ["dep:cross-vm-cosmwasm", "dep:cross-vm-macros"]

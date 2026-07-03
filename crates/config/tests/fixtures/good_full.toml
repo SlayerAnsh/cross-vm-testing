@@ -1,0 +1,99 @@
+# vault.cross-vm.toml -- spec section 4.1's full example, verbatim.
+[harness]
+name = "vault"                 # registry key, required
+setup = "default"              # named setup, optional, defaults to "default"
+
+[[chain]]                      # declare chains as data (section 4.6)
+label = "osmosis"
+kind = "cosmwasm"
+chain_id = "osmosis-1"
+name = "Osmosis"
+bech32_prefix = "osmo"
+native_denom = "uosmo"
+native_symbol = "OSMO"
+gas_price = 0.025
+rpc_url = "https://rpc.osmosis.zone:443"
+
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "1"
+name = "Ethereum"
+native_symbol = "ETH"
+spec_id = "cancun"
+rpc_url = "${ETH_RPC:-https://eth.llamarpc.com}"
+
+[[chain]]
+label = "solana"
+kind = "svm"
+chain_id = "devnet"
+name = "Solana Devnet"
+native_symbol = "SOL"
+commitment = "finalized"
+rpc_url = "https://api.devnet.solana.com"
+ws_url = "wss://api.devnet.solana.com"
+
+[env]                          # request passed to the setup fn
+target = "mock"                # "mock" | "rpc", default "mock"
+chains = ["osmosis", "eth", "solana"]   # label subset; omitted = all [[chain]]
+
+[env.params]                   # free form table, the harness author defines meaning
+users = 2
+rpc_label = "${TARGET_CHAIN:-base}"
+
+[defaults]                     # shallow merged under every profile
+seed = 42
+check_every = 1
+stats = true
+artifacts_dir = "target/cross-vm"
+
+[profile.smoke]
+mode = "fuzz"
+cases = 8
+ops = 20
+kinds = ["Deposit", "Withdraw"]
+
+[profile.deep]
+mode = "fuzz"
+cases = 200
+ops = 50
+seed = "random"
+weights = { Deposit = 40, Withdraw = 25, Borrow = 20, Repay = 15 }
+shrink = true
+
+[profile.invariant-long]
+mode = "invariant"
+ops = 2000
+check_every = 5
+
+[profile.soak]
+mode = "endurance"
+duration = "${ENDURANCE_DURATION:-8h}"
+max_ops = 100000               # stop on whichever bound hits first
+base_delay = "500ms"
+max_delay = "2s"
+check_every = 25
+advance_blocks = 1
+block_jitter = 2
+max_consecutive_infra = 5      # RPC flake tolerance, 0 fails on the first Infra
+heartbeat = "60s"
+env = { target = "rpc" }       # per profile env override, shallow over [env]
+
+[profile.deploy-base]
+mode = "scenario"
+env = { target = "rpc", chains = ["eth"] }
+export_world = "artifacts/deploy-world.json"   # later phase, see section 10
+
+  [[profile.deploy-base.steps]]
+  op = { Deposit = { chain = "eth", user = 0, amount = 1000 } }
+  expect = "accepted"          # default
+  delay = "2s"                 # pacing for live chains, default "0s"
+
+  [[profile.deploy-base.steps]]
+  op = { Withdraw = { chain = "eth", user = 0, amount = 2000 } }
+  expect = "rejected"          # the model says this must revert
+  check = false                # skip the invariant sweep after this step
+
+[suite.nightly]
+profiles = ["deep", "invariant-long", "soak"]
+stop_on_failure = false

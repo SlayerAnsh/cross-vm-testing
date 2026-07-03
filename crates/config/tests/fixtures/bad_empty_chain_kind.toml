@@ -1,0 +1,15 @@
+# [[chain]].kind is an empty string. The framework resolves `kind` to a `ChainKind`; an
+# unrecognized non-empty kind is a framework error, but an empty kind can never resolve to
+# anything, so this crate hard-errors on it directly.
+[harness]
+name = "h"
+
+[[chain]]
+label = "eth"
+kind = ""
+chain_id = "1"
+
+[profile.p]
+mode = "fuzz"
+cases = 1
+ops = 1

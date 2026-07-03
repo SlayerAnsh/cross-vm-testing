@@ -1,0 +1,18 @@
+# Two [[chain]] entries share the label "eth"; labels must be unique.
+[harness]
+name = "h"
+
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "1"
+
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "2"
+
+[profile.p]
+mode = "fuzz"
+cases = 1
+ops = 1
