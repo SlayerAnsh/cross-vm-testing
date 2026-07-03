@@ -176,19 +176,19 @@ counter.on_after(|ctx| {
 
 Hooks are synchronous `FnMut` (the runtime is current thread, so async side effects flow through a channel or an `Rc<RefCell<_>>` the closure drains later). The first `Err` aborts: a before `Err` stops the transaction; an after `Err` becomes the method's error. Events are exposed per VM (`cosmwasm_events()` / `evm_logs()` / `solana_logs()`) because the shapes do not unify.
 
-See `examples/integration-tests/tests/support/counter.rs` for the full three VM wrapper, and `DEVELOPER.md` for the complete hook reference.
+See `examples/cross-vm-tests/tests/support/counter.rs` for the full three VM wrapper, and `DEVELOPER.md` for the complete hook reference.
 
 ## Two ways to write a test
 
 Both run on the same chains. The difference is who drives the operations.
 
-Use **`MultiChainEnv` directly** when the test is a fixed storyline you write out by hand: inject the chains, fund, `start()`, then run a known sequence of calls and assert the exact end state. This is the right tool for "does this specific cross VM flow work" (deploy here, call there, assert balances on a third chain). Every step and assertion is explicit and the failure points straight at the line that broke. See `examples/integration-tests/tests/cross_vm/`.
+Use **`MultiChainEnv` directly** when the test is a fixed storyline you write out by hand: inject the chains, fund, `start()`, then run a known sequence of calls and assert the exact end state. This is the right tool for "does this specific cross VM flow work" (deploy here, call there, assert balances on a third chain). Every step and assertion is explicit and the failure points straight at the line that broke. See `examples/cross-vm-tests/tests/cross_vm/`.
 
 Use the **`Harness` runner** when you want a property checked across *many* sequences you did not write by hand. See [Property testing harness](#property-testing-harness) below.
 
 Rule of thumb: reach for `MultiChainEnv` first. Promote to a `Harness` once you find yourself wanting to assert the same property over many different sequences, or want fuzz, soak, or replay coverage.
 
-A worked cross VM flow, a CosmWasm/EVM ping pong relayer driven through one `MultiChainEnv`, lives at `examples/integration-tests/tests/cross_vm/ping_pong.rs` (with a narrative in `examples/PING_PONG.md`).
+A worked cross VM flow, a CosmWasm/EVM ping pong relayer driven through one `MultiChainEnv`, lives at `examples/cross-vm-tests/tests/cross_vm/ping_pong.rs` (with a narrative in `examples/PING_PONG.md`).
 
 ## Property testing harness
 
@@ -221,7 +221,7 @@ Case `i` is seeded by `sub_seed(seed, i)`, so a flagged case re-runs in isolatio
 
 **Reproducing a failure.** Every failed run reports its seed and the exact operation history. Feed the seed back as the macro's `seed =`, or turn the history into a deterministic regression test with `ScenarioRunner::replay(history)`; both re-drive the identical sequence. When filing a bug, the seed plus mode (and the failing invariant name) are all a maintainer needs.
 
-In the example crate the heavier runs are opt in so the default `cargo test` stays fast: the fuzz, invariant, and endurance tests sit behind the `fuzz`, `invariant`, and `endurance` cargo features, while the scenario (rstest matrix) tests and the runner mechanics self tests always run. See `examples/integration-tests/tests/harness/` for a multi chain counter, a DeFi vault, and the runner mechanics.
+In the example crate the heavier runs are opt in so the default `cargo test` stays fast: the fuzz, invariant, and endurance tests sit behind the `fuzz`, `invariant`, and `endurance` cargo features, while the scenario (rstest matrix) tests and the runner mechanics self tests always run. See `examples/cross-vm-tests/tests/harness/` for a multi chain counter, a DeFi vault, and the runner mechanics.
 
 ## Wallets
 
@@ -284,6 +284,23 @@ crates/
 
 Dependency trees are isolated per crate, so building or testing one VM does not pull the others. Each VM crate carries a `chains` module with predefined chain constants. The `cross-vm-framework` crate re-exports everything and adds the multi chain `MultiChainEnv` and the property testing harness.
 
+Example crates and contract sources live outside the root workspace:
+
+```
+contracts/
+  cosmwasm/   counter, ping-pong, vault CosmWasm contract crates
+  solidity/   Foundry project (Counter, PingPong) -> out/ artifacts
+  solana/     Anchor programs -> target/deploy/*.so
+  tron/       tronbox project -> build/ artifacts
+examples/
+  common/         cross-vm-common   reusable contract bindings (mocks) + shared wallet/tracing helpers
+  cross-vm-tests/ cross-vm-tests    multi-chain tests (cross-VM flows, ping-pong, vault, replay) + the cross-vm CLI
+  evm-tests/      cosmos-tests/     solana-tests/     tvm-tests/   single-VM Counter example crates
+  scripts/        deploy_counter    imperative deploy script over the live RPC providers
+```
+
+Each single-VM example crate exercises one `Counter` harness three ways: attribute-macro runners (`tests/harness.rs`), config-driven `#[config_runner]` fan-out (`tests/config_runner.rs`) against its `counter.cross-vm.toml`, and a CLI binary driven end to end (`tests/cli_e2e.rs`). All of them source their contract bindings from `cross-vm-common`.
+
 ## Build and test
 
 ```
@@ -293,14 +310,14 @@ cargo test  --workspace
 
 The integration tests embed compiled contract artifacts, so build those first with `make compile` (or a single ecosystem: `make compile-cosmwasm` / `compile-solidity` / `compile-solana`), then run `make test`. A fresh checkout will not compile the integration tests until the artifacts exist:
 
-* CosmWasm: the `examples/cosmwasm-contracts/*` crates are consumed as rlibs (no artifact build strictly needed for counter, but `make compile-cosmwasm` builds the wasm).
+* CosmWasm: the `contracts/cosmwasm/*` crates are consumed as rlibs (no artifact build strictly needed for counter, but `make compile-cosmwasm` builds the wasm).
 * EVM: `sol!` parses the forge build JSON for the ABI and creation bytecode (`forge build`).
 * Solana: `include_bytes!` loads the `cargo-build-sbf` output (`.so`).
 
 The heavier harness modes are feature gated to keep the default `cargo test` fast. Enable them with `make test-fuzz` / `test-invariant` / `test-endurance` / `test-harness-all`, or directly:
 
 ```
-cargo test -p cross-vm-integration-tests --test harness --features "fuzz invariant endurance"
+cargo test -p cross-vm-tests --test harness --features "fuzz invariant endurance"
 ```
 
 `make test-rpc-endurance` runs the endurance harness against a live Base Sepolia chain over RPC (needs network and a funded `ON_CHAIN_WALLET` mnemonic in `.env`; it signs the `on_chain` wallet). Other handy targets: `make test-cross-vm` (hand written flows), `make test-harness` (scenario matrices + mechanics), `make fmt`.

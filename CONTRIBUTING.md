@@ -6,7 +6,7 @@ Thanks for considering a contribution. This page covers the mechanics; `DEVELOPE
 
 * Rust stable (the MSRV is `rust-version` in the workspace `Cargo.toml`).
 * The pure unit tests in each crate need nothing else: `cargo test -p cross-vm-core` (or any VM crate) works on a fresh checkout.
-* The integration tests embed contract artifacts at compile time, so they need the per-ecosystem toolchains once: Foundry (`forge`) for EVM, the Anza platform tools (`cargo-build-sbf`) for Solana, and Node + pnpm + tronbox for Tron. Run `make compile` after installing them (see the Makefile's `setup-*` targets). Until then, `cargo test -p cross-vm-integration-tests` will not compile; everything else will.
+* The integration tests embed contract artifacts at compile time, so they need the per-ecosystem toolchains once: Foundry (`forge`) for EVM, the Anza platform tools (`cargo-build-sbf`) for Solana, and Node + pnpm + tronbox for Tron. Run `make compile` after installing them (see the Makefile's `setup-*` targets). Until then, `cargo test -p cross-vm-tests` will not compile; everything else will.
 
 ## Before opening a PR
 

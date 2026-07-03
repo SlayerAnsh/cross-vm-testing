@@ -64,13 +64,13 @@ ContractA → pongs_received += 1
 
 ```bash
 # CosmWasm
-cd examples/cosmwasm-contracts/ping-pong && make build
+cd contracts/cosmwasm/ping-pong && make build
 
 # Solidity
-cd examples/solidity-contracts && forge build && forge test
+cd contracts/solidity && forge build && forge test
 
 # Solana
-cd examples/solana-contracts && anchor build
+cd contracts/solana && anchor build
 ```
 
 ## Manual relay walkthrough
@@ -92,12 +92,12 @@ Pseudocode for relaying a ping from chain A to chain B:
 
 Foundry test `PingPong.t.sol` demonstrates steps 1–6 with two deployed `PingPong` instances on the same chain (chain ids `"1"` and `"42161"`).
 
-The cross-VM relayer test `examples/integration-tests/tests/cross_vm/ping_pong.rs` demonstrates the same lifecycle across heterogeneous chains. It deploys a `PingPong` on a CosmWasm, an EVM, and a Solana chain in one `MultiChainEnv`, parses packet events through each contract's `on_after` hook into a shared `BridgeLedger`, and uses a `Bridge` (which has access to the env) to move each packet to its destination port's chain and contract. It covers every ordered VM pair (running the Solana arm needs `make compile-solana`).
+The cross-VM relayer test `examples/cross-vm-tests/tests/cross_vm/ping_pong.rs` demonstrates the same lifecycle across heterogeneous chains. It deploys a `PingPong` on a CosmWasm, an EVM, and a Solana chain in one `MultiChainEnv`, parses packet events through each contract's `on_after` hook into a shared `BridgeLedger`, and uses a `Bridge` (which has access to the env) to move each packet to its destination port's chain and contract. It covers every ordered VM pair (running the Solana arm needs `make compile-solana`).
 
 ## Example locations
 
 | VM | Path |
 | --- | --- |
-| CosmWasm | `examples/cosmwasm-contracts/ping-pong/` |
-| Solidity | `examples/solidity-contracts/src/PingPong.sol` |
-| Solana | `examples/solana-contracts/programs/ping-pong/` |
+| CosmWasm | `contracts/cosmwasm/ping-pong/` |
+| Solidity | `contracts/solidity/src/PingPong.sol` |
+| Solana | `contracts/solana/programs/ping-pong/` |
