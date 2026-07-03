@@ -2,6 +2,13 @@
 resolver = "2"
 members = ["contracts/*"]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# Matches the repo license; keeps the contract crates non-"unlicensed" for cargo-deny, which sees
+# them as path deps in the root lock.
+license = "MIT"
+
 [workspace.dependencies]
 cosmwasm-std = "2"
 cw-storage-plus = "2"
