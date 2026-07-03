@@ -240,14 +240,68 @@ impl<H: Harness> Runner<H, Scenario> {
 
 // ----- random-sequence driver (Fuzz + Invariant) -----
 
+/// How a [`run_with`](Runner::run_with) sequence picks each op's kind. [`Harness`] and
+/// [`Restricted`](KindMix::Restricted) are the two shapes [`Runner::run`] has always exposed
+/// (`kinds = None` and `kinds = Some(ks)` respectively, kept as sugar over this enum);
+/// [`Weighted`](KindMix::Weighted) adds explicit per-kind mixing on top.
+pub enum KindMix<'a, K> {
+    /// Harness-defined: calls [`Harness::generate`] (a harness `generate` override still applies).
+    /// The config loader emits this when neither `kinds` nor `weights` is set.
+    Harness,
+    /// Uniform over a subset: `rng.index` picks among `kinds`, then [`Harness::generate_op`] fills
+    /// in the op's data. The shape [`Runner::run`]'s `Some(kinds)` has always used.
+    Restricted(&'a [K]),
+    /// Config-supplied weights: `rng.weighted` picks among the `(kind, weight)` pairs, then
+    /// [`Harness::generate_op`] fills in the op's data. Pair order is significant, since it is the
+    /// order `rng.weighted` indexes into, and is used verbatim; when sourced from config the
+    /// loader hands weights as a `BTreeMap` (sorted kind-name order), so the same config file
+    /// always yields the same op stream.
+    Weighted(&'a [(K, u32)]),
+}
+
+/// The `Infra` failure a [`KindMix`] that can generate nothing produces: an empty
+/// [`KindMix::Restricted`] slice, an empty [`KindMix::Weighted`] pair list, or a
+/// [`KindMix::Weighted`] mix whose weights all sum to zero. One shared exit for all three shapes
+/// so they fail identically instead of diverging or panicking inside the rng.
+fn empty_mix_report<Op: Clone>(builder: ReportBuilder<Op>) -> RunReport<Op> {
+    builder.fail(
+        0,
+        None,
+        FailureKind::Infra(
+            "empty op-kind mix: no kind can be drawn (use KindMix::Harness / pass None to draw \
+             from every kind)"
+                .into(),
+        ),
+    )
+}
+
 impl<H: Harness, M: Sequential> Runner<H, M> {
     /// Drive one random sequence of `ops` operations over the loaded env+world, drawing from
     /// `kinds` (or every kind via [`Harness::generate`] when `None`) and checking invariants per
     /// `check_every` (`0` = never mid-run). The report is labeled by the mode ([`RunMode::LABEL`]).
+    /// Sugar over [`run_with`](Runner::run_with): `None` becomes [`KindMix::Harness`], `Some(ks)`
+    /// becomes [`KindMix::Restricted(ks)`](KindMix::Restricted). Reach for `run_with` directly to
+    /// also draw a [`KindMix::Weighted`] mix.
     pub async fn run(
         &mut self,
         ops: usize,
         kinds: Option<&[H::OpKind]>,
+        check_every: usize,
+    ) -> RunReport<H::Operation> {
+        let mix = match kinds {
+            None => KindMix::Harness,
+            Some(ks) => KindMix::Restricted(ks),
+        };
+        self.run_with(ops, mix, check_every).await
+    }
+
+    /// Drive one random sequence of `ops` operations over the loaded env+world, drawing each op's
+    /// kind (and then its data) according to `mix`, and checking invariants per `check_every`
+    /// (`0` = never mid-run). The report is labeled by the mode ([`RunMode::LABEL`]).
+    pub async fn run_with(
+        &mut self,
+        ops: usize,
+        mix: KindMix<'_, H::OpKind>,
         check_every: usize,
     ) -> RunReport<H::Operation> {
         let Self {
@@ -267,23 +321,40 @@ impl<H: Harness, M: Sequential> Runner<H, M> {
         }
         let builder = ReportBuilder::new(*seed, M::LABEL, harness);
 
-        // An empty kind slice can generate nothing: surface an infra failure instead of panicking
-        // inside the rng (`None` is the "draw from every kind" spelling).
-        if kinds.is_some_and(|ks| ks.is_empty()) {
-            let report = builder.fail(
-                0,
-                None,
-                FailureKind::Infra(
-                    "empty op-kind slice (pass None to draw from every kind)".into(),
-                ),
-            );
-            log_summary(&report, stats.as_ref());
-            return report;
-        }
-
-        let source = OpSource::Generated {
-            kinds,
-            remaining: ops,
+        let source = match mix {
+            KindMix::Harness => OpSource::Generated {
+                kinds: None,
+                remaining: ops,
+            },
+            // An empty kind slice can generate nothing: surface an infra failure instead of
+            // panicking inside the rng (`None` is the "draw from every kind" spelling).
+            KindMix::Restricted([]) => {
+                let report = empty_mix_report(builder);
+                log_summary(&report, stats.as_ref());
+                return report;
+            }
+            KindMix::Restricted(ks) => OpSource::Generated {
+                kinds: Some(ks),
+                remaining: ops,
+            },
+            // Same guard, same failure, for the weighted shape: empty pairs or an all-zero weight
+            // total can likewise generate nothing.
+            KindMix::Weighted(pairs)
+                if pairs.is_empty()
+                    || pairs.iter().map(|&(_, w)| w as u64).sum::<u64>() == 0 =>
+            {
+                let report = empty_mix_report(builder);
+                log_summary(&report, stats.as_ref());
+                return report;
+            }
+            KindMix::Weighted(pairs) => {
+                let (kinds, weights) = pairs.iter().copied().unzip();
+                OpSource::Weighted {
+                    kinds,
+                    weights,
+                    remaining: ops,
+                }
+            }
         };
         let report = drive(
             harness,
@@ -723,16 +794,25 @@ impl<Op: Clone> ReportBuilder<Op> {
     }
 }
 
-/// Where a driver's next operation comes from: freshly generated (fuzz / invariant) or a fixed
-/// list (scenario / replay / shrink candidates). Generated draws preserve the exact rng order the
-/// modes have always used (kind index first when restricted, then op data), which is what keeps
-/// recorded seeds reproducing across releases (pinned by the golden-seed test in mechanics.rs).
+/// Where a driver's next operation comes from: freshly generated (fuzz / invariant), a fixed list
+/// (scenario / replay / shrink candidates), or a weighted generated mix. Generated and Weighted
+/// draws preserve the exact rng order the modes have always used (kind choice first, then op
+/// data), which is what keeps recorded seeds reproducing across releases (pinned by the
+/// golden-seed tests in mechanics.rs: `golden_seed_sequence_is_stable` for `Generated` and
+/// `weighted_golden_seed_sequence_is_stable` for `Weighted`).
 enum OpSource<'a, H: Harness> {
     Generated {
         kinds: Option<&'a [H::OpKind]>,
         remaining: usize,
     },
     Fixed(std::vec::IntoIter<H::Operation>),
+    /// Owns its kinds/weights (rather than borrowing) so [`Runner::run_with`] can split a
+    /// `&[(K, u32)]` into the two `Vec`s without fighting `drive`'s borrow of the source.
+    Weighted {
+        kinds: Vec<H::OpKind>,
+        weights: Vec<u32>,
+        remaining: usize,
+    },
 }
 
 impl<H: Harness> OpSource<'_, H> {
@@ -752,6 +832,21 @@ impl<H: Harness> OpSource<'_, H> {
                 })
             }
             OpSource::Fixed(iter) => iter.next(),
+            OpSource::Weighted {
+                kinds,
+                weights,
+                remaining,
+            } => {
+                if *remaining == 0 {
+                    return None;
+                }
+                *remaining -= 1;
+                // Pinned draw order: weighted index first, then op data (mirrors the Restricted
+                // arm above).
+                let idx = rng.weighted(weights);
+                let kind = kinds[idx];
+                Some(harness.generate_op(rng, world, kind))
+            }
         }
     }
 }

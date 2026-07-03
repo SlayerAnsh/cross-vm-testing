@@ -742,3 +742,67 @@ async fn golden_seed_sequence_is_stable() {
         "seed 42 must reproduce the recorded sequence exactly"
     );
 }
+
+/// Golden-seed pin for [`KindMix::Weighted`]: the exact op sequence `seed = 42` produces under a
+/// 3:1 Deposit:Withdraw mix. Same compatibility surface as [`golden_seed_sequence_is_stable`]: the
+/// draw order (weighted kind index, then op data) is pinned in `runner.rs`'s `OpSource::Weighted`;
+/// only an intentional, CHANGELOG-documented generation change may update this literal.
+#[tokio::test]
+async fn weighted_golden_seed_sequence_is_stable() {
+    let (bank, log) = Bank::new(2, Behavior::Good);
+    let (ctx, world) = bank_env(2).await.unwrap();
+    let mut r = Runner::fuzz(bank, 42);
+    r.setup(ctx, world);
+    let mix = KindMix::Weighted(&[(OpKind::Deposit, 3), (OpKind::Withdraw, 1)]);
+    let rep = r.run_with(6, mix, 1).await;
+    assert!(rep.passed(), "{:?}", rep.failure);
+    assert_eq!(
+        *log.borrow(),
+        vec![
+            Op::Deposit { user: 0, amount: 80 },
+            Op::Withdraw {
+                user: 0,
+                amount: 1282
+            },
+            Op::Deposit { user: 0, amount: 8 },
+            Op::Deposit {
+                user: 1,
+                amount: 84
+            },
+            Op::Withdraw {
+                user: 1,
+                amount: 1463
+            },
+            Op::Deposit {
+                user: 0,
+                amount: 43
+            },
+        ],
+        "seed 42 under a 3:1 Deposit:Withdraw mix must reproduce the recorded sequence exactly"
+    );
+}
+
+#[tokio::test]
+async fn weighted_empty_pairs_is_an_infra_failure() {
+    let (bank, _log) = Bank::new(1, Behavior::Good);
+    let (ctx, world) = bank_env(1).await.unwrap();
+    let mut r = Runner::fuzz(bank, 0);
+    r.setup(ctx, world);
+    let rep = r.run_with(10, KindMix::Weighted(&[]), 1).await;
+    assert_eq!(rep.steps, 0, "nothing can run without a kind to draw");
+    let f = rep.failure.expect("reported as a failure");
+    assert!(matches!(f.kind, FailureKind::Infra(_)), "{:?}", f.kind);
+}
+
+#[tokio::test]
+async fn weighted_all_zero_weights_is_an_infra_failure() {
+    let (bank, _log) = Bank::new(1, Behavior::Good);
+    let (ctx, world) = bank_env(1).await.unwrap();
+    let mut r = Runner::fuzz(bank, 0);
+    r.setup(ctx, world);
+    let mix = KindMix::Weighted(&[(OpKind::Deposit, 0), (OpKind::Withdraw, 0)]);
+    let rep = r.run_with(10, mix, 1).await;
+    assert_eq!(rep.steps, 0, "nothing can run without a kind to draw");
+    let f = rep.failure.expect("reported as a failure");
+    assert!(matches!(f.kind, FailureKind::Infra(_)), "{:?}", f.kind);
+}

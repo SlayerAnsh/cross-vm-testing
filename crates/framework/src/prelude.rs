@@ -9,8 +9,9 @@ pub use crate::{
 pub use crate::harness::{
     classify, op_label, random_seed, sub_seed, CheckOutcome, Coverage, Ctx, Endurance,
     EnduranceConfig, EnduranceRunner, Failure, FailureKind, Fuzz, FuzzRunner, Harness,
-    HarnessError, InvCoverage, Invariant, InvariantRunner, OpStat, Prng, RunMode, RunReport,
-    Runner, Scenario, ScenarioRunner, Sequential, Stats, Verdict, Violation, DEFAULT_SHRINK_LIMIT,
+    HarnessError, InvCoverage, Invariant, InvariantRunner, KindMix, OpStat, Prng, RunMode,
+    RunReport, Runner, Scenario, ScenarioRunner, Sequential, Stats, Verdict, Violation,
+    DEFAULT_SHRINK_LIMIT,
 };
 pub use cross_vm_core::{
     ChainKind, ChainProvider, ChainSpec, CrossVmError, WalletFactory, WalletLabel, WalletSource,

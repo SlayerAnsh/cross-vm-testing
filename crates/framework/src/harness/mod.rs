@@ -44,7 +44,7 @@ pub use rng::sample_arbitrary;
 pub use rng::{random_seed, sub_seed, Prng};
 pub use runner::{
     Endurance, EnduranceConfig, EnduranceRunner, Fuzz, FuzzRunner, Invariant, InvariantRunner,
-    RunMode, Runner, Scenario, ScenarioRunner, Sequential, DEFAULT_SHRINK_LIMIT,
+    KindMix, RunMode, Runner, Scenario, ScenarioRunner, Sequential, DEFAULT_SHRINK_LIMIT,
 };
 pub use stats::{op_label, OpStat, Stats};
 
