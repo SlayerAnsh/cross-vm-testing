@@ -52,7 +52,10 @@ fn wallets() -> Rc<WalletFactory> {
 async fn shared_method_names_resolve_per_contract() {
     let chain: CwChain = OSMOSIS.mock(wallets()).into();
 
-    let counter_code = chain.store_code(counter_contract()).await.expect("store counter");
+    let counter_code = chain
+        .store_code(counter_contract())
+        .await
+        .expect("store counter");
     let counter_addr = chain
         .instantiate(
             counter_code,
@@ -64,7 +67,10 @@ async fn shared_method_names_resolve_per_contract() {
         .await
         .expect("instantiate counter");
 
-    let vault_code = chain.store_code(vault_contract()).await.expect("store vault");
+    let vault_code = chain
+        .store_code(vault_contract())
+        .await
+        .expect("store vault");
     let vault_addr = chain
         .instantiate(
             vault_code,
@@ -81,9 +87,14 @@ async fn shared_method_names_resolve_per_contract() {
     let c = chain.contract_as::<counter::CounterContract>(counter_addr);
     let v = chain.contract_as::<vault::VaultContract>(vault_addr);
 
-    c.set_version("alice", 7).await.expect("counter set_version");
+    c.set_version("alice", 7)
+        .await
+        .expect("counter set_version");
     v.set_version("alice", 9).await.expect("vault set_version");
 
-    assert_eq!(c.get_version().await.expect("counter get_version").version, 7);
+    assert_eq!(
+        c.get_version().await.expect("counter get_version").version,
+        7
+    );
     assert_eq!(v.get_version().await.expect("vault get_version").version, 9);
 }
