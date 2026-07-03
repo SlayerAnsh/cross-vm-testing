@@ -12,6 +12,8 @@ members = [
     "crates/macros",
     # Reusable contract bindings (mocks) + shared test helpers for the example test crates.
     "examples/common",
+    # Per-VM example test crates: one Counter harness each, driven three ways (harness/config/CLI).
+    "examples/evm-tests",
     # Multi-chain integration & example tests, co-located with the contract artifacts they embed.
     "examples/cross-vm-tests",
 ]

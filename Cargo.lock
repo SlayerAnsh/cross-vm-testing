@@ -3049,6 +3049,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "evm-tests"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "cross-vm-common",
+ "cross-vm-framework",
+ "cross-vm-macros",
+ "cross-vm-solidity",
+ "rstest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "eyre"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

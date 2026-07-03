@@ -1,0 +1,49 @@
+# Config-driven run definitions for the single-VM (EVM) counter harness (`evm-tests`).
+#
+# Run with, e.g.:
+#   cargo run -p evm-tests --bin cross-vm -- validate examples/evm-tests/counter.cross-vm.toml
+#   cargo run -p evm-tests --bin cross-vm -- run examples/evm-tests/counter.cross-vm.toml --profile smoke
+
+[harness]
+name = "counter"
+
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "1"
+name = "Ethereum"
+native_symbol = "ETH"
+spec_id = "cancun"
+
+[env]
+target = "mock"
+chains = ["eth"]
+
+[defaults]
+seed = 42
+check_every = 1
+
+# A fast, CI-friendly smoke profile: a few short fuzz cases over both op kinds.
+[profile.smoke]
+mode = "fuzz"
+cases = 4
+ops = 20
+kinds = ["Increment", "IncrementTwice"]
+
+# A single longer invariant run, checked every 5 ops.
+[profile.invariant-long]
+mode = "invariant"
+ops = 200
+check_every = 5
+
+# Scenario mode: a concrete, ordered step sequence. Both increments are always accepted.
+[profile.steps]
+mode = "scenario"
+
+  [[profile.steps.steps]]
+  op = "Increment"
+  expect = "accepted"
+
+  [[profile.steps.steps]]
+  op = "IncrementTwice"
+  expect = "accepted"
