@@ -102,6 +102,25 @@ impl Cli {
         self
     }
 
+    /// Registers a persistent harness under `name`, delegating to
+    /// [`Registry::register_persistent`](crate::config::Registry::register_persistent) (same
+    /// bounds as [`Cli::register`], plus `H::World: Serialize`). A scenario profile's
+    /// `export_world` key only works against a harness registered this way; against a plain
+    /// [`Cli::register`]-ed harness it fails both `cross-vm validate` and `cross-vm run` with a
+    /// clear error.
+    pub fn register_persistent<H, F, S>(mut self, name: &str, harness: F, setup: S) -> Self
+    where
+        H: Harness + 'static,
+        H::Operation: serde::Serialize + serde::de::DeserializeOwned + 'static,
+        H::OpKind: serde::Serialize + serde::de::DeserializeOwned + Copy + 'static,
+        H::World: serde::Serialize + 'static,
+        F: Fn() -> H + 'static,
+        S: Fn(SetupRequest) -> SetupFuture<'static, H::World> + 'static,
+    {
+        self.registry.register_persistent(name, harness, setup);
+        self
+    }
+
     /// Parses `std::env::args()`, dispatches to `run` / `validate` / `list`, and returns the CI
     /// exit code (spec section 8).
     ///
@@ -598,18 +617,21 @@ fn exit_code_for(report: &ErasedReport) -> u8 {
 }
 
 /// Maps a [`RunError`] to its exit code. `UnknownHarness`/`Validation`/`Invalid`/`UnsupportedMode`
-/// are config/usage errors (`3`, per spec section 8's exit-code list). `Setup` (the config-driven
-/// setup fn failed: deploy/RPC/model desync) and `Serialize` (the failure history could not be
-/// turned into JSON) are not usage errors — nothing about the invocation was wrong — but neither
-/// are they a discovered SUT bug, so both map to `2` (infra-only failure), the same bucket a
-/// `FailureKind::Infra` report gets.
+/// are config/usage errors (`3`, per spec section 8's exit-code list) — a profile setting
+/// `export_world` against a harness that cannot export lands in `Invalid`, since `validate` is
+/// meant to catch exactly this offline. `Setup` (the config-driven setup fn failed: deploy/RPC/
+/// model desync), `Serialize` (the failure history could not be turned into JSON), and `Export`
+/// (a `register_persistent` harness's `export_world` write itself failed: bad directory,
+/// permissions, disk full) are not usage errors — nothing about the invocation was wrong — but
+/// neither are they a discovered SUT bug, so all three map to `2` (infra-only failure), the same
+/// bucket a `FailureKind::Infra` report gets.
 fn exit_code_for_run_error(err: &RunError) -> u8 {
     match err {
         RunError::UnknownHarness(_)
         | RunError::Validation(_)
         | RunError::Invalid(_)
         | RunError::UnsupportedMode(_) => 3,
-        RunError::Setup(_) | RunError::Serialize(_) => 2,
+        RunError::Setup(_) | RunError::Serialize(_) | RunError::Export(_) => 2,
     }
 }
 

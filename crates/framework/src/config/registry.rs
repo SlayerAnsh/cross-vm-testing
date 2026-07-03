@@ -14,8 +14,21 @@
 //! documentation-only blanket marker for that requirement: a harness that never touches the CLI
 //! compiles exactly as before, and a missing derive at a `register` call site is an ordinary
 //! compile error, not a runtime surprise.
+//!
+//! [`Registry::register_persistent`] is the opt-in variant that adds exactly one more bound,
+//! `H::World: Serialize`, and nothing else: both methods funnel into the private
+//! `register_inner`, which takes an `Option<WorldExportFn<H::World>>` (`None` from `register`,
+//! `Some` from `register_persistent`). `WorldExportFn<W>`'s own *type* — `Rc<dyn Fn(&W, &Path) ->
+//! Result<(), RunError>>` — never mentions `Serialize`, so `register_inner`'s signature (and
+//! therefore `register`'s) carries no such bound; only the closure *body*
+//! `register_persistent` builds (`export_world_json::<H::World>`, where the bound is locally in
+//! scope) does. A scenario profile's `export_world` is enforced twice: [`Registry::validate`]
+//! rejects it up front (`validate_export_world`) whenever the harness has no exporter, and the
+//! scenario run arm (`run_profile`) rejects it again at run time before touching a chain, since
+//! `cross-vm run` does not call `validate` on its own.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::rc::Rc;
 
 use serde::de::DeserializeOwned;
@@ -84,6 +97,15 @@ pub enum RunError {
     /// unimplemented.
     #[error("{0}")]
     UnsupportedMode(String),
+    /// A scenario profile's `export_world` failed to write: its parent directory could not be
+    /// created, the final `World` failed to serialize as JSON, or the file itself could not be
+    /// written. Not a discovered SUT bug — this maps to the infra exit code (`2`), the same
+    /// bucket [`RunError::Setup`]/[`RunError::Serialize`] use. A harness that cannot export at
+    /// all (registered via [`Registry::register`], not [`Registry::register_persistent`]) never
+    /// reaches this variant; that mismatch is [`RunError::Invalid`] instead (a config/usage
+    /// error, caught by `validate` too).
+    #[error("failed to export world: {0}")]
+    Export(String),
 }
 
 /// Stand-in "no duration bound" for an endurance profile that sets `max_ops` but not `duration`.
@@ -105,6 +127,14 @@ type RunFn = Box<
         &'a RunOptions,
     ) -> LocalBoxFuture<'a, Result<ErasedReport, RunError>>,
 >;
+
+/// A world-exporter closure's shape: JSON-serializes the final `World` to a path.
+/// [`Registry::register`] never constructs one of these (it passes `None` through
+/// `register_inner`); [`Registry::register_persistent`] is the only place a real one is built
+/// (`export_world_json::<H::World>`). Note this *type* mentions no `Serialize` bound on `W` at
+/// all — only the function `register_persistent` points it at does — which is exactly what keeps
+/// `register_inner`'s (and therefore `register`'s) signature free of the bound.
+type WorldExportFn<W> = Rc<dyn Fn(&W, &Path) -> Result<(), RunError>>;
 
 /// One registered harness: a validate closure and a run closure, both monomorphized over the
 /// harness type at [`Registry::register`] time. Never exposed to callers directly; [`Registry`]'s
@@ -159,13 +189,71 @@ impl Registry {
         F: Fn() -> H + 'static,
         S: Fn(SetupRequest) -> SetupFuture<'static, H::World> + 'static,
     {
-        let validate: ValidateFn =
-            Box::new(|profile: &cross_vm_config::Profile| validate_profile::<H>(profile));
+        self.register_inner::<H, F, S>(name, harness, setup, None)
+    }
+
+    /// Like [`register`](Registry::register), plus one additional bound: `H::World: Serialize`.
+    /// A scenario profile registered this way may set `export_world = "path.json"`, which
+    /// serializes the final `World` (via [`Runner::into_parts`](crate::harness::Runner::into_parts))
+    /// as pretty JSON after [`run_steps`](crate::harness::Runner::run_steps) completes —
+    /// regardless of pass/fail, so the state the run actually reached is what lands on disk.
+    /// Missing parent directories are created; the written path is logged at `info`.
+    ///
+    /// A harness registered with plain `register` cannot export: a profile that sets
+    /// `export_world` against it fails both `validate` (`RunError::Validation`, so `cross-vm
+    /// validate` catches it offline) and `run` (`RunError::Invalid`, so a direct `cross-vm run`
+    /// that skipped `validate` still cannot silently ignore the key).
+    ///
+    /// The `World` is whatever the harness's own type holds — for the in-tree vault harness that
+    /// is learned addresses and model state, never a mnemonic or key — but this method makes no
+    /// guarantee about what a *given* harness's `World` contains; a harness whose `World`
+    /// happens to hold something sensitive would export it verbatim.
+    pub fn register_persistent<H, F, S>(&mut self, name: &str, harness: F, setup: S) -> &mut Self
+    where
+        H: Harness + 'static,
+        H::Operation: serde::Serialize + DeserializeOwned + 'static,
+        H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
+        H::World: serde::Serialize + 'static,
+        F: Fn() -> H + 'static,
+        S: Fn(SetupRequest) -> SetupFuture<'static, H::World> + 'static,
+    {
+        let export: WorldExportFn<H::World> = Rc::new(export_world_json::<H::World>);
+        self.register_inner::<H, F, S>(name, harness, setup, Some(export))
+    }
+
+    /// The shared body of [`register`](Registry::register) and
+    /// [`register_persistent`](Registry::register_persistent): builds the validate/run closures
+    /// common to both. `export` is `None` for `register` (there is no `H::World: Serialize`
+    /// bound in scope here to build a real exporter from — `register`'s own generic parameters
+    /// never gain one) and `Some` for `register_persistent` (a closure built where that bound
+    /// *is* in scope). This is the one place the bound-isolation trick lives: `Option<
+    /// WorldExportFn<H::World>>` is a perfectly valid parameter type regardless of whether
+    /// `H::World: Serialize` holds, since the *type* `WorldExportFn<W>` never mentions the bound
+    /// — only the value `register_persistent` constructs does.
+    fn register_inner<H, F, S>(
+        &mut self,
+        name: &str,
+        harness: F,
+        setup: S,
+        export: Option<WorldExportFn<H::World>>,
+    ) -> &mut Self
+    where
+        H: Harness + 'static,
+        H::Operation: serde::Serialize + DeserializeOwned + 'static,
+        H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
+        F: Fn() -> H + 'static,
+        S: Fn(SetupRequest) -> SetupFuture<'static, H::World> + 'static,
+    {
+        let export_capable = export.is_some();
+        let validate: ValidateFn = Box::new(move |profile: &cross_vm_config::Profile| {
+            validate_profile::<H>(profile)?;
+            validate_export_world(profile, export_capable)
+        });
 
         // `Rc`, not a borrow of the closure's own captured fields: the run closure must be
         // callable an arbitrary number of times (once per fuzz case), and each call needs to
-        // move an owned handle to `harness`/`setup` into its own `async move` block so the
-        // returned future's lifetime is exactly the `'a` on its `&'a ResolvedProfile`/`&'a
+        // move an owned handle to `harness`/`setup`/`export` into its own `async move` block so
+        // the returned future's lifetime is exactly the `'a` on its `&'a ResolvedProfile`/`&'a
         // RunOptions` parameters, never tied to the (much shorter, per-call) borrow of the
         // closure's environment. Cloning an `Rc` is cheap, and everything here is already `!Send`
         // by design, so this costs nothing the design does not already pay for.
@@ -180,8 +268,17 @@ impl Registry {
                 let harness = Rc::clone(&harness);
                 let setup = Rc::clone(&setup);
                 let harness_name = harness_name.clone();
+                let export = export.clone();
                 Box::pin(async move {
-                    run_profile::<H, F, S>(&harness, &setup, harness_name, resolved, opts).await
+                    run_profile::<H, F, S>(
+                        &harness,
+                        &setup,
+                        harness_name,
+                        resolved,
+                        opts,
+                        export.as_ref(),
+                    )
+                    .await
                 })
             },
         );
@@ -317,6 +414,53 @@ where
     }
 }
 
+/// Rejects a scenario profile whose `export_world` is set against a harness that cannot export
+/// (registered via [`Registry::register`], not [`Registry::register_persistent`]).
+/// `export_capable` is `true` only when the registering closure built a real world-exporter
+/// (i.e. the harness was registered with `register_persistent`). Every other mode's profile has
+/// no `export_world` key at all, so only the `Profile::Scenario` arm is ever inspected. Powers
+/// [`Registry::validate`]; the scenario run arm re-checks the same condition at run time (spec:
+/// `validate` catches it offline, `run` enforces it even when a caller skips `validate`).
+fn validate_export_world(
+    profile: &cross_vm_config::Profile,
+    export_capable: bool,
+) -> Result<(), ValidationError> {
+    if let cross_vm_config::Profile::Scenario(p) = profile {
+        if p.export_world.is_some() && !export_capable {
+            return Err(ValidationError(
+                "export_world requires this harness to be registered with \
+                 Registry::register_persistent (H::World: Serialize), not register"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Serializes `world` as pretty JSON to `path`, creating any missing parent directories first.
+/// Built only in [`Registry::register_persistent`] (as `export_world_json::<H::World>`), where
+/// the `H::World: Serialize` bound this needs is in scope; [`Registry::register`] never
+/// constructs a [`WorldExportFn`] at all, so this function is never reachable from a
+/// non-persistent registration.
+fn export_world_json<W: serde::Serialize>(world: &W, path: &Path) -> Result<(), RunError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                RunError::Export(format!(
+                    "failed to create export_world parent dir {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+    }
+    let json = serde_json::to_string_pretty(world)
+        .map_err(|e| RunError::Export(format!("failed to serialize World: {e}")))?;
+    std::fs::write(path, json)
+        .map_err(|e| RunError::Export(format!("failed to write {}: {e}", path.display())))?;
+    tracing::info!(path = %path.display(), "wrote export_world");
+    Ok(())
+}
+
 /// Resolves a profile's `SeedSpec` to a concrete `u64`, once per profile run: `Fixed(n)` is used
 /// verbatim, `Random` draws a fresh seed and logs it so the run can be reproduced.
 fn resolve_base_seed(seed: cross_vm_config::SeedSpec) -> u64 {
@@ -408,6 +552,7 @@ async fn run_profile<H, F, S>(
     harness_name: String,
     resolved: &ResolvedProfile,
     opts: &RunOptions,
+    export: Option<&WorldExportFn<H::World>>,
 ) -> Result<ErasedReport, RunError>
 where
     H: Harness,
@@ -560,6 +705,18 @@ where
             .map_err(|e| RunError::Serialize(e.to_string()))
         }
         cross_vm_config::Profile::Scenario(p) => {
+            // Enforced here too (not just `validate`): `cross-vm run` never requires a prior
+            // `cross-vm validate` call, so a harness that cannot export must still fail loudly
+            // before touching a chain, not silently drop the key.
+            if p.export_world.is_some() && export.is_none() {
+                return Err(RunError::Invalid(
+                    "profile sets export_world, but this harness was registered with \
+                     `register`, not `register_persistent`; export_world requires \
+                     `H::World: Serialize`"
+                        .to_string(),
+                ));
+            }
+
             let (ctx, world) = setup(build_setup_request(resolved, base_seed))
                 .await
                 .map_err(|e| RunError::Setup(e.to_string()))?;
@@ -590,6 +747,17 @@ where
             runner.setup(ctx, world);
             let report = runner.run_steps(steps, resolved.check_every).await;
             let stats = runner.stats().cloned();
+
+            // Serialize the final World *after* the run, whether it passed or failed, so the
+            // exported file always reflects the state the run actually reached. Only reachable
+            // when `export_world` is set (checked above), which in turn only holds when `export`
+            // is `Some` (checked above too).
+            if let Some(path) = &p.export_world {
+                let exporter =
+                    export.expect("checked above: export_world implies register_persistent");
+                let (_ctx, world) = runner.into_parts();
+                (exporter.as_ref())(&world, Path::new(path))?;
+            }
 
             // Scenario never shrinks: its steps are concrete, not generative, so there is nothing
             // to minimize.
@@ -923,6 +1091,31 @@ mod tests {
         })
     }
 
+    /// [`scenario_profile`] with `export_world` set to `path`.
+    fn scenario_profile_with_export(
+        steps: Vec<cross_vm_config::ScenarioStepRaw>,
+        path: &str,
+    ) -> Profile {
+        Profile::Scenario(cross_vm_config::ScenarioProfile {
+            common: common(),
+            steps,
+            export_world: Some(path.to_string()),
+        })
+    }
+
+    /// A fresh temp file path under the OS temp dir, unique per test invocation (process id plus
+    /// a monotonic counter), so parallel test runs never collide.
+    fn temp_export_path(label: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "cross-vm-registry-export-world-{}-{}-{label}.json",
+            std::process::id(),
+            n
+        ))
+    }
+
     /// A step whose op is a bare unit-variant name (`MockOp` has no data, so a plain TOML string
     /// deserializes into it exactly like `H::OpKind::deserialize` does for `kinds`/`weights`).
     fn mock_step(op: &str, expect: cross_vm_config::ExpectStr) -> cross_vm_config::ScenarioStepRaw {
@@ -991,6 +1184,107 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RunError::Validation(_)), "{err:?}");
+    }
+
+    // ----- register_persistent + export_world (Task 12b) -----
+    //
+    // `MockHarness::World` is a plain `u32`, already `Serialize`, so it doubles as the
+    // "persistent" harness these tests need without introducing a second mock: `apply` increments
+    // `world` by 1 per applied op (both Ping/Pong are accepted), and `mock_setup` seeds it from
+    // `req.seed`, so the final exported value is deterministic (`seed + accepted-op-count`).
+
+    #[tokio::test]
+    async fn register_persistent_scenario_run_exports_final_world_as_json() {
+        let mut registry = Registry::new();
+        registry.register_persistent("mock", || MockHarness, mock_setup);
+
+        let path = temp_export_path("passing");
+        let steps = vec![
+            mock_step("Ping", cross_vm_config::ExpectStr::Accepted),
+            mock_step("Pong", cross_vm_config::ExpectStr::Accepted),
+        ];
+        let resolved = resolved(scenario_profile_with_export(
+            steps,
+            path.to_str().unwrap(),
+        ));
+
+        let report = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .expect("run ok");
+        assert!(report.failure.is_none(), "{:?}", report.failure);
+
+        // `resolved()` fixes the seed at 7 (`SeedSpec::Fixed(7)`); two accepted ops each bump the
+        // mock `World` (`u32`) by 1, so the exported value must be exactly 9.
+        let raw = std::fs::read_to_string(&path).expect("export_world wrote the file");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+        assert_eq!(value, serde_json::json!(9));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn register_persistent_scenario_run_exports_even_on_failure() {
+        let mut registry = Registry::new();
+        registry.register_persistent("mock", || MockHarness, mock_setup);
+
+        let path = temp_export_path("failing");
+        // Ping is always accepted; expecting a rejection fails the step, but export_world must
+        // still write the state the run actually reached.
+        let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Rejected)];
+        let resolved = resolved(scenario_profile_with_export(
+            steps,
+            path.to_str().unwrap(),
+        ));
+
+        let report = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .expect("run resolves to a report, not a RunError");
+        assert!(report.failure.is_some());
+
+        let raw = std::fs::read_to_string(&path).expect("export_world wrote the file even on failure");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+        assert_eq!(value, serde_json::json!(8), "seed 7 + one applied Ping");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn plain_register_scenario_with_export_world_fails_validate() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Accepted)];
+        let profile = scenario_profile_with_export(steps, "somewhere.json");
+
+        let err = registry.validate("mock", &profile).unwrap_err();
+        match err {
+            RunError::Validation(e) => {
+                assert!(e.to_string().contains("register_persistent"), "{e}");
+            }
+            other => panic!("expected RunError::Validation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_register_scenario_with_export_world_fails_run() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        let path = temp_export_path("rejected-by-plain-register");
+        let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Accepted)];
+        let resolved = resolved(scenario_profile_with_export(
+            steps,
+            path.to_str().unwrap(),
+        ));
+
+        let err = registry
+            .run("mock", &resolved, &RunOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Invalid(_)), "{err:?}");
+        assert!(!path.exists(), "a rejected run must never write the export file");
     }
 
     #[tokio::test]
