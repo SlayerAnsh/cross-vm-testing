@@ -45,8 +45,6 @@ cross-vm-common = { path = "../common", features = ["cw", "evm", "solana", "tron
 # Needed by the `cross-vm` bin's `#[tokio::main(flavor = "current_thread")]`; bin targets cannot
 # use `[dev-dependencies]`.
 tokio.workspace = true
-# `init_tracing` (`src/support/mod.rs`) routes the framework's per-op / per-invariant debug logs.
-tracing-subscriber.workspace = true
 alloy = { workspace = true }
 solana-instruction = "3"
 solana-system-interface = { version = "2", features = ["bincode"] }

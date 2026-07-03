@@ -1,4 +1,4 @@
-//! Shared wallet factory and per-VM funding helpers for the integration tests.
+//! Shared wallet factory and per-VM funding helpers for the example test crates.
 
 use std::rc::Rc;
 

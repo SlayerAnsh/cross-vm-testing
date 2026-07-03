@@ -2283,8 +2283,11 @@ dependencies = [
  "alloy",
  "cosmwasm-std",
  "counter",
+ "cross-vm-framework",
+ "cross-vm-solidity",
  "cw-multi-test",
  "ping-pong",
+ "tracing-subscriber 0.3.23",
  "vault",
 ]
 
@@ -2437,7 +2440,6 @@ dependencies = [
  "solana-instruction",
  "solana-system-interface 2.0.0",
  "tokio",
- "tracing-subscriber 0.3.23",
 ]
 
 [[package]]

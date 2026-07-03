@@ -28,6 +28,13 @@ tron = ["dep:alloy"]
 cw-artifacts = ["cw"]
 
 [dependencies]
+# Shared wallet/funding helpers (ungated): the funding matcher touches every `AnyChain` variant,
+# so it relies on the framework's default features (all VMs). The framework is a pure library, so
+# this does not pull in any compiled contract artifact.
+cross-vm-framework = { path = "../../crates/framework" }
+cross-vm-solidity  = { path = "../../crates/solidity" }
+tracing-subscriber.workspace = true
+
 # CosmWasm contract crates, consumed as host rlibs (not wasm). `counter` needs its `cross-vm`
 # feature for the `ExecuteMsgFns` / `QueryMsgFns` derives; vault / ping-pong use raw message enums.
 counter   = { path = "../../contracts/cosmwasm/counter", features = ["cross-vm"], optional = true }
