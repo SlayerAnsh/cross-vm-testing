@@ -39,6 +39,8 @@ dotenvy = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 # `cli`-only: `ChainSpecData::params` and inline config tables.
 toml = { workspace = true, optional = true }
+# `cli`-only: `--duration` humantime string parsing (Task 7's `run` subcommand).
+humantime = { workspace = true, optional = true }
 # `cli`-only: `SpecId` (`revm::primitives::hardfork::SpecId`) is a field type on `ChainSpecData`
 # regardless of which VM features are on, but neither `cross-vm-solidity` nor `cross-vm-tron`
 # re-export the type, so the framework needs its own direct dependency to name it. Not in the
@@ -69,6 +71,7 @@ cli = [
     "dep:tracing-subscriber",
     "dep:toml",
     "dep:revm",
+    "dep:humantime",
     # ctrl-c handling for the endurance runner's cooperative stop flag (Task 10); tokio is a
     # mandatory workspace dep with a fixed feature set, so `cli` adds the extra feature to the
     # existing dependency rather than redeclaring it.

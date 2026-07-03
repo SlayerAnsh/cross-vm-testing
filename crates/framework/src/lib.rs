@@ -43,6 +43,8 @@ mod shortfall;
 mod wallets;
 
 #[cfg(feature = "cli")]
+pub mod cli;
+#[cfg(feature = "cli")]
 pub mod config;
 pub mod harness;
 pub mod prelude;
