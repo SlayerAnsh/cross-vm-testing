@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows Keep
 ### Added
 
 * `cross-vm-macros`: `CwExecuteFns` and `CwQueryFns` now support tuple (unnamed) enum variants. Unnamed fields become positional method args `arg0`, `arg1`, ... (cw-orch style), e.g. `ManageFactoryState(ManageFactoryState)` generates `manage_factory_state(wallet, arg0)`.
+* `cross-vm-macros`: `CwExecuteFns` / `CwQueryFns` accept an enum-level `#[cross_vm(trait_name = "...")]` attribute that renames the generated trait (default `<EnumName>Fns`). This lets the same `ExecuteMsg` / `QueryMsg` also derive cw-orch's `ExecuteFns` / `QueryFns` without the two colliding on the `ExecuteMsgFns` / `QueryMsgFns` trait name.
 
 ### Changed (repo restructure: `contracts/`, `cross-vm-common`, per-VM example crates)
 

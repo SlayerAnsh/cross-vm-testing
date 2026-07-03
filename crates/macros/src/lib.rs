@@ -48,7 +48,11 @@ pub fn cross_vm_contract(args: TokenStream, item: TokenStream) -> TokenStream {
 /// one `async fn` per variant (snake_cased; named fields become args; tuple fields become
 /// positional `arg0`, `arg1`, ... args). A variant marked
 /// `#[payable]` gains a trailing `funds: &[Coin]` arg routed through `execute_with_funds`.
-#[proc_macro_derive(CwExecuteFns, attributes(payable))]
+///
+/// The trait is named `<EnumName>Fns` unless the enum carries
+/// `#[cross_vm(trait_name = "...")]`, which renames it (useful to avoid a clash with cw-orch's
+/// `ExecuteFns`, which also emits an `ExecuteMsgFns` trait).
+#[proc_macro_derive(CwExecuteFns, attributes(payable, cross_vm))]
 pub fn derive_cw_execute_fns(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     match cw_fns::expand_execute_fns(input) {
@@ -160,7 +164,11 @@ pub fn config_runner(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// one `async fn` per variant returning the variant's `#[returns(T)]` type (named fields become
 /// args; tuple fields become positional `arg0`, `arg1`, ... args). Every variant must
 /// carry `#[returns(T)]`.
-#[proc_macro_derive(CwQueryFns, attributes(returns))]
+///
+/// The trait is named `<EnumName>Fns` unless the enum carries
+/// `#[cross_vm(trait_name = "...")]`, which renames it (useful to avoid a clash with cw-orch's
+/// `QueryFns`, which also emits a `QueryMsgFns` trait).
+#[proc_macro_derive(CwQueryFns, attributes(returns, cross_vm))]
 pub fn derive_cw_query_fns(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     match cw_fns::expand_query_fns(input) {

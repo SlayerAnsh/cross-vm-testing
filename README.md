@@ -163,7 +163,7 @@ pub enum QueryMsg {
 }
 ```
 
-That emits `ExecuteMsgFns` / `QueryMsgFns` traits implemented for `CwContract`, one typed `async fn` per variant: `chain.contract(addr).increment(wallet)` and `chain.contract(addr).get_count()`. Query variants need `#[returns(T)]`; a variant marked `#[payable]` gains a trailing `funds: &[Coin]` arg. EVM gets typed calls from `alloy::sol!`; Solana has no schema, so its hooks stay hand written.
+That emits `ExecuteMsgFns` / `QueryMsgFns` traits implemented for `CwContract`, one typed `async fn` per variant: `chain.contract(addr).increment(wallet)` and `chain.contract(addr).get_count()`. Named or tuple variant fields become method args (tuple fields as positional `arg0`, `arg1`, ...); query variants need `#[returns(T)]`; a variant marked `#[payable]` gains a trailing `funds: &[Coin]` arg. Add `#[cross_vm(trait_name = "...")]` on the enum to rename the generated trait, e.g. to run alongside cw-orch's `ExecuteFns` / `QueryFns` without a name clash. EVM gets typed calls from `alloy::sol!`; Solana has no schema, so its hooks stay hand written.
 
 **Transaction hooks.** A wrapper can run side logic (an indexer, a bridge relay, an event listener) before and after each transaction. Register with `on_before` / `on_after`; the dispatcher fires them around the per VM execution. An after hook receives the uniform `AppResponse`, so it reacts to the result independent of the VM:
 

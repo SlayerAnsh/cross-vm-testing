@@ -5,15 +5,20 @@
 //! per variant. Generated code uses absolute paths (`::cross_vm_cosmwasm::*`,
 //! `::cosmwasm_std::Coin`) so the contract crate needs no imports beyond the deps it gains under
 //! its `cross-vm` feature.
+//!
+//! The generated trait is named `<EnumName>Fns` by default. An enum-level
+//! `#[cross_vm(trait_name = "...")]` attribute overrides that, which avoids a name clash when the
+//! same enum also derives cw-orch's `ExecuteFns` / `QueryFns` (both would otherwise emit an
+//! `ExecuteMsgFns` / `QueryMsgFns` trait in the same module).
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Data, DataEnum, DeriveInput, Fields, Ident, Type, Variant};
+use syn::{Data, DataEnum, DeriveInput, Fields, Ident, LitStr, Type, Variant};
 
 /// Build the execute-side trait + impl from an `ExecuteMsg` enum.
 pub fn expand_execute_fns(input: DeriveInput) -> syn::Result<TokenStream> {
     let enum_ident = &input.ident;
-    let trait_ident = format_ident!("{}Fns", enum_ident);
+    let trait_ident = trait_ident(&input)?;
 
     let mut sigs = Vec::new();
     let mut methods = Vec::new();
@@ -61,7 +66,7 @@ pub fn expand_execute_fns(input: DeriveInput) -> syn::Result<TokenStream> {
 /// Build the query-side trait + impl from a `QueryMsg` enum (each variant needs `#[returns(T)]`).
 pub fn expand_query_fns(input: DeriveInput) -> syn::Result<TokenStream> {
     let enum_ident = &input.ident;
-    let trait_ident = format_ident!("{}Fns", enum_ident);
+    let trait_ident = trait_ident(&input)?;
 
     let mut sigs = Vec::new();
     let mut methods = Vec::new();
@@ -92,6 +97,28 @@ pub fn expand_query_fns(input: DeriveInput) -> syn::Result<TokenStream> {
             #(#methods)*
         }
     })
+}
+
+/// The name of the generated `Fns` trait: `<EnumName>Fns` by default, or the value of an
+/// enum-level `#[cross_vm(trait_name = "...")]` when present. Renaming lets the enum coexist with
+/// cw-orch's `ExecuteFns` / `QueryFns` derives, which claim the default `<EnumName>Fns` name.
+fn trait_ident(input: &DeriveInput) -> syn::Result<Ident> {
+    let mut name: Option<Ident> = None;
+    for attr in &input.attrs {
+        if !attr.path().is_ident("cross_vm") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("trait_name") {
+                let lit: LitStr = meta.value()?.parse()?;
+                name = Some(Ident::new(&lit.value(), lit.span()));
+                Ok(())
+            } else {
+                Err(meta.error("unknown `cross_vm` option; expected `trait_name = \"...\"`"))
+            }
+        })?;
+    }
+    Ok(name.unwrap_or_else(|| format_ident!("{}Fns", input.ident)))
 }
 
 fn enum_data(input: &DeriveInput) -> syn::Result<&DataEnum> {
@@ -263,6 +290,34 @@ mod tests {
         assert!(out.contains("CountRequest"));
         assert!(out.contains("CountResponse"));
         assert!(!out.contains("wallet"));
+    }
+
+    #[test]
+    fn execute_custom_trait_name() {
+        let out = exec(
+            r#"#[cross_vm(trait_name = "CrossVmExecuteFns")] enum ExecuteMsg { Increment {} }"#,
+        )
+        .unwrap();
+        assert!(out.contains("trait CrossVmExecuteFns"));
+        assert!(out.contains("impl CrossVmExecuteFns for"));
+        // The default name must not leak so it can coexist with cw-orch's `ExecuteMsgFns`.
+        assert!(!out.contains("trait ExecuteMsgFns"));
+    }
+
+    #[test]
+    fn query_custom_trait_name() {
+        let out = query(
+            r#"#[cross_vm(trait_name = "CrossVmQueryFns")] enum QueryMsg { #[returns(CountResponse)] GetCount {} }"#,
+        )
+        .unwrap();
+        assert!(out.contains("trait CrossVmQueryFns"));
+        assert!(!out.contains("trait QueryMsgFns"));
+    }
+
+    #[test]
+    fn unknown_cross_vm_option_is_an_error() {
+        let err = exec(r#"#[cross_vm(bogus = "x")] enum ExecuteMsg { Increment {} }"#).unwrap_err();
+        assert!(err.to_string().contains("cross_vm"), "{err}");
     }
 
     #[test]
