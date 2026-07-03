@@ -351,12 +351,17 @@ ops = 1
         }
     }
 
+    /// A fresh, gitignored dir under `<CARGO_MANIFEST_DIR>/tests_result/`, unique per test
+    /// invocation, so artifacts land in a stable inspectable location (never a source-tree
+    /// `target/` dir) and parallel runs never collide. `write_replay_artifact` creates it.
     fn tempdir(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "cross-vm-artifact-test-{}-{}-{label}",
-            std::process::id(),
-            unix_timestamp()
-        ))
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests_result")
+            .join(format!(
+                "cross-vm-artifact-test-{}-{}-{label}",
+                std::process::id(),
+                unix_timestamp()
+            ))
     }
 
     #[test]

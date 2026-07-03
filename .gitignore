@@ -34,3 +34,7 @@ artifacts/
 # Stray per-crate target dirs (e.g. replay artifacts written to <crate>/target/cross-vm by CLI e2e tests)
 crates/*/target/
 examples/integration-tests/target/
+
+# Test-generated artifacts/reports (redirected to <crate>/tests_result/ instead of any target/ dir)
+tests_result/
+**/tests_result/

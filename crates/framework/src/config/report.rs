@@ -181,18 +181,21 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A fresh temp directory under the target dir's `tmp/`, named for the test process id so
-    /// parallel test runs never collide. No external crate needed for this one narrow use.
+    /// A fresh, gitignored directory under `<CARGO_MANIFEST_DIR>/tests_result/`, named for the
+    /// test process id and a nanosecond timestamp so parallel test runs never collide. Kept out
+    /// of any source-tree `target/` dir so reports are stable and inspectable, never leaked.
     fn tempfile_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "cross-vm-json-report-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests_result")
+            .join(format!(
+                "cross-vm-json-report-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir_all(&dir).expect("create tests_result dir");
         dir
     }
 }

@@ -25,18 +25,22 @@ fn boom_config_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("boom.cross-vm.toml")
 }
 
-/// A fresh temp directory under the OS temp dir, unique per test invocation, so parallel `cargo
-/// test` runs of this file never collide on the same `--artifacts-dir`.
+/// A fresh, gitignored dir under `<CARGO_MANIFEST_DIR>/tests_result/`, unique per test
+/// invocation, so replay artifacts written by the `cross-vm` bin land in a stable inspectable
+/// location (never a source-tree `target/` dir) and parallel `cargo test` runs of this file never
+/// collide on the same `--artifacts-dir`.
 fn temp_artifacts_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "cross-vm-cli-e2e-artifacts-{}-{}-{label}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).expect("create temp artifacts dir");
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests_result")
+        .join(format!(
+            "cross-vm-cli-e2e-artifacts-{}-{}-{label}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+    std::fs::create_dir_all(&dir).expect("create tests_result artifacts dir");
     dir
 }
 

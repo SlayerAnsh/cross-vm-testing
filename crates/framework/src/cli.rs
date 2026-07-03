@@ -1433,7 +1433,12 @@ kinds = ["Boom"]
 "#,
         );
         let cli = cli_with_mock();
-        let args = RunArgs::default();
+        // This run fails on `Boom`, so `run_selected` writes a replay artifact; pin its dir to a
+        // gitignored `tests_result` path so it never leaks into the source-tree `target/cross-vm`.
+        let args = RunArgs {
+            artifacts_dir: Some(temp_artifacts_dir("bug-is-one").to_str().unwrap().to_string()),
+            ..Default::default()
+        };
         assert_eq!(cli.run_with_config(&cfg, &args).await, 1);
     }
 
@@ -1469,8 +1474,16 @@ kinds = ["Boom"]
 "#,
         );
         let cli = cli_with_mock();
+        // `deep` fails on `Boom`, so a replay artifact is written; pin its dir to a gitignored
+        // `tests_result` path so it never leaks into the source-tree `target/cross-vm`.
         let args = RunArgs {
             profile: vec!["smoke".to_string(), "deep".to_string()],
+            artifacts_dir: Some(
+                temp_artifacts_dir("multi-profile-worst-code")
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            ),
             ..Default::default()
         };
         assert_eq!(cli.run_with_config(&cfg, &args).await, 1);
@@ -1549,11 +1562,13 @@ kinds = ["Ping"]
         use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "cross-vm-cli-json-report-{}-{}-{label}.json",
-            std::process::id(),
-            n
-        ))
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests_result")
+            .join(format!(
+                "cross-vm-cli-json-report-{}-{}-{label}.json",
+                std::process::id(),
+                n
+            ))
     }
 
     #[tokio::test]
@@ -1645,17 +1660,20 @@ kinds = ["Ping"]
     // sugar for `run <artifact> --profile replay` and reproduces the same failure.
     // -----------------------------------------------------------------------------------------
 
-    /// A fresh temp directory under the OS temp dir, unique per test invocation, so parallel test
-    /// runs never collide and there is nothing left over to accidentally reuse.
+    /// A fresh, gitignored dir under `<CARGO_MANIFEST_DIR>/tests_result/`, unique per test
+    /// invocation, so replay artifacts land in a stable inspectable location (never a source-tree
+    /// `target/` dir) and parallel runs never collide. The writer creates it on demand.
     fn temp_artifacts_dir(label: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "cross-vm-cli-replay-artifact-{}-{}-{label}",
-            std::process::id(),
-            n
-        ))
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests_result")
+            .join(format!(
+                "cross-vm-cli-replay-artifact-{}-{}-{label}",
+                std::process::id(),
+                n
+            ))
     }
 
     #[tokio::test]

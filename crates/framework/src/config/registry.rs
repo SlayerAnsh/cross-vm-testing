@@ -1153,17 +1153,20 @@ mod tests {
         })
     }
 
-    /// A fresh temp file path under the OS temp dir, unique per test invocation (process id plus
-    /// a monotonic counter), so parallel test runs never collide.
+    /// A fresh, gitignored export path under `<CARGO_MANIFEST_DIR>/tests_result/`, unique per test
+    /// invocation (process id plus a monotonic counter), so parallel test runs never collide and
+    /// nothing leaks into a source-tree `target/` dir. `export_world_json` creates the parent.
     fn temp_export_path(label: &str) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "cross-vm-registry-export-world-{}-{}-{label}.json",
-            std::process::id(),
-            n
-        ))
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests_result")
+            .join(format!(
+                "cross-vm-registry-export-world-{}-{}-{label}.json",
+                std::process::id(),
+                n
+            ))
     }
 
     /// A step whose op is a bare unit-variant name (`MockOp` has no data, so a plain TOML string
