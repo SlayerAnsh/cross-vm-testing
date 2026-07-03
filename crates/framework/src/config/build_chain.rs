@@ -359,6 +359,52 @@ mod tests {
         assert!(matches!(chain, AnyChain::Tron(_)));
     }
 
+    #[cfg(feature = "evm")]
+    #[test]
+    fn build_evm_rejects_bad_spec_id() {
+        let mut spec = base_spec(ChainKind::Evm);
+        spec.spec_id = Some("cancn".to_string());
+        let Err(err) = build_chain(&spec, wallets()) else {
+            panic!("bad spec_id must error");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("cancn"), "message should echo the bad input: {msg}");
+        // The message must list the valid hardfork names so the user can self-correct.
+        assert!(msg.contains("cancun"), "message should list valid names: {msg}");
+        assert!(msg.contains("prague"), "message should list valid names: {msg}");
+    }
+
+    #[cfg(feature = "tron")]
+    #[test]
+    fn build_tron_rejects_bad_spec_id() {
+        let mut spec = base_spec(ChainKind::Tron);
+        spec.spec_id = Some("cancn".to_string());
+        let Err(err) = build_chain(&spec, wallets()) else {
+            panic!("bad spec_id must error");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("cancn"), "message should echo the bad input: {msg}");
+        assert!(msg.contains("cancun"), "message should list valid names: {msg}");
+        assert!(msg.contains("prague"), "message should list valid names: {msg}");
+    }
+
+    #[cfg(feature = "solana")]
+    #[test]
+    fn build_svm_rejects_bad_commitment() {
+        let mut spec = base_spec(ChainKind::Svm);
+        spec.commitment = Some("final".to_string());
+        let Err(err) = build_chain(&spec, wallets()) else {
+            panic!("bad commitment must error");
+        };
+        let msg = err.to_string();
+        // Quoted form so this does not trivially pass on the "finalized" in the valid list.
+        assert!(msg.contains("\"final\""), "message should echo the bad input: {msg}");
+        // The message must list the valid commitment names so the user can self-correct.
+        assert!(msg.contains("finalized"), "message should list valid names: {msg}");
+        assert!(msg.contains("confirmed"), "message should list valid names: {msg}");
+        assert!(msg.contains("processed"), "message should list valid names: {msg}");
+    }
+
     #[cfg(any(feature = "evm", feature = "tron"))]
     #[test]
     fn parse_spec_id_accepts_all_15_names() {
