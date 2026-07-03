@@ -10,50 +10,18 @@ use cross_vm_solana::Address as SvmAddress;
 use cross_vm_solidity::Bytes;
 use solana_instruction::{AccountMeta, Instruction};
 
-mod cw_vault {
-    use cosmwasm_std::Empty;
-    use cw_multi_test::{Contract, ContractWrapper};
+// Contract bindings come from `cross-vm-common`; these module aliases and constant re-bindings let
+// the wrapper body below stay unchanged while sourcing every ABI, message type, and Solana
+// constant from the one shared place.
+use cross_vm_common::mocks::vault::{cw as cw_vault, evm as evm_vault, svm, tron as tron_vault};
 
-    pub use vault::{AmountResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
-
-    pub fn contract() -> Box<dyn Contract<Empty, Empty>> {
-        Box::new(ContractWrapper::new(
-            vault::execute,
-            vault::instantiate,
-            vault::query,
-        ))
-    }
-}
-
-mod evm_vault {
-    alloy::sol!(
-        #[sol(abi)]
-        Vault,
-        "../../contracts/solidity/out/Vault.sol/Vault.json"
-    );
-}
-
-// ----- Tron: the same contract compiled by tronc (tronbox). The mock TVM runs this TVM-native
-// creation bytecode; the ABI matches the EVM build, so only BYTECODE is taken from here. -----
-mod tron_vault {
-    alloy::sol!(
-        #[sol(abi)]
-        Vault,
-        "../../contracts/tron/build/Vault.json"
-    );
-}
-
-const VAULT_PROGRAM_ID: &str = "GFNizKSbcjBH7aTwPyyA3vnqfksjWEfci6fgWeCJ34GB";
-const VDISC_INITIALIZE: [u8; 8] = [175, 175, 109, 31, 13, 152, 155, 237];
-const VDISC_DEPOSIT: [u8; 8] = [242, 35, 198, 137, 82, 225, 242, 182];
-const VDISC_WITHDRAW: [u8; 8] = [183, 18, 70, 156, 148, 109, 161, 34];
-const VDISC_BORROW: [u8; 8] = [228, 253, 131, 202, 207, 116, 89, 18];
-const VDISC_REPAY: [u8; 8] = [234, 103, 67, 82, 208, 234, 219, 166];
-/// Built by `make compile-solana` (`cargo-build-sbf`).
-const VAULT_SO: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../contracts/solana/target/deploy/vault.so"
-));
+const VAULT_PROGRAM_ID: &str = svm::PROGRAM_ID;
+const VDISC_INITIALIZE: [u8; 8] = svm::DISC_INITIALIZE;
+const VDISC_DEPOSIT: [u8; 8] = svm::DISC_DEPOSIT;
+const VDISC_WITHDRAW: [u8; 8] = svm::DISC_WITHDRAW;
+const VDISC_BORROW: [u8; 8] = svm::DISC_BORROW;
+const VDISC_REPAY: [u8; 8] = svm::DISC_REPAY;
+const VAULT_SO: &[u8] = svm::PROGRAM_SO;
 
 /// A cross-VM collateralized-debt vault: deposit / withdraw / borrow / repay, identical on any
 /// supported VM. Ledger-only (no token transfers), 50% LTV. The same logic and reverts on each

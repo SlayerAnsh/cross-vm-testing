@@ -2364,15 +2364,12 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "base64 0.22.1",
- "cosmwasm-std",
- "counter",
+ "cross-vm-common",
  "cross-vm-framework",
  "cross-vm-macros",
  "cross-vm-solana",
  "cross-vm-solidity",
- "cw-multi-test",
  "dotenvy",
- "ping-pong",
  "rstest",
  "serde",
  "serde_json",
@@ -2380,7 +2377,6 @@ dependencies = [
  "solana-system-interface 2.0.0",
  "tokio",
  "tracing-subscriber 0.3.23",
- "vault",
 ]
 
 [[package]]

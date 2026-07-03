@@ -16,57 +16,19 @@ use solana_instruction::{AccountMeta, Instruction};
 
 use super::bridge::{read_string, read_u64, write_string, write_u64};
 
-// ----- CosmWasm: the canonical ping-pong contract from `examples/`, wrapped in-process. -----
-mod cosmos_pp {
-    use cosmwasm_std::Empty;
-    use cw_multi_test::{Contract, ContractWrapper};
+// Contract bindings come from `cross-vm-common`; these module aliases and constant re-bindings let
+// the wrapper body below stay unchanged while sourcing every ABI, message type, and Solana
+// constant from the one shared place. `evm_pp` is re-exported publicly so the bridge's event
+// parser can reuse the generated `SolEvent` types.
+use cross_vm_common::mocks::ping_pong::{cw as cosmos_pp, svm, tron as tron_pp};
+pub use cross_vm_common::mocks::ping_pong::evm as evm_pp;
 
-    pub use ping_pong::{ExecuteMsg, InstantiateMsg, QueryMsg, StatsResponse};
-
-    pub fn contract() -> Box<dyn Contract<Empty, Empty>> {
-        Box::new(ContractWrapper::new(
-            ping_pong::execute,
-            ping_pong::instantiate,
-            ping_pong::query,
-        ))
-    }
-}
-
-// ----- EVM: ABI + creation bytecode from the forge artifact. Public so the bridge's event
-// parser can reuse the generated `SolEvent` types. -----
-pub mod evm_pp {
-    alloy::sol!(
-        #[sol(abi)]
-        PingPong,
-        "../../contracts/solidity/out/PingPong.sol/PingPong.json"
-    );
-}
-
-// ----- Tron: the same contract compiled by tronc (tronbox). The mock TVM runs this TVM-native
-// creation bytecode; the ABI matches the EVM build, so only BYTECODE is taken from here. -----
-mod tron_pp {
-    alloy::sol!(
-        #[sol(abi)]
-        PingPong,
-        "../../contracts/tron/build/PingPong.json"
-    );
-}
-
-// ----- Solana: the Anchor ping-pong program, its id, and instruction discriminators. -----
-const SOLANA_PROGRAM_ID: &str = "54ex8sgs6H3Y2NssU3CWdBhySk9q5Gqc4MMtPYTtJzC5";
-/// `sha256("global:initialize")[..8]`.
-const DISC_INITIALIZE: [u8; 8] = [175, 175, 109, 31, 13, 152, 155, 237];
-/// `sha256("global:ping")[..8]`.
-const DISC_PING: [u8; 8] = [173, 0, 94, 236, 73, 133, 225, 153];
-/// `sha256("global:receive_packet")[..8]`.
-const DISC_RECEIVE_PACKET: [u8; 8] = [63, 80, 211, 98, 33, 16, 172, 29];
-/// `sha256("global:acknowledge_packet")[..8]`.
-const DISC_ACKNOWLEDGE_PACKET: [u8; 8] = [232, 102, 184, 27, 48, 4, 54, 252];
-/// Built by `make compile-solana` (`anchor build` / `cargo-build-sbf`).
-const PING_PONG_SO: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../contracts/solana/target/deploy/ping_pong.so"
-));
+const SOLANA_PROGRAM_ID: &str = svm::PROGRAM_ID;
+const DISC_INITIALIZE: [u8; 8] = svm::DISC_INITIALIZE;
+const DISC_PING: [u8; 8] = svm::DISC_PING;
+const DISC_RECEIVE_PACKET: [u8; 8] = svm::DISC_RECEIVE_PACKET;
+const DISC_ACKNOWLEDGE_PACKET: [u8; 8] = svm::DISC_ACKNOWLEDGE_PACKET;
+const PING_PONG_SO: &[u8] = svm::PROGRAM_SO;
 
 /// A VM-agnostic snapshot of a ping-pong contract's counters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
