@@ -16,6 +16,7 @@ use syn::{
     parse_macro_input, DeriveInput, FnArg, Ident, ItemTrait, Pat, ReturnType, TraitItem, Type,
 };
 
+mod config_runner;
 mod cw_fns;
 mod runner_macros;
 mod wallet_roster;
@@ -119,6 +120,34 @@ pub fn invariant_runner(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn endurance_runner(attr: TokenStream, item: TokenStream) -> TokenStream {
     match runner_macros::expand(runner_macros::Mode::Endurance, attr.into(), item.into()) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// Bridge a `*.cross-vm.toml` config profile into `#[tokio::test]`s, reusing the config crate's
+/// loader and the framework's harness registry at run time
+/// (`cross_vm_framework::config::test_bridge::run_profile_for_test`).
+///
+/// ```ignore
+/// #[config_runner(config = "vault.cross-vm.toml", harness = VaultHarness, setup = vault_config_setup, profile = "smoke")]
+/// async fn vault_smoke_config() {}
+/// ```
+///
+/// At expansion time this reads `<CARGO_MANIFEST_DIR>/<config>` purely to learn the profile's
+/// fan-out shape: a `mode = "fuzz"` profile emits one `vault_smoke_config_case_0` ..
+/// `vault_smoke_config_case_<cases - 1>` (mirroring [`fuzz_runner`]'s per-case fan-out), any
+/// other mode emits a single `vault_smoke_config`. The annotated fn's own body is dropped; only
+/// its name and asyncness matter. The runtime bridge (not this macro) is the source of truth for
+/// the config's contents — see `crates/macros/src/config_runner.rs` and
+/// `cross_vm_framework::config::test_bridge` for the compile-time-vs-runtime `cases` assertion.
+///
+/// `harness`/`setup` are named unqualified in the emitted code, so the call site needs them
+/// (and the macro itself) `use`d into scope, the same convention [`fuzz_runner`] and
+/// `#[cross_vm_contract]` use.
+#[proc_macro_attribute]
+pub fn config_runner(attr: TokenStream, item: TokenStream) -> TokenStream {
+    match config_runner::expand(attr.into(), item.into()) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }

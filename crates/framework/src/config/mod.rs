@@ -15,6 +15,8 @@
 //! - `registry`: [`Registry`], the harness registry and type-erasure bridge (spec section 7).
 //! - `report`: [`write_json_report`], the `--json-report` envelope writer (spec section 9).
 //! - `artifact`: [`write_replay_artifact`], the replay-artifact writer (spec section 10).
+//! - `test_bridge`: [`test_bridge::run_profile_for_test`], the `cargo test` bridge the
+//!   `#[config_runner]` proc-macro (`cross-vm-macros`) expands into.
 //!
 //! No CLI argument parsing lives here; that is a later task that builds on top of this module.
 
@@ -25,6 +27,7 @@ mod registry;
 mod report;
 mod resolve;
 mod setup_request;
+pub mod test_bridge;
 
 pub use artifact::write_replay_artifact;
 pub use build_chain::{build_chain, parse_spec_id};

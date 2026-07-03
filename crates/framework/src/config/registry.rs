@@ -326,7 +326,7 @@ impl Registry {
 /// How a profile's `kinds`/`weights` map onto the [`KindMix`] a run passes to `run_with`. Owns
 /// its parsed kinds so the borrow `run_with` takes on a `&[K]` / `&[(K, u32)]` outlives the call
 /// (spec section 7.1: weighted pair order is the sorted kind-name / `BTreeMap` iteration order).
-enum KindSelection<K> {
+pub(super) enum KindSelection<K> {
     /// Neither `kinds` nor `weights` was set: draw from every kind via `Harness::generate` (a
     /// harness `generate` override still applies).
     All,
@@ -349,7 +349,7 @@ impl<K> KindSelection<K> {
 /// Parses one profile's `kinds`/`weights` against `H::OpKind`. Precedence matches spec section
 /// 6.1 (`weights` beats `kinds` beats the harness default); `cross-vm-config`'s structural
 /// validation already rejects a profile that sets both, so this is belt and suspenders.
-fn parse_kind_selection<H: Harness>(
+pub(super) fn parse_kind_selection<H: Harness>(
     kinds: &Option<Vec<String>>,
     weights: &Option<BTreeMap<String, u32>>,
 ) -> Result<KindSelection<H::OpKind>, ValidationError>
@@ -463,7 +463,7 @@ fn export_world_json<W: serde::Serialize>(world: &W, path: &Path) -> Result<(), 
 
 /// Resolves a profile's `SeedSpec` to a concrete `u64`, once per profile run: `Fixed(n)` is used
 /// verbatim, `Random` draws a fresh seed and logs it so the run can be reproduced.
-fn resolve_base_seed(seed: cross_vm_config::SeedSpec) -> u64 {
+pub(super) fn resolve_base_seed(seed: cross_vm_config::SeedSpec) -> u64 {
     match seed {
         cross_vm_config::SeedSpec::Fixed(n) => n,
         cross_vm_config::SeedSpec::Random => {
@@ -476,7 +476,7 @@ fn resolve_base_seed(seed: cross_vm_config::SeedSpec) -> u64 {
 
 /// Assembles the [`SetupRequest`] a config-driven setup fn receives, for one concrete `seed`
 /// (per-case for fuzz).
-fn build_setup_request(resolved: &ResolvedProfile, seed: u64) -> SetupRequest {
+pub(super) fn build_setup_request(resolved: &ResolvedProfile, seed: u64) -> SetupRequest {
     SetupRequest {
         target: resolved.target,
         chains: resolved
@@ -544,6 +544,49 @@ where
     (report, true)
 }
 
+/// Drives exactly one fuzz case: sub-seeds `base_seed` by `case`, builds a fresh `(Ctx, World)`
+/// via `setup`, runs one `Runner::fuzz` over `ops` operations under `selection`, and returns the
+/// resulting `(RunReport, Option<Stats>, concrete seed)`.
+///
+/// Factored out of [`run_profile`]'s `Profile::Fuzz` arm so that arm's loop and
+/// [`crate::config::test_bridge::run_profile_for_test`] (the `#[config_runner]` bridge) both
+/// call the exact same setup/seed/run sequence for a given case — this is what keeps the fuzz
+/// golden stream (spec section 5's seeded RNG guarantee) identical whether a case is driven via
+/// `cross-vm run`/`Registry::run` or via a `#[config_runner]`-generated `#[tokio::test]`. Neither
+/// caller may reimplement any piece of this sequence itself.
+pub(super) async fn run_one_fuzz_case<H, F, S>(
+    make_harness: &F,
+    setup: &S,
+    resolved: &ResolvedProfile,
+    selection: &KindSelection<H::OpKind>,
+    ops: usize,
+    base_seed: u64,
+    case: usize,
+) -> Result<(RunReport<H::Operation>, Option<Stats>, u64), RunError>
+where
+    H: Harness,
+    F: Fn() -> H,
+    S: Fn(SetupRequest) -> SetupFuture<'static, H::World>,
+{
+    let seed_i = sub_seed(base_seed, case);
+    tracing::info!(case, seed = seed_i, "fuzz case starting");
+
+    let (ctx, world) = setup(build_setup_request(resolved, seed_i))
+        .await
+        .map_err(|e| RunError::Setup(e.to_string()))?;
+
+    let mut runner = Runner::<H, Fuzz>::fuzz(make_harness(), seed_i);
+    if resolved.stats {
+        runner.with_stats();
+    }
+    runner.setup(ctx, world);
+    let report = runner
+        .run_with(ops, selection.as_mix(), resolved.check_every)
+        .await;
+    let stats = runner.stats().cloned();
+    Ok((report, stats, seed_i))
+}
+
 /// The generic body every registered harness's `run` closure calls into (spec section 7's `run`
 /// bullet list). No `dyn Harness` exists here: `H`, `F`, `S` are all concrete at the call site.
 async fn run_profile<H, F, S>(
@@ -581,22 +624,16 @@ where
             // task report for the alternative considered and rejected).
             let mut last: Option<(RunReport<H::Operation>, Option<Stats>, u64)> = None;
             for case in 0..cases {
-                let seed_i = sub_seed(base_seed, case);
-                tracing::info!(case, seed = seed_i, cases, "fuzz case starting");
-
-                let (ctx, world) = setup(build_setup_request(resolved, seed_i))
-                    .await
-                    .map_err(|e| RunError::Setup(e.to_string()))?;
-
-                let mut runner = Runner::<H, Fuzz>::fuzz(make_harness(), seed_i);
-                if resolved.stats {
-                    runner.with_stats();
-                }
-                runner.setup(ctx, world);
-                let report = runner
-                    .run_with(ops, selection.as_mix(), resolved.check_every)
-                    .await;
-                let stats = runner.stats().cloned();
+                let (report, stats, seed_i) = run_one_fuzz_case(
+                    make_harness,
+                    setup,
+                    resolved,
+                    &selection,
+                    ops,
+                    base_seed,
+                    case,
+                )
+                .await?;
                 let failed = !report.passed();
                 last = Some((report, stats, seed_i));
                 if failed {

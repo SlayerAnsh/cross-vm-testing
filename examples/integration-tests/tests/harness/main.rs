@@ -6,6 +6,8 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+#[cfg(feature = "fuzz")]
+mod config_runner;
 mod counter;
 mod mechanics;
 mod ping_pong;
