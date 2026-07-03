@@ -24,16 +24,20 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Lint: fmt + clippy + doc. Shares the main rust-cache with `test` so the
-  # dependency graph compiles once and restores everywhere. No contract
-  # artifacts are needed: clippy stays artifact-free (no --all-targets, so it
-  # never compiles the test binaries that embed the .so/.json). No standalone
-  # `cargo build --workspace` here: `test` compiles the whole workspace anyway,
-  # and clippy already surfaces build errors, so a build step would just be a
-  # duplicate compile burning runner-minutes.
+  # dependency graph compiles once and restores everywhere. clippy/doc stay
+  # lib-only (no --all-targets, so the test binaries that embed the .so/.json are
+  # not compiled here), but the per-VM example crates enable cross-vm-common's
+  # evm/solana/tron features unconditionally, so `--workspace` unifies them ON and
+  # the cross-vm-common LIB embeds those artifacts at compile time. So the three
+  # VM artifacts must be present; they are downloaded from the artifact jobs (same
+  # exact embed paths as `test`). The cosmwasm counter.wasm is NOT needed: its
+  # `cw-artifacts` feature is enabled only by examples/scripts, which the root
+  # workspace excludes, so it stays off under `--workspace`.
   # ---------------------------------------------------------------------------
   lint:
     name: Lint (fmt / clippy / doc)
     runs-on: ubuntu-latest
+    needs: [solana-artifacts, solidity-artifacts, tron-artifacts]
     steps:
       - uses: actions/checkout@v4
       # rustflags: "" so the action's default -D warnings is not applied to every
@@ -46,6 +50,23 @@ jobs:
         with:
           shared-key: cross-vm-main   # SHARED with the test job
           cache-on-failure: true
+      # Artifacts into their EXACT embed paths (include_bytes! for .so, sol! for
+      # .json), so the feature-unified cross-vm-common lib compiles under clippy/doc.
+      - name: Download Solana artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: solana-so
+          path: contracts/solana/target/deploy
+      - name: Download Solidity artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: solidity-out
+          path: contracts/solidity/out
+      - name: Download Tron artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: tron-build
+          path: contracts/tron/build
       - name: cargo fmt
         run: cargo fmt --all --check
       - name: cargo clippy
@@ -55,12 +76,16 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # MSRV: the workspace must keep compiling on the declared rust-version floor
-  # (locked dep tree currently requires 1.91 via revm-state). `check` only: no
-  # artifacts, no tests, just the compile floor.
+  # (locked dep tree currently requires 1.91 via revm-state). `check` only, no
+  # tests, just the compile floor. The three VM artifacts are downloaded into
+  # their embed paths because `cargo check --workspace` compiles the feature-
+  # unified cross-vm-common lib, which embeds them at compile time (same reason as
+  # the lint job). The cosmwasm counter.wasm is not needed under `--workspace`.
   # ---------------------------------------------------------------------------
   msrv:
     name: MSRV (cargo check)
     runs-on: ubuntu-latest
+    needs: [solana-artifacts, solidity-artifacts, tron-artifacts]
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -71,6 +96,21 @@ jobs:
         with:
           shared-key: cross-vm-msrv
           cache-on-failure: true
+      - name: Download Solana artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: solana-so
+          path: contracts/solana/target/deploy
+      - name: Download Solidity artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: solidity-out
+          path: contracts/solidity/out
+      - name: Download Tron artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: tron-build
+          path: contracts/tron/build
       - name: cargo check on MSRV
         run: cargo check --workspace
 
