@@ -30,7 +30,11 @@ mod setup_request;
 pub mod test_bridge;
 
 pub use artifact::write_replay_artifact;
-pub use build_chain::{build_chain, parse_spec_id};
+pub use build_chain::build_chain;
+// `parse_spec_id` names `revm`'s `SpecId`, which now feature-gates behind `evm`/`tron`; re-export
+// it only when one of those VMs is compiled in so a `cli,cw`/`cli,solana` build stays clean.
+#[cfg(any(feature = "evm", feature = "tron"))]
+pub use build_chain::parse_spec_id;
 pub use erased::{ErasedFailure, ErasedReport};
 pub use registry::{ConfigHarness, Registry, RunError, ValidationError};
 pub use report::{write_json_report, Invocation, JsonReport};

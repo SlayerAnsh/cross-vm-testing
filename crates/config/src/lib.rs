@@ -323,17 +323,18 @@ fn build_run_config<V: Doc>(value: V) -> Result<RunConfig, ConfigError> {
     let mut profiles = BTreeMap::new();
     for (name, mut profile_value) in raw.profile {
         let mode = {
-            let table =
-                profile_value
-                    .as_object_mut()
-                    .ok_or_else(|| ConfigError::Deserialize {
-                        path: format!("profile.{name}"),
-                        message: "a profile must be a table".to_string(),
-                    })?;
-            let mode_value = table.remove("mode").ok_or_else(|| ConfigError::Deserialize {
-                path: format!("profile.{name}"),
-                message: "missing required key `mode`".to_string(),
-            })?;
+            let table = profile_value
+                .as_object_mut()
+                .ok_or_else(|| ConfigError::Deserialize {
+                    path: format!("profile.{name}"),
+                    message: "a profile must be a table".to_string(),
+                })?;
+            let mode_value = table
+                .remove("mode")
+                .ok_or_else(|| ConfigError::Deserialize {
+                    path: format!("profile.{name}"),
+                    message: "missing required key `mode`".to_string(),
+                })?;
             mode_value
                 .as_str()
                 .ok_or_else(|| ConfigError::Deserialize {

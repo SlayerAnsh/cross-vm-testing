@@ -300,8 +300,8 @@ ops = 1
 
 #[test]
 fn seed_random_string_parses_to_random() {
-    let cfg = cross_vm_config::from_toml_str(&seeded_fuzz_toml(r#"seed = "random""#), &no_vars)
-        .unwrap();
+    let cfg =
+        cross_vm_config::from_toml_str(&seeded_fuzz_toml(r#"seed = "random""#), &no_vars).unwrap();
     match cfg.profiles.get("p").unwrap() {
         Profile::Fuzz(f) => assert_eq!(f.common.seed, SeedSpec::Random),
         other => panic!("expected Fuzz, got {other:?}"),

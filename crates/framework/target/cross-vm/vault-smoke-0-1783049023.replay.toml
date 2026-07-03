@@ -1,0 +1,23 @@
+chain = []
+
+[harness]
+name = "vault"
+setup = "default"
+
+[env]
+target = "mock"
+chains = []
+
+[replay]
+source_profile = "smoke"
+source_mode = "fuzz"
+failure = "bug: boom"
+shrunk = true
+framework_version = "0.1.0"
+
+[profile.replay]
+mode = "scenario"
+seed = 0
+
+[[profile.replay.steps]]
+op = "Boom"

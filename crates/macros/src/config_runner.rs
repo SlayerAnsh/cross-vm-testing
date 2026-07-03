@@ -130,7 +130,11 @@ fn read_profile_mode(path: &Path, profile_name: &str) -> Result<ProfileMode, Str
     let mode = profile
         .get("mode")
         .and_then(|v| v.as_str())
-        .or_else(|| defaults.and_then(|d| d.get("mode")).and_then(|v| v.as_str()))
+        .or_else(|| {
+            defaults
+                .and_then(|d| d.get("mode"))
+                .and_then(|v| v.as_str())
+        })
         .ok_or_else(|| {
             format!(
                 "config_runner: profile `{profile_name}` has no `mode` (and no [defaults].mode)"
@@ -144,7 +148,11 @@ fn read_profile_mode(path: &Path, profile_name: &str) -> Result<ProfileMode, Str
     let cases = profile
         .get("cases")
         .and_then(|v| v.as_integer())
-        .or_else(|| defaults.and_then(|d| d.get("cases")).and_then(|v| v.as_integer()))
+        .or_else(|| {
+            defaults
+                .and_then(|d| d.get("cases"))
+                .and_then(|v| v.as_integer())
+        })
         .ok_or_else(|| {
             format!(
                 "config_runner: fuzz profile `{profile_name}` has no `cases` (set it on the \
@@ -448,7 +456,7 @@ ops = 100
         let s = out.to_string();
         assert!(s.contains("fn vault_inv_config"), "{s}");
         assert!(!s.contains("vault_inv_config_case_0"), "{s}");
-        assert!(s.contains("None") , "{s}");
+        assert!(s.contains("None"), "{s}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

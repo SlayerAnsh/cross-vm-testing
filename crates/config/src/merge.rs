@@ -268,7 +268,9 @@ mod tests {
         let profile2 = doc2.get("profile").unwrap().get("p").unwrap();
         assert!(profile2.get("cases").is_none(), "cases must be stripped");
         assert!(
-            warnings2.iter().any(|w| w.contains("cases") && w.contains("scenario")),
+            warnings2
+                .iter()
+                .any(|w| w.contains("cases") && w.contains("scenario")),
             "expected a strip warning, got: {warnings2:?}"
         );
         // The first doc had no mode-inapplicable default keys, so no warnings there.
@@ -434,7 +436,10 @@ mod tests {
         merge(&mut doc).unwrap();
         let profile = doc.get("profile").unwrap().get("p").unwrap();
         assert_eq!(profile.get("mode").unwrap().as_str(), Some("scenario"));
-        assert!(profile.get("cases").is_none(), "cases must still be stripped");
+        assert!(
+            profile.get("cases").is_none(),
+            "cases must still be stripped"
+        );
     }
 
     #[test]

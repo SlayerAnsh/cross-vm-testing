@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 
 use crate::harness::FailureKind;
 
-use super::build_chain::spec_id_to_str;
 use super::erased::{ErasedFailure, ErasedReport};
 use super::resolve::ResolvedProfile;
 use super::setup_request::{ChainSpecData, Target};
@@ -174,9 +173,9 @@ fn artifact_chain(spec: &ChainSpecData) -> ArtifactChain {
         bech32_prefix: spec.bech32_prefix.clone(),
         native_denom: spec.native_denom.clone(),
         gas_price: spec.gas_price,
-        spec_id: spec.spec_id.map(|id| spec_id_to_str(id).to_string()),
+        spec_id: spec.spec_id.clone(),
         ws_url: spec.ws_url.clone(),
-        commitment: spec.commitment.map(|c| c.to_string()),
+        commitment: spec.commitment.clone(),
         params: spec.params.clone(),
     }
 }
@@ -376,7 +375,10 @@ ops = 1
             "expected a .replay.toml path, got {path:?}"
         );
         assert!(
-            path.file_name().unwrap().to_string_lossy().starts_with("vault-deep-42-"),
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("vault-deep-42-"),
             "filename must be <harness>-<profile>-<seed>-<timestamp>.replay.toml, got {path:?}"
         );
 

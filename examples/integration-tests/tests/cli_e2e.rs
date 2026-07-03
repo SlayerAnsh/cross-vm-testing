@@ -192,9 +192,16 @@ fn run_with_json_report_writes_a_schema_version_one_envelope() {
     let raw = std::fs::read_to_string(&path).expect("json report was written");
     let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
     assert_eq!(value["schema_version"], 1);
-    assert_eq!(value["invocation"]["profiles"], serde_json::json!(["smoke"]));
+    assert_eq!(
+        value["invocation"]["profiles"],
+        serde_json::json!(["smoke"])
+    );
     let profiles = value["profiles"].as_array().expect("profiles array");
-    assert_eq!(profiles.len(), 1, "one profile ran; one entry in the envelope");
+    assert_eq!(
+        profiles.len(),
+        1,
+        "one profile ran; one entry in the envelope"
+    );
     assert_eq!(profiles[0]["profile"], "smoke");
     assert_eq!(profiles[0]["harness"], "vault");
     assert_eq!(profiles[0]["mode"], "fuzz");
@@ -235,7 +242,11 @@ fn a_failing_fuzz_profile_writes_a_shrunk_replay_artifact() {
         .expect("artifacts dir exists")
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(entries.len(), 1, "exactly one artifact for one failing profile");
+    assert_eq!(
+        entries.len(),
+        1,
+        "exactly one artifact for one failing profile"
+    );
     let artifact_path = entries[0].path();
     assert!(
         artifact_path.to_string_lossy().ends_with(".replay.toml"),

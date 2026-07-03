@@ -60,15 +60,19 @@ pub struct ChainSpecData {
     /// declaration omitted it; [`build_chain`](crate::config::build_chain::build_chain) applies
     /// the `0.025` default.
     pub gas_price: Option<f64>,
-    /// EVM/Tron only: the parsed hardfork. `None` means the declaration omitted `spec_id`;
-    /// [`build_chain`](crate::config::build_chain::build_chain) applies the `cancun` default.
-    pub spec_id: Option<revm::primitives::hardfork::SpecId>,
+    /// EVM/Tron only: the raw hardfork NAME string (e.g. `"cancun"`), carried verbatim from the
+    /// declaration. It is validated + parsed into a `revm` `SpecId` inside the EVM/Tron arms of
+    /// [`build_chain`](crate::config::build_chain::build_chain) (the only place that names a VM
+    /// crate), so this type stays VM-crate-free and `--features cli` composes with any VM subset.
+    /// `None` means the declaration omitted `spec_id`; `build_chain` applies the `cancun` default.
+    pub spec_id: Option<String>,
     /// Solana only: websocket endpoint for subscriptions.
     pub ws_url: Option<String>,
-    /// Solana only: the parsed commitment level. `None` means the declaration omitted
-    /// `commitment`; [`build_chain`](crate::config::build_chain::build_chain) applies the
-    /// `finalized` default.
-    pub commitment: Option<cross_vm_solana::Commitment>,
+    /// Solana only: the raw commitment-level NAME string (e.g. `"finalized"`), carried verbatim
+    /// from the declaration. It is validated + parsed into a `cross_vm_solana::Commitment` inside
+    /// the Solana arm of [`build_chain`](crate::config::build_chain::build_chain). `None` means the
+    /// declaration omitted `commitment`; `build_chain` applies the `finalized` default.
+    pub commitment: Option<String>,
 }
 
 /// The fully assembled input to a config-driven setup fn.

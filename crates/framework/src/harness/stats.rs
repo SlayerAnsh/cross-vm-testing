@@ -296,7 +296,11 @@ mod tests {
         fn op_stat_serializes_outcome_counts_and_timing_fields() {
             let mut stats = Stats::default();
             stats.record("Deposit", Duration::from_millis(5), OpOutcome::Accepted);
-            stats.record("Deposit", Duration::from_millis(15), OpOutcome::Rejected("cap"));
+            stats.record(
+                "Deposit",
+                Duration::from_millis(15),
+                OpOutcome::Rejected("cap"),
+            );
 
             let stat = stats.get("Deposit").unwrap();
             let value = serde_json::to_value(stat).unwrap();
@@ -319,13 +323,21 @@ mod tests {
             // Exactly the intended field set, nothing extra.
             let obj = value.as_object().unwrap();
             let expected: std::collections::BTreeSet<&str> = [
-                "count", "accepted", "rejected", "bug", "infra", "total_ns", "mean_ns", "min_ns",
-                "max_ns", "stddev_ns", "errors",
+                "count",
+                "accepted",
+                "rejected",
+                "bug",
+                "infra",
+                "total_ns",
+                "mean_ns",
+                "min_ns",
+                "max_ns",
+                "stddev_ns",
+                "errors",
             ]
             .into_iter()
             .collect();
-            let actual: std::collections::BTreeSet<&str> =
-                obj.keys().map(String::as_str).collect();
+            let actual: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
             assert_eq!(actual, expected);
         }
 

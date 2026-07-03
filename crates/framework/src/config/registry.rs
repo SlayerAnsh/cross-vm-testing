@@ -283,7 +283,8 @@ impl Registry {
             },
         );
 
-        self.entries.insert(name.to_string(), Entry { validate, run });
+        self.entries
+            .insert(name.to_string(), Entry { validate, run });
         self
     }
 
@@ -525,16 +526,17 @@ where
 
     let rebuild = || {
         let req = build_setup_request(resolved, seed);
-        async move {
-            setup(req)
-                .await
-                .expect("shrink rebuild: setup failed")
-        }
+        async move { setup(req).await.expect("shrink rebuild: setup failed") }
     };
 
     let mut runner = Runner::<H, Scenario>::scenario(make_harness(), seed);
     let shrunk_history = runner
-        .shrink_with_limit(history, resolved.check_every, resolved.shrink_limit, rebuild)
+        .shrink_with_limit(
+            history,
+            resolved.check_every,
+            resolved.shrink_limit,
+            rebuild,
+        )
         .await;
 
     report.failure = Some(Failure {
@@ -673,7 +675,8 @@ where
                 .await;
             let stats = runner.stats().cloned();
 
-            let (report, shrunk) = maybe_shrink(report, make_harness, setup, resolved, base_seed).await;
+            let (report, shrunk) =
+                maybe_shrink(report, make_harness, setup, resolved, base_seed).await;
             erase_report(
                 report,
                 harness_name,
@@ -729,7 +732,8 @@ where
             // Shrink defaults to `false` for endurance (spec section 4.3); `resolved.shrink`
             // already carries that mode-dependent default, so `maybe_shrink` only actually
             // shrinks when a profile opted in explicitly.
-            let (report, shrunk) = maybe_shrink(report, make_harness, setup, resolved, base_seed).await;
+            let (report, shrunk) =
+                maybe_shrink(report, make_harness, setup, resolved, base_seed).await;
             erase_report(
                 report,
                 harness_name,
@@ -865,7 +869,12 @@ mod tests {
             vec![MockKind::Ping, MockKind::Pong, MockKind::Boom]
         }
 
-        fn generate_op(&self, _rng: &mut Prng, _world: &Self::World, kind: Self::OpKind) -> Self::Operation {
+        fn generate_op(
+            &self,
+            _rng: &mut Prng,
+            _world: &Self::World,
+            kind: Self::OpKind,
+        ) -> Self::Operation {
             match kind {
                 MockKind::Ping => MockOp::Ping,
                 MockKind::Pong => MockOp::Pong,
@@ -960,7 +969,11 @@ mod tests {
     }
 
     /// [`resolved`] with `shrink`/`shrink_limit` overridden; every other field matches.
-    fn resolved_with_shrink(profile: Profile, shrink: bool, shrink_limit: usize) -> ResolvedProfile {
+    fn resolved_with_shrink(
+        profile: Profile,
+        shrink: bool,
+        shrink_limit: usize,
+    ) -> ResolvedProfile {
         ResolvedProfile {
             shrink,
             shrink_limit,
@@ -1240,10 +1253,7 @@ mod tests {
             mock_step("Ping", cross_vm_config::ExpectStr::Accepted),
             mock_step("Pong", cross_vm_config::ExpectStr::Accepted),
         ];
-        let resolved = resolved(scenario_profile_with_export(
-            steps,
-            path.to_str().unwrap(),
-        ));
+        let resolved = resolved(scenario_profile_with_export(steps, path.to_str().unwrap()));
 
         let report = registry
             .run("mock", &resolved, &RunOptions::default())
@@ -1269,10 +1279,7 @@ mod tests {
         // Ping is always accepted; expecting a rejection fails the step, but export_world must
         // still write the state the run actually reached.
         let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Rejected)];
-        let resolved = resolved(scenario_profile_with_export(
-            steps,
-            path.to_str().unwrap(),
-        ));
+        let resolved = resolved(scenario_profile_with_export(steps, path.to_str().unwrap()));
 
         let report = registry
             .run("mock", &resolved, &RunOptions::default())
@@ -1280,7 +1287,8 @@ mod tests {
             .expect("run resolves to a report, not a RunError");
         assert!(report.failure.is_some());
 
-        let raw = std::fs::read_to_string(&path).expect("export_world wrote the file even on failure");
+        let raw =
+            std::fs::read_to_string(&path).expect("export_world wrote the file even on failure");
         let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
         assert_eq!(value, serde_json::json!(8), "seed 7 + one applied Ping");
 
@@ -1311,17 +1319,17 @@ mod tests {
 
         let path = temp_export_path("rejected-by-plain-register");
         let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Accepted)];
-        let resolved = resolved(scenario_profile_with_export(
-            steps,
-            path.to_str().unwrap(),
-        ));
+        let resolved = resolved(scenario_profile_with_export(steps, path.to_str().unwrap()));
 
         let err = registry
             .run("mock", &resolved, &RunOptions::default())
             .await
             .unwrap_err();
         assert!(matches!(err, RunError::Invalid(_)), "{err:?}");
-        assert!(!path.exists(), "a rejected run must never write the export file");
+        assert!(
+            !path.exists(),
+            "a rejected run must never write the export file"
+        );
     }
 
     #[tokio::test]
@@ -1337,7 +1345,10 @@ mod tests {
             ..Default::default()
         };
 
-        let report = registry.run("mock", &resolved, &opts).await.expect("run ok");
+        let report = registry
+            .run("mock", &resolved, &opts)
+            .await
+            .expect("run ok");
         assert_eq!(report.steps, 5);
     }
 
@@ -1431,7 +1442,10 @@ mod tests {
             ..Default::default()
         };
 
-        let report = registry.run("mock", &resolved, &opts).await.expect("run ok");
+        let report = registry
+            .run("mock", &resolved, &opts)
+            .await
+            .expect("run ok");
         assert_eq!(report.steps, 2);
     }
 
@@ -1491,7 +1505,10 @@ mod tests {
         assert!(failure.shrunk);
         assert!(matches!(failure.kind, FailureKind::Bug(ref m) if m == "boom"));
         let shrunk_len = failure.history.as_array().expect("array").len();
-        assert_eq!(shrunk_len, 1, "a lone Boom already reproduces; must shrink to it");
+        assert_eq!(
+            shrunk_len, 1,
+            "a lone Boom already reproduces; must shrink to it"
+        );
         assert!(shrunk_len <= raw_len);
     }
 

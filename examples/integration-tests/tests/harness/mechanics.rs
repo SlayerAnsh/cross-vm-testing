@@ -115,7 +115,9 @@ impl Harness for Bank {
 
         if let Behavior::InfraPattern(pattern) = &self.behavior {
             if pattern[call_idx % pattern.len()] {
-                return Err(HarnessError::Infra(CrossVmError::wallet("infra pattern hit")));
+                return Err(HarnessError::Infra(CrossVmError::wallet(
+                    "infra pattern hit",
+                )));
             }
             // `false`: falls through to the same application the `Good` behavior takes below,
             // since `InfraPattern` matches none of the `matches!` guards in that match.
@@ -298,7 +300,11 @@ async fn endurance_default_fails_on_the_first_infra() {
     let mut r = Runner::endurance(bank, 103);
     r.setup(ctx, world);
     let rep = r
-        .run(EnduranceConfig::new(Duration::from_secs(5)).check_every(0).max_ops(5))
+        .run(
+            EnduranceConfig::new(Duration::from_secs(5))
+                .check_every(0)
+                .max_ops(5),
+        )
         .await;
     assert!(!rep.passed(), "expected the first Infra to fail the run");
     let f = rep.failure.unwrap();
@@ -391,7 +397,11 @@ async fn endurance_stop_flag_ends_the_run_as_a_pass_with_final_sweep() {
                 .stop(stop),
         )
         .await;
-    assert!(rep.passed(), "stop should end the run as a pass: {:?}", rep.failure);
+    assert!(
+        rep.passed(),
+        "stop should end the run as a pass: {:?}",
+        rep.failure
+    );
     assert_eq!(rep.steps, 0, "the flag was already set before the first op");
     assert!(
         rep.coverage.iter().all(|(_, c)| c.total() > 0),
@@ -446,7 +456,11 @@ async fn endurance_check_every_zero_disables_mid_run_sweep_but_final_sweep_still
     );
     let f = rep.failure.unwrap();
     assert_eq!(f.step, 5, "the sweep only runs after every op has applied");
-    assert!(matches!(f.kind, FailureKind::Invariant { .. }), "{:?}", f.kind);
+    assert!(
+        matches!(f.kind, FailureKind::Invariant { .. }),
+        "{:?}",
+        f.kind
+    );
 }
 
 #[tokio::test]
@@ -1100,7 +1114,10 @@ async fn weighted_golden_seed_sequence_is_stable() {
     assert_eq!(
         *log.borrow(),
         vec![
-            Op::Deposit { user: 0, amount: 80 },
+            Op::Deposit {
+                user: 0,
+                amount: 80
+            },
             Op::Withdraw {
                 user: 0,
                 amount: 1282

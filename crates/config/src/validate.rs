@@ -186,18 +186,24 @@ fn validate_env_targets(
     Ok(())
 }
 
-fn validate_rpc_urls(profile: &str, chains: &[ChainDecl], env: &EnvSpec) -> Result<(), ConfigError> {
+fn validate_rpc_urls(
+    profile: &str,
+    chains: &[ChainDecl],
+    env: &EnvSpec,
+) -> Result<(), ConfigError> {
     for decl in chains {
-        let decl_target = match &decl.target {
-            Some(s) => Some(parse_target_str(s).map_err(|message| {
-                ConfigError::InvalidChainTarget {
-                    label: decl.label.clone(),
-                    message,
-                }
-            })?),
-            None => None,
-        };
-        let resolved = resolve_chain_target(&decl.label, decl_target, env, &TargetOverrides::default());
+        let decl_target =
+            match &decl.target {
+                Some(s) => Some(parse_target_str(s).map_err(|message| {
+                    ConfigError::InvalidChainTarget {
+                        label: decl.label.clone(),
+                        message,
+                    }
+                })?),
+                None => None,
+            };
+        let resolved =
+            resolve_chain_target(&decl.label, decl_target, env, &TargetOverrides::default());
         if resolved == crate::TargetStr::Rpc && decl.rpc_url.is_none() {
             return Err(ConfigError::MissingRpcUrl {
                 profile: profile.to_string(),

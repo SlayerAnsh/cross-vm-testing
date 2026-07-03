@@ -119,7 +119,10 @@ fn interpolate_str(
 
             let content: String = chars[start..j].iter().collect();
             let (var_name, default_val) = match content.find(":-") {
-                Some(idx) => (content[..idx].to_string(), Some(content[idx + 2..].to_string())),
+                Some(idx) => (
+                    content[..idx].to_string(),
+                    Some(content[idx + 2..].to_string()),
+                ),
                 None => (content, None),
             };
 
@@ -210,7 +213,8 @@ mod tests {
 
     #[test]
     fn default_fallback_used_when_var_unset() {
-        let mut value: toml::Value = toml::from_str(r#"rpc_url = "${ETH_RPC:-https://fallback}""#).unwrap();
+        let mut value: toml::Value =
+            toml::from_str(r#"rpc_url = "${ETH_RPC:-https://fallback}""#).unwrap();
         interpolate_value(&mut value, &no_vars).unwrap();
         assert_eq!(
             value.get("rpc_url").unwrap().as_str(),
@@ -221,7 +225,8 @@ mod tests {
     #[test]
     fn default_fallback_overridden_when_var_set() {
         let vars = map_vars(&[("ETH_RPC", "https://real-rpc")]);
-        let mut value: toml::Value = toml::from_str(r#"rpc_url = "${ETH_RPC:-https://fallback}""#).unwrap();
+        let mut value: toml::Value =
+            toml::from_str(r#"rpc_url = "${ETH_RPC:-https://fallback}""#).unwrap();
         interpolate_value(&mut value, &vars).unwrap();
         assert_eq!(
             value.get("rpc_url").unwrap().as_str(),
@@ -233,7 +238,10 @@ mod tests {
     fn escaped_dollar_brace_yields_literal() {
         let mut value: toml::Value = toml::from_str(r#"s = "$${NOT_INTERPOLATED}""#).unwrap();
         interpolate_value(&mut value, &no_vars).unwrap();
-        assert_eq!(value.get("s").unwrap().as_str(), Some("${NOT_INTERPOLATED}"));
+        assert_eq!(
+            value.get("s").unwrap().as_str(),
+            Some("${NOT_INTERPOLATED}")
+        );
     }
 
     #[test]

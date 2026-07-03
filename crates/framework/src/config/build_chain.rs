@@ -24,7 +24,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use cross_vm_core::{ChainKind, CrossVmError, WalletFactory};
-use revm::primitives::hardfork::SpecId;
 
 use crate::any_chain::AnyChain;
 use crate::harness::HarnessError;
@@ -32,7 +31,9 @@ use crate::harness::HarnessError;
 use super::setup_request::{ChainSpecData, Target};
 
 /// CosmWasm's `0.025` per spec section 4.6, applied here (not in `resolve`) since it is a pure
-/// per-kind constant with no dependency on the profile or CLI.
+/// per-kind constant with no dependency on the profile or CLI. Only referenced by the `cw` build
+/// arm, so gated behind that feature to stay dead-code-clean in `cli` builds without CosmWasm.
+#[cfg(feature = "cw")]
 const DEFAULT_GAS_PRICE: f64 = 0.025;
 
 thread_local! {
@@ -65,8 +66,11 @@ fn intern(s: &str) -> &'static str {
 /// Shared by the EVM and Tron build arms (the TVM mock also executes against a `revm`
 /// hardfork), so the error's `kind` is reported as [`ChainKind::Evm`] regardless of which VM's
 /// declaration failed to parse; `spec_id` is inherently an EVM/revm concept even when Tron
-/// borrows it.
-pub fn parse_spec_id(s: &str) -> Result<SpecId, HarnessError> {
+/// borrows it. Compiled only when `evm` or `tron` is on, since it is the sole place the framework
+/// names `revm`'s `SpecId` (which now feature-gates behind those two VMs).
+#[cfg(any(feature = "evm", feature = "tron"))]
+pub fn parse_spec_id(s: &str) -> Result<revm::primitives::hardfork::SpecId, HarnessError> {
+    use revm::primitives::hardfork::SpecId;
     match s {
         "frontier" => Ok(SpecId::FRONTIER),
         "homestead" => Ok(SpecId::HOMESTEAD),
@@ -100,40 +104,16 @@ pub fn parse_spec_id(s: &str) -> Result<SpecId, HarnessError> {
     }
 }
 
-/// The reverse of [`parse_spec_id`]: the canonical short name for a [`SpecId`], for the replay
-/// artifact writer (`crate::config::artifact`). Several short names collide on one `SpecId`
-/// (see `parse_spec_id`'s per-arm docs); this returns the first-listed (canonical) name for each,
-/// so `spec_id_to_str(parse_spec_id(s)?)` need not equal `s` for `"constantinople"`/`"muir"`, but
-/// always round-trips through `parse_spec_id` to the same `SpecId`. Any `SpecId` variant not in
-/// the 15-name table (a hardfork newer than this crate's parse table) falls back to `"cancun"`
-/// rather than failing the artifact write outright — a replay still loads and runs, just against
-/// a possibly-different (but recent) hardfork.
-pub(crate) fn spec_id_to_str(id: SpecId) -> &'static str {
-    match id {
-        SpecId::FRONTIER => "frontier",
-        SpecId::HOMESTEAD => "homestead",
-        SpecId::TANGERINE => "tangerine",
-        SpecId::SPURIOUS_DRAGON => "spurious",
-        SpecId::BYZANTIUM => "byzantium",
-        SpecId::PETERSBURG => "petersburg",
-        SpecId::ISTANBUL => "istanbul",
-        SpecId::BERLIN => "berlin",
-        SpecId::LONDON => "london",
-        SpecId::MERGE => "paris",
-        SpecId::SHANGHAI => "shanghai",
-        SpecId::CANCUN => "cancun",
-        SpecId::PRAGUE => "prague",
-        _ => "cancun",
-    }
-}
-
 /// Builds one [`AnyChain`] from a resolved [`ChainSpecData`], dispatching on `spec.kind`.
 ///
 /// Each VM arm constructs the owned `*ChainInfo` from `spec`'s fields (interning the owned
 /// `String`s to `&'static str` via `intern`), then calls `.mock(wallets)` or `.rpc(wallets)`
 /// per `spec.target`, then `.into()` into an [`AnyChain`]. When `spec.kind`'s cargo feature is
 /// off, the arm returns [`HarnessError::Infra`] instead of failing to compile.
-pub fn build_chain(spec: &ChainSpecData, wallets: Rc<WalletFactory>) -> Result<AnyChain, HarnessError> {
+pub fn build_chain(
+    spec: &ChainSpecData,
+    wallets: Rc<WalletFactory>,
+) -> Result<AnyChain, HarnessError> {
     match spec.kind {
         ChainKind::CosmWasm => build_cosmwasm(spec, wallets),
         ChainKind::Evm => build_evm(spec, wallets),
@@ -154,7 +134,10 @@ fn feature_not_compiled(kind: ChainKind) -> HarnessError {
 }
 
 #[cfg(feature = "cw")]
-fn build_cosmwasm(spec: &ChainSpecData, wallets: Rc<WalletFactory>) -> Result<AnyChain, HarnessError> {
+fn build_cosmwasm(
+    spec: &ChainSpecData,
+    wallets: Rc<WalletFactory>,
+) -> Result<AnyChain, HarnessError> {
     use cross_vm_cosmwasm::CosmosChainInfo;
 
     let bech32_prefix = spec.bech32_prefix.as_deref().unwrap_or_default();
@@ -177,15 +160,23 @@ fn build_cosmwasm(spec: &ChainSpecData, wallets: Rc<WalletFactory>) -> Result<An
 }
 
 #[cfg(not(feature = "cw"))]
-fn build_cosmwasm(_spec: &ChainSpecData, _wallets: Rc<WalletFactory>) -> Result<AnyChain, HarnessError> {
+fn build_cosmwasm(
+    _spec: &ChainSpecData,
+    _wallets: Rc<WalletFactory>,
+) -> Result<AnyChain, HarnessError> {
     Err(feature_not_compiled(ChainKind::CosmWasm))
 }
 
 #[cfg(feature = "evm")]
 fn build_evm(spec: &ChainSpecData, wallets: Rc<WalletFactory>) -> Result<AnyChain, HarnessError> {
     use cross_vm_solidity::EvmChainInfo;
+    use revm::primitives::hardfork::SpecId;
 
-    let spec_id = spec.spec_id.unwrap_or(SpecId::CANCUN);
+    // Validate + parse the raw `spec_id` name here (the VM-crate-gated arm); default to `cancun`.
+    let spec_id = match spec.spec_id.as_deref() {
+        Some(s) => parse_spec_id(s)?,
+        None => SpecId::CANCUN,
+    };
 
     let info = EvmChainInfo {
         chain_id: intern(&spec.chain_id),
@@ -209,7 +200,17 @@ fn build_evm(_spec: &ChainSpecData, _wallets: Rc<WalletFactory>) -> Result<AnyCh
 fn build_svm(spec: &ChainSpecData, wallets: Rc<WalletFactory>) -> Result<AnyChain, HarnessError> {
     use cross_vm_solana::{Commitment, SolanaChainInfo};
 
-    let commitment = spec.commitment.unwrap_or(Commitment::Finalized);
+    // Validate + parse the raw `commitment` name here (the VM-crate-gated arm); default to
+    // `finalized`. A bad value errors with the valid-names message the `Commitment` parser emits.
+    let commitment = match spec.commitment.as_deref() {
+        Some(s) => s.parse::<Commitment>().map_err(|e| {
+            HarnessError::Infra(CrossVmError::Other {
+                kind: ChainKind::Svm,
+                reason: format!("chain `{}`: {e}", spec.label),
+            })
+        })?,
+        None => Commitment::Finalized,
+    };
 
     let info = SolanaChainInfo {
         chain_id: intern(&spec.chain_id),
@@ -233,8 +234,13 @@ fn build_svm(_spec: &ChainSpecData, _wallets: Rc<WalletFactory>) -> Result<AnyCh
 #[cfg(feature = "tron")]
 fn build_tron(spec: &ChainSpecData, wallets: Rc<WalletFactory>) -> Result<AnyChain, HarnessError> {
     use cross_vm_tron::TronChainInfo;
+    use revm::primitives::hardfork::SpecId;
 
-    let spec_id = spec.spec_id.unwrap_or(SpecId::CANCUN);
+    // Validate + parse the raw `spec_id` name here (the VM-crate-gated arm); default to `cancun`.
+    let spec_id = match spec.spec_id.as_deref() {
+        Some(s) => parse_spec_id(s)?,
+        None => SpecId::CANCUN,
+    };
 
     let info = TronChainInfo {
         chain_id: intern(&spec.chain_id),
@@ -250,7 +256,10 @@ fn build_tron(spec: &ChainSpecData, wallets: Rc<WalletFactory>) -> Result<AnyCha
 }
 
 #[cfg(not(feature = "tron"))]
-fn build_tron(_spec: &ChainSpecData, _wallets: Rc<WalletFactory>) -> Result<AnyChain, HarnessError> {
+fn build_tron(
+    _spec: &ChainSpecData,
+    _wallets: Rc<WalletFactory>,
+) -> Result<AnyChain, HarnessError> {
     Err(feature_not_compiled(ChainKind::Tron))
 }
 
@@ -276,9 +285,9 @@ mod tests {
             bech32_prefix: Some("osmo".to_string()),
             native_denom: Some("uosmo".to_string()),
             gas_price: Some(0.025),
-            spec_id: Some(SpecId::CANCUN),
+            spec_id: Some("cancun".to_string()),
             ws_url: Some("ws://localhost:8900".to_string()),
-            commitment: Some(cross_vm_solana::Commitment::Finalized),
+            commitment: Some("finalized".to_string()),
         }
     }
 
@@ -350,6 +359,7 @@ mod tests {
         assert!(matches!(chain, AnyChain::Tron(_)));
     }
 
+    #[cfg(any(feature = "evm", feature = "tron"))]
     #[test]
     fn parse_spec_id_accepts_all_15_names() {
         let names = [
@@ -374,6 +384,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(feature = "evm", feature = "tron"))]
     #[test]
     fn parse_spec_id_rejects_unknown() {
         let err = parse_spec_id("bogus").unwrap_err();
@@ -382,8 +393,10 @@ mod tests {
         assert!(msg.contains("cancun"));
     }
 
+    #[cfg(any(feature = "evm", feature = "tron"))]
     #[test]
     fn parse_spec_id_tricky_mappings() {
+        use revm::primitives::hardfork::SpecId;
         assert_eq!(parse_spec_id("tangerine").unwrap(), SpecId::TANGERINE);
         assert_eq!(parse_spec_id("spurious").unwrap(), SpecId::SPURIOUS_DRAGON);
         assert_eq!(parse_spec_id("muir").unwrap(), SpecId::ISTANBUL);
@@ -392,23 +405,12 @@ mod tests {
     }
 
     #[test]
-    fn spec_id_to_str_round_trips_through_parse_spec_id() {
-        // Every canonical name (the ones parse_spec_id's collapsed variants pick as their reverse
-        // mapping) must parse back to the exact same SpecId it was produced from.
-        let canonical = [
-            "frontier", "homestead", "tangerine", "spurious", "byzantium", "petersburg",
-            "istanbul", "berlin", "london", "paris", "shanghai", "cancun", "prague",
-        ];
-        for name in canonical {
-            let id = parse_spec_id(name).unwrap();
-            assert_eq!(spec_id_to_str(id), name, "{name} did not round-trip");
-        }
-    }
-
-    #[test]
     fn intern_caches_repeated_strings_by_pointer() {
         let a = intern("same-string-xyz");
         let b = intern("same-string-xyz");
-        assert!(std::ptr::eq(a, b), "repeated intern calls must return the same &'static str");
+        assert!(
+            std::ptr::eq(a, b),
+            "repeated intern calls must return the same &'static str"
+        );
     }
 }

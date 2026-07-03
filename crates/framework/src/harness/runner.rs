@@ -394,8 +394,7 @@ impl<H: Harness, M: Sequential> Runner<H, M> {
             // Same guard, same failure, for the weighted shape: empty pairs or an all-zero weight
             // total can likewise generate nothing.
             KindMix::Weighted(pairs)
-                if pairs.is_empty()
-                    || pairs.iter().map(|&(_, w)| w as u64).sum::<u64>() == 0 =>
+                if pairs.is_empty() || pairs.iter().map(|&(_, w)| w as u64).sum::<u64>() == 0 =>
             {
                 let report = empty_mix_report(builder);
                 log_summary(&report, stats.as_ref());
@@ -518,8 +517,7 @@ impl<H: Harness> Runner<H, Endurance> {
                 remaining,
             },
             KindMix::Weighted(pairs)
-                if pairs.is_empty()
-                    || pairs.iter().map(|&(_, w)| w as u64).sum::<u64>() == 0 =>
+                if pairs.is_empty() || pairs.iter().map(|&(_, w)| w as u64).sum::<u64>() == 0 =>
             {
                 let report = empty_mix_report(builder);
                 log_summary(&report, stats.as_ref());
@@ -748,11 +746,10 @@ impl<H: Harness> Runner<H, Scenario> {
                 builder.history.push(step.op.clone());
                 count += 1;
 
-                let verdict =
-                    match apply_op(harness, ctx, world, &step.op, stats.as_mut()).await {
-                        Ok(v) => v,
-                        Err(kind) => break 'run builder.fail(count, Some(step.op), kind),
-                    };
+                let verdict = match apply_op(harness, ctx, world, &step.op, stats.as_mut()).await {
+                    Ok(v) => v,
+                    Err(kind) => break 'run builder.fail(count, Some(step.op), kind),
+                };
 
                 let mismatch = match (step.expect, &verdict) {
                     (Expectation::Accepted, Verdict::Rejected { .. }) => Some(format!(
@@ -767,8 +764,7 @@ impl<H: Harness> Runner<H, Scenario> {
                     break 'run builder.fail(count, Some(step.op), FailureKind::Bug(msg));
                 }
 
-                let do_check =
-                    step.check && check_every > 0 && count.is_multiple_of(check_every);
+                let do_check = step.check && check_every > 0 && count.is_multiple_of(check_every);
                 if do_check {
                     if let Err(kind) = sweep(harness, ctx, world, &mut builder.coverage).await {
                         break 'run builder.fail(count, Some(step.op), kind);
@@ -871,7 +867,9 @@ impl<H: Harness> Runner<H, Scenario> {
         // Park stats for the whole shrink: replays are throwaway diagnostics-wise, and the caller's
         // tallies must keep describing the run they came from.
         let parked = self.stats.take();
-        let minimized = self.shrink_inner(failing, check_every, limit, &rebuild).await;
+        let minimized = self
+            .shrink_inner(failing, check_every, limit, &rebuild)
+            .await;
         self.stats = parked;
         minimized
     }
@@ -915,7 +913,14 @@ impl<H: Harness> Runner<H, Scenario> {
                     .collect();
                 if !candidate.is_empty() {
                     let Some(fails) = self
-                        .try_candidate(&candidate, &ref_kind, check_every, rebuild, &mut budget, limit)
+                        .try_candidate(
+                            &candidate,
+                            &ref_kind,
+                            check_every,
+                            rebuild,
+                            &mut budget,
+                            limit,
+                        )
                         .await
                     else {
                         return current; // Budget exhausted: best so far.
@@ -937,7 +942,14 @@ impl<H: Harness> Runner<H, Scenario> {
             let mut candidate = current.clone();
             candidate.remove(i);
             let Some(fails) = self
-                .try_candidate(&candidate, &ref_kind, check_every, rebuild, &mut budget, limit)
+                .try_candidate(
+                    &candidate,
+                    &ref_kind,
+                    check_every,
+                    rebuild,
+                    &mut budget,
+                    limit,
+                )
                 .await
             else {
                 return current; // Budget exhausted: best so far.

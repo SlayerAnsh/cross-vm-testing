@@ -506,7 +506,11 @@ fn build_run_options(args: &RunArgs, env: &dyn Fn(&str) -> Option<String>) -> Ru
         cases,
         duration: args.duration,
         target: args.target,
-        target_chains: args.target_chain.iter().cloned().collect::<BTreeMap<_, _>>(),
+        target_chains: args
+            .target_chain
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<_, _>>(),
         stats: args.stats.then_some(true),
         check_every: args.check_every,
         json_report: args.json_report.clone(),
@@ -591,7 +595,11 @@ fn select_profile_names(
 
 /// Formats an "unknown `{kind}` `{name}`" usage-error message listing the available names,
 /// sorted for a stable, testable message.
-fn unknown_name_message<'a>(kind: &str, name: &str, names: impl Iterator<Item = &'a str>) -> String {
+fn unknown_name_message<'a>(
+    kind: &str,
+    name: &str,
+    names: impl Iterator<Item = &'a str>,
+) -> String {
     let mut names: Vec<&str> = names.collect();
     names.sort_unstable();
     let available = if names.is_empty() {
@@ -723,8 +731,12 @@ async fn run_selected(
                 // endurance): a scenario is already a concrete, checked-in sequence, and a
                 // passing run has no failure to reproduce.
                 if report.failure.is_some() && report.mode != "scenario" {
-                    match write_replay_artifact(Path::new(&resolved.artifacts_dir), cfg, &resolved, &report)
-                    {
+                    match write_replay_artifact(
+                        Path::new(&resolved.artifacts_dir),
+                        cfg,
+                        &resolved,
+                        &report,
+                    ) {
                         Ok(path) => tracing::info!(
                             "wrote replay artifact: {}; reproduce with: cross-vm replay {}",
                             path.display(),
@@ -806,9 +818,17 @@ fn overrides_json(opts: &RunOptions) -> serde_json::Value {
         let per_chain: serde_json::Map<String, serde_json::Value> = opts
             .target_chains
             .iter()
-            .map(|(label, target)| (label.clone(), serde_json::Value::from(target_label(*target))))
+            .map(|(label, target)| {
+                (
+                    label.clone(),
+                    serde_json::Value::from(target_label(*target)),
+                )
+            })
             .collect();
-        map.insert("target_chain".to_string(), serde_json::Value::Object(per_chain));
+        map.insert(
+            "target_chain".to_string(),
+            serde_json::Value::Object(per_chain),
+        );
     }
     if let Some(v) = opts.stats {
         map.insert("stats".to_string(), v.into());
@@ -936,7 +956,10 @@ mod tests {
 
     #[test]
     fn exit_code_for_run_error_maps_setup_and_serialize_to_two() {
-        assert_eq!(exit_code_for_run_error(&RunError::Setup("x".to_string())), 2);
+        assert_eq!(
+            exit_code_for_run_error(&RunError::Setup("x".to_string())),
+            2
+        );
         assert_eq!(
             exit_code_for_run_error(&RunError::Serialize("x".to_string())),
             2
@@ -993,15 +1016,16 @@ mod tests {
 
     #[test]
     fn bad_target_chain_without_equals_is_a_parse_error() {
-        let err = CliArgs::try_parse_from(["cross-vm", "run", "f.toml", "--target-chain", "ethrpc"])
-            .unwrap_err();
+        let err =
+            CliArgs::try_parse_from(["cross-vm", "run", "f.toml", "--target-chain", "ethrpc"])
+                .unwrap_err();
         assert!(err.to_string().contains("LABEL=mock|rpc"), "{err}");
     }
 
     #[test]
     fn bad_target_value_is_a_parse_error() {
-        let err = CliArgs::try_parse_from(["cross-vm", "run", "f.toml", "--target", "xyz"])
-            .unwrap_err();
+        let err =
+            CliArgs::try_parse_from(["cross-vm", "run", "f.toml", "--target", "xyz"]).unwrap_err();
         assert!(err.to_string().contains("mock"), "{err}");
     }
 
@@ -1051,7 +1075,13 @@ mod tests {
     #[test]
     fn cli_seed_wins_over_env() {
         let args = run_args_with_seed(Some(7));
-        let env = |k: &str| if k == "CROSS_VM_SEED" { Some("99".to_string()) } else { None };
+        let env = |k: &str| {
+            if k == "CROSS_VM_SEED" {
+                Some("99".to_string())
+            } else {
+                None
+            }
+        };
         let opts = build_run_options(&args, &env);
         assert_eq!(opts.seed, Some(7));
     }
@@ -1059,7 +1089,13 @@ mod tests {
     #[test]
     fn env_seed_used_when_no_cli_flag() {
         let args = run_args_with_seed(None);
-        let env = |k: &str| if k == "CROSS_VM_SEED" { Some("99".to_string()) } else { None };
+        let env = |k: &str| {
+            if k == "CROSS_VM_SEED" {
+                Some("99".to_string())
+            } else {
+                None
+            }
+        };
         let opts = build_run_options(&args, &env);
         assert_eq!(opts.seed, Some(99));
     }
@@ -1265,7 +1301,12 @@ stop_on_failure = true
             vec![MockKind::Ping, MockKind::Boom]
         }
 
-        fn generate_op(&self, _rng: &mut Prng, _world: &Self::World, kind: Self::OpKind) -> Self::Operation {
+        fn generate_op(
+            &self,
+            _rng: &mut Prng,
+            _world: &Self::World,
+            kind: Self::OpKind,
+        ) -> Self::Operation {
             match kind {
                 MockKind::Ping => MockOp::Ping,
                 MockKind::Boom => MockOp::Boom,
@@ -1466,7 +1507,10 @@ kinds = ["Ping"]
 
     #[test]
     fn overrides_json_is_empty_object_when_nothing_is_set() {
-        assert_eq!(overrides_json(&RunOptions::default()), serde_json::json!({}));
+        assert_eq!(
+            overrides_json(&RunOptions::default()),
+            serde_json::json!({})
+        );
     }
 
     #[test]
@@ -1476,7 +1520,10 @@ kinds = ["Ping"]
             cases: Some(2),
             ..Default::default()
         };
-        assert_eq!(overrides_json(&opts), serde_json::json!({"seed": 7, "cases": 2}));
+        assert_eq!(
+            overrides_json(&opts),
+            serde_json::json!({"seed": 7, "cases": 2})
+        );
     }
 
     #[test]
@@ -1547,7 +1594,10 @@ kinds = ["Ping"]
             value["invocation"]["profiles"],
             serde_json::json!(["smoke", "deep"])
         );
-        assert_eq!(value["invocation"]["overrides"], serde_json::json!({"seed": 42}));
+        assert_eq!(
+            value["invocation"]["overrides"],
+            serde_json::json!({"seed": 42})
+        );
         let profiles = value["profiles"].as_array().expect("profiles array");
         // One entry per profile in the invocation: the envelope is written once, not per
         // profile, so both selected profiles land in the same file's `profiles` array.
@@ -1583,7 +1633,10 @@ kinds = ["Ping"]
             ..Default::default()
         };
         assert_eq!(cli.run_with_config(&cfg, &args).await, 0);
-        assert!(!path.exists(), "no --json-report flag was given; nothing should be written");
+        assert!(
+            !path.exists(),
+            "no --json-report flag was given; nothing should be written"
+        );
     }
 
     // -----------------------------------------------------------------------------------------
@@ -1632,12 +1685,13 @@ kinds = ["Boom"]
             .expect("artifacts dir was created")
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(entries.len(), 1, "exactly one artifact for one failing profile");
-        let path = entries[0].path();
-        assert!(
-            path.to_string_lossy().ends_with(".replay.toml"),
-            "{path:?}"
+        assert_eq!(
+            entries.len(),
+            1,
+            "exactly one artifact for one failing profile"
         );
+        let path = entries[0].path();
+        assert!(path.to_string_lossy().ends_with(".replay.toml"), "{path:?}");
         assert!(
             path.file_name()
                 .unwrap()
@@ -1671,7 +1725,10 @@ kinds = ["Ping"]
             ..Default::default()
         };
         assert_eq!(cli.run_with_config(&cfg, &args).await, 0);
-        assert!(!dir.exists(), "a passing run must not create the artifacts dir at all");
+        assert!(
+            !dir.exists(),
+            "a passing run must not create the artifacts dir at all"
+        );
     }
 
     #[tokio::test]

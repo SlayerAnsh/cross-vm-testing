@@ -18,7 +18,6 @@ use cross_vm_core::{ChainKind, CrossVmError};
 
 use crate::harness::HarnessError;
 
-use super::build_chain::parse_spec_id;
 use super::setup_request::{ChainSpecData, Target};
 
 /// CLI-shaped run overrides, applied over a profile's own keys by [`resolve_profile`].
@@ -61,9 +60,10 @@ pub struct RunOptions {
     pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
-/// A profile resolved into a runnable shape: selection-filtered chain specs with parsed enums
-/// and resolved targets, plus every scalar key with CLI/profile/built-in precedence already
-/// applied. Task 6 (the registry/run-driving layer) consumes this directly.
+/// A profile resolved into a runnable shape: selection-filtered chain specs (with `kind`/`target`
+/// resolved; `spec_id`/`commitment` carried as raw name strings, validated later by `build_chain`)
+/// plus every scalar key with CLI/profile/built-in precedence already applied. Task 6 (the
+/// registry/run-driving layer) consumes this directly.
 #[derive(Debug, Clone)]
 pub struct ResolvedProfile {
     /// The profile's name, as looked up in `cfg.profiles`.
@@ -77,9 +77,10 @@ pub struct ResolvedProfile {
     /// [`SeedSpec::Random`]; that resolution (and the "reproduce with seed = N" line) happens
     /// per run, in the run-driving layer.
     pub seed: SeedSpec,
-    /// Selection-filtered `[[chain]]` declarations, each with `kind`/`spec_id`/`commitment`
-    /// parsed and `target` resolved through [`resolve_chain_target`]. Empty when the config
-    /// file declares no `[[chain]]` entries (the setup fn hard codes its own chains).
+    /// Selection-filtered `[[chain]]` declarations, each with `kind` parsed and `target` resolved
+    /// through [`resolve_chain_target`]; `spec_id`/`commitment` are carried as raw name strings and
+    /// validated in `build_chain`. Empty when the config file declares no `[[chain]]` entries (the
+    /// setup fn hard codes its own chains).
     pub chain_specs: Vec<ChainSpecData>,
     /// The profile's own resolved default target (used when `chain_specs` is empty).
     pub target: Target,
@@ -125,9 +126,10 @@ fn target_to_str(t: Target) -> TargetStr {
 /// Resolves `cfg`'s profile `name` against `opts` into a [`ResolvedProfile`].
 ///
 /// Errors (all [`HarnessError::Infra`]) when: `name` does not match any profile (lists the
-/// available names), a chain's `kind`/`spec_id`/`commitment`/`target` string fails to parse, or
-/// a chain resolves to the `rpc` target with no `rpc_url` (re-asserted here since interpolation
-/// and target resolution both happen after the config crate's own load-time validation).
+/// available names), a chain's `kind`/`target` string fails to parse, or a chain resolves to the
+/// `rpc` target with no `rpc_url` (re-asserted here since interpolation and target resolution both
+/// happen after the config crate's own load-time validation). A bad `spec_id`/`commitment` string
+/// is not caught here: it is validated later, in `build_chain`'s VM-crate-gated arms.
 pub fn resolve_profile(
     cfg: &RunConfig,
     name: &str,
@@ -190,19 +192,12 @@ pub fn resolve_profile(
         let target_str = resolve_chain_target(&decl.label, decl_target, &merged_env, &overrides);
         let target = Target::from(target_str);
 
-        let spec_id = decl.spec_id.as_deref().map(parse_spec_id).transpose()?;
-
-        let commitment = decl
-            .commitment
-            .as_deref()
-            .map(|s| s.parse::<cross_vm_solana::Commitment>())
-            .transpose()
-            .map_err(|e| {
-                HarnessError::Infra(CrossVmError::Other {
-                    kind,
-                    reason: format!("chain `{}`: {e}", decl.label),
-                })
-            })?;
+        // `spec_id`/`commitment` are carried through as raw NAME strings; they are validated and
+        // parsed into their VM-crate enums inside `build_chain`'s per-kind `#[cfg]`-gated arms, so
+        // this module never references a VM-specific crate (that keeps `--features cli` composable
+        // with any subset of {cw,evm,solana,tron}).
+        let spec_id = decl.spec_id.clone();
+        let commitment = decl.commitment.clone();
 
         let name_field = decl.name.clone().unwrap_or_else(|| decl.label.clone());
         let native_symbol = decl

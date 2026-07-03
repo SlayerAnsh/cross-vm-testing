@@ -74,9 +74,7 @@ pub async fn run_profile_for_test<H, F, S>(
     S: Fn(SetupRequest) -> SetupFuture<'static, H::World> + 'static,
 {
     let cfg = cross_vm_config::load(Path::new(config_path), &|k| std::env::var(k).ok())
-        .unwrap_or_else(|e| {
-            panic!("run_profile_for_test: failed to load `{config_path}`: {e}")
-        });
+        .unwrap_or_else(|e| panic!("run_profile_for_test: failed to load `{config_path}`: {e}"));
     let resolved = resolve_profile(&cfg, profile, &RunOptions::default()).unwrap_or_else(|e| {
         panic!("run_profile_for_test: failed to resolve profile `{profile}`: {e}")
     });

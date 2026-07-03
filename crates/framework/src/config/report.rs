@@ -132,15 +132,24 @@ mod tests {
         let profiles = vec!["smoke".to_string(), "deep".to_string()];
         let overrides = serde_json::json!({"seed": 7, "cases": 2});
 
-        write_json_report(&path, "vault.cross-vm.toml", &profiles, &reports, overrides.clone())
-            .expect("write succeeds, creating the nested parent dir");
+        write_json_report(
+            &path,
+            "vault.cross-vm.toml",
+            &profiles,
+            &reports,
+            overrides.clone(),
+        )
+        .expect("write succeeds, creating the nested parent dir");
 
         let raw = std::fs::read_to_string(&path).expect("file was written");
         let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
 
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["invocation"]["config"], "vault.cross-vm.toml");
-        assert_eq!(value["invocation"]["profiles"], serde_json::json!(["smoke", "deep"]));
+        assert_eq!(
+            value["invocation"]["profiles"],
+            serde_json::json!(["smoke", "deep"])
+        );
         assert_eq!(value["invocation"]["overrides"], overrides);
 
         let profiles_out = value["profiles"].as_array().expect("profiles array");
@@ -150,7 +159,10 @@ mod tests {
         assert_eq!(profiles_out[0]["seed"], 7);
         assert_eq!(profiles_out[0]["steps"], 3);
         assert_eq!(profiles_out[1]["seed"], 42);
-        assert_eq!(profiles_out[1]["failure"]["kind"]["Bug"], "over-withdraw accepted");
+        assert_eq!(
+            profiles_out[1]["failure"]["kind"]["Bug"],
+            "over-withdraw accepted"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

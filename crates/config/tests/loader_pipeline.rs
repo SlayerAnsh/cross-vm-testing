@@ -71,8 +71,9 @@ fn bad_missing_cosmwasm_field_errors() {
 
 #[test]
 fn bad_unknown_selection_label_errors() {
-    let err = cross_vm_config::from_toml_str(fixture!("bad_unknown_selection_label.toml"), &no_vars)
-        .unwrap_err();
+    let err =
+        cross_vm_config::from_toml_str(fixture!("bad_unknown_selection_label.toml"), &no_vars)
+            .unwrap_err();
     assert!(
         matches!(err, ConfigError::UnknownChainSelection { ref label, .. } if label == "osmosis"),
         "unexpected error: {err}"
@@ -101,7 +102,8 @@ fn bad_rpc_without_url_errors() {
 
 #[test]
 fn bad_cases_zero_errors() {
-    let err = cross_vm_config::from_toml_str(fixture!("bad_cases_zero.toml"), &no_vars).unwrap_err();
+    let err =
+        cross_vm_config::from_toml_str(fixture!("bad_cases_zero.toml"), &no_vars).unwrap_err();
     assert!(
         matches!(err, ConfigError::InvalidCases { ref profile } if profile == "p"),
         "unexpected error: {err}"
@@ -110,7 +112,8 @@ fn bad_cases_zero_errors() {
 
 #[test]
 fn bad_empty_steps_errors() {
-    let err = cross_vm_config::from_toml_str(fixture!("bad_empty_steps.toml"), &no_vars).unwrap_err();
+    let err =
+        cross_vm_config::from_toml_str(fixture!("bad_empty_steps.toml"), &no_vars).unwrap_err();
     assert!(
         matches!(err, ConfigError::EmptySteps { ref profile } if profile == "p"),
         "unexpected error: {err}"
@@ -119,8 +122,9 @@ fn bad_empty_steps_errors() {
 
 #[test]
 fn bad_endurance_missing_bound_errors() {
-    let err = cross_vm_config::from_toml_str(fixture!("bad_endurance_missing_bound.toml"), &no_vars)
-        .unwrap_err();
+    let err =
+        cross_vm_config::from_toml_str(fixture!("bad_endurance_missing_bound.toml"), &no_vars)
+            .unwrap_err();
     assert!(
         matches!(err, ConfigError::EnduranceMissingBound { ref profile } if profile == "p"),
         "unexpected error: {err}"

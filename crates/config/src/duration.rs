@@ -26,8 +26,7 @@ impl<'de> Visitor<'de> for DurationVisitor {
     where
         E: DeError,
     {
-        humantime::parse_duration(v)
-            .map_err(|e| E::custom(format!("invalid duration `{v}`: {e}")))
+        humantime::parse_duration(v).map_err(|e| E::custom(format!("invalid duration `{v}`: {e}")))
     }
 
     fn visit_i64<E>(self, v: i64) -> Result<Duration, E>
