@@ -1,5 +1,5 @@
 [package]
-name = "cross-vm-integration-tests"
+name = "cross-vm-tests"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ description = "Cross-VM multi-chain integration & example tests (counter, vault,
 publish = false
 
 [lib]
-name = "cross_vm_integration_tests"
+name = "cross_vm_tests"
 
 # The config-driven CLI binary (spec section 8): registers the vault harness and drives it against
 # a `*.cross-vm.toml` config (see `vault.cross-vm.toml`). `cross_vm_framework::cli::Cli` (the
@@ -21,7 +21,7 @@ path = "src/bin/cross_vm.rs"
 
 # Heavier harness runs are opt-in so the default `cargo test` stays fast (scenario / rstest matrices
 # and the runner-mechanics self-tests always run). Enable per category, e.g.
-# `cargo test -p cross-vm-integration-tests --features fuzz`.
+# `cargo test -p cross-vm-tests --features fuzz`.
 [features]
 fuzz = []
 invariant = []

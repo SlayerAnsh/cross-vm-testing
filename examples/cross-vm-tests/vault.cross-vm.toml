@@ -1,8 +1,8 @@
-# Config-driven run definitions for the DeFi vault harness (`cross-vm-integration-tests`).
+# Config-driven run definitions for the DeFi vault harness (`cross-vm-tests`).
 #
 # Run with, e.g.:
-#   cargo run -p cross-vm-integration-tests --bin cross-vm -- validate examples/integration-tests/vault.cross-vm.toml
-#   cargo run -p cross-vm-integration-tests --bin cross-vm -- run examples/integration-tests/vault.cross-vm.toml --profile smoke
+#   cargo run -p cross-vm-tests --bin cross-vm -- validate examples/cross-vm-tests/vault.cross-vm.toml
+#   cargo run -p cross-vm-tests --bin cross-vm -- run examples/cross-vm-tests/vault.cross-vm.toml --profile smoke
 #
 # The three [[chain]] declarations below mirror today's hard coded OSMOSIS / ETHEREUM /
 # SOLANA_DEVNET presets (crates/cosmwasm/src/chains/presets.rs, crates/solidity/src/chains/presets.rs,

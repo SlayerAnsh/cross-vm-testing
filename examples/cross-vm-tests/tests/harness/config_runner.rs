@@ -14,7 +14,7 @@
 
 use cross_vm_macros::config_runner;
 
-use cross_vm_integration_tests::vault::{vault_config_setup, VaultHarness};
+use cross_vm_tests::vault::{vault_config_setup, VaultHarness};
 
 #[config_runner(
     config = "vault.cross-vm.toml",

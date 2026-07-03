@@ -13,11 +13,11 @@ members = [
     # Reusable contract bindings (mocks) + shared test helpers for the example test crates.
     "examples/common",
     # Multi-chain integration & example tests, co-located with the contract artifacts they embed.
-    "examples/integration-tests",
+    "examples/cross-vm-tests",
 ]
 # Example contracts (now under `contracts/`) are standalone crates (their own workspaces / build
 # toolchains); they are consumed by tests via path dependencies but must not be workspace members.
-# The explicit `integration-tests` member above overrides this exclude for that one subdirectory.
+# The explicit `examples/` members above override this exclude for those subdirectories.
 exclude = [
     "contracts",
     "examples",

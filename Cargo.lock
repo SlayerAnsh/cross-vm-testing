@@ -2359,27 +2359,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cross-vm-integration-tests"
-version = "0.1.0"
-dependencies = [
- "alloy",
- "base64 0.22.1",
- "cross-vm-common",
- "cross-vm-framework",
- "cross-vm-macros",
- "cross-vm-solana",
- "cross-vm-solidity",
- "dotenvy",
- "rstest",
- "serde",
- "serde_json",
- "solana-instruction",
- "solana-system-interface 2.0.0",
- "tokio",
- "tracing-subscriber 0.3.23",
-]
-
-[[package]]
 name = "cross-vm-macros"
 version = "0.1.0"
 dependencies = [
@@ -2438,6 +2417,27 @@ dependencies = [
  "revm",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "cross-vm-tests"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "base64 0.22.1",
+ "cross-vm-common",
+ "cross-vm-framework",
+ "cross-vm-macros",
+ "cross-vm-solana",
+ "cross-vm-solidity",
+ "dotenvy",
+ "rstest",
+ "serde",
+ "serde_json",
+ "solana-instruction",
+ "solana-system-interface 2.0.0",
+ "tokio",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
