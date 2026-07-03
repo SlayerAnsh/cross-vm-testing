@@ -8,6 +8,9 @@ repository.workspace = true
 description = "Cross-VM multi-chain integration & example tests (counter, vault, harness)"
 publish = false
 
+[lib]
+name = "cross_vm_integration_tests"
+
 # Heavier harness runs are opt-in so the default `cargo test` stays fast (scenario / rstest matrices
 # and the runner-mechanics self-tests always run). Enable per category, e.g.
 # `cargo test -p cross-vm-integration-tests --features fuzz`.
@@ -19,27 +22,39 @@ endurance = []
 # funded `ON_CHAIN_WALLET` mnemonic in `.env`). Paced by `EnduranceConfig::base_delay`.
 rpc-endurance = []
 
+# The vault harness + its support (Vault contract wrapper, wallets, init_tracing) moved into the
+# library (`src/`, P2 vault migration) so the `cross-vm` bin — which cannot see `tests/` or
+# dev-dependencies — can register and drive it through the framework's config-driven CLI. Only the
+# deps the *library* itself needs are `[dependencies]`; deps used solely by the `counter` /
+# `ping-pong` / `bridge` test support, or by the test binaries' own test fns, stay `[dev-dependencies]`.
+[dependencies]
+cross-vm-framework = { path = "../../crates/framework", features = ["cli"] }
+cross-vm-solana    = { path = "../../crates/solana" }
+cross-vm-solidity  = { path = "../../crates/solidity" }
+# Needed by the `cross-vm` bin's `#[tokio::main(flavor = "current_thread")]`; bin targets cannot
+# use `[dev-dependencies]`.
+tokio.workspace = true
+# `init_tracing` (`src/support/mod.rs`) routes the framework's per-op / per-invariant debug logs.
+tracing-subscriber.workspace = true
+cosmwasm-std.workspace = true
+cw-multi-test.workspace = true
+vault = { path = "../cosmwasm-contracts/vault" }
+alloy = { workspace = true }
+solana-instruction = "3"
+solana-system-interface = { version = "2", features = ["bincode"] }
+# `VaultOp`/`VaultOpKind` derive `Serialize`/`Deserialize` (spec section 7.1's externally tagged
+# TOML op shape).
+serde.workspace = true
+
 [dev-dependencies]
-cross-vm-framework = { path = "../../crates/framework" }
 # Proc-macro attributes must be imported from the proc-macro crate directly so rust-analyzer
 # can load the expander (re-exports through the framework prelude break RA expansion).
 cross-vm-macros = { path = "../../crates/macros" }
-cross-vm-solana    = { path = "../../crates/solana" }
-cross-vm-solidity  = { path = "../../crates/solidity" }
-tokio.workspace = true
-# Subscriber for the framework's tracing debug logs; routed through libtest capture in `support`.
-tracing-subscriber.workspace = true
 rstest.workspace = true
-cosmwasm-std.workspace = true
-cw-multi-test.workspace = true
 counter = { path = "../cosmwasm-contracts/counter", features = ["cross-vm"] }
-vault   = { path = "../cosmwasm-contracts/vault" }
 ping-pong = { path = "../cosmwasm-contracts/ping-pong" }
-alloy = { workspace = true }
 # Load the workspace `.env` (funded mnemonic) for the opt-in `rpc-endurance` live test.
 dotenvy.workspace = true
-solana-instruction = "3"
-solana-system-interface = { version = "2", features = ["bincode"] }
 # Decode Anchor `emit!` event payloads from Solana program logs (`Program data: <base64>`).
 base64.workspace = true
 
