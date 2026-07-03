@@ -69,6 +69,8 @@ ping-pong = { path = "../cosmwasm-contracts/ping-pong" }
 dotenvy.workspace = true
 # Decode Anchor `emit!` event payloads from Solana program logs (`Program data: <base64>`).
 base64.workspace = true
+# `tests/cli_e2e.rs` parses the `--json-report` file the real `cross-vm` binary writes.
+serde_json.workspace = true
 
 [lints]
 workspace = true

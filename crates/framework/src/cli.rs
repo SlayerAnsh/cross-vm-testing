@@ -6,9 +6,9 @@
 //! [`Cli::new`]/[`Cli::env_file`]/[`Cli::register`] to build one up, then `.main().await` to parse
 //! `std::env::args()`, dispatch, and return a [`std::process::ExitCode`]. No `replay` subcommand
 //! lives here (Task 12: `cross-vm replay` is sugar for `run --profile replay`, built later);
-//! `--json-report` is parsed and threaded through, but the actual write is Task 11 (needs
-//! `Serialize` derives this task does not add) — see the `TODO(T11)` marker on the private
-//! `run_selected` helper's json-report branch.
+//! `--json-report` (spec section 9) accumulates every selected profile's [`ErasedReport`] and
+//! writes the envelope once, after the whole invocation finishes, in the private `run_selected`
+//! helper.
 //!
 //! Precedence (spec section 8), highest first: CLI flag, `CROSS_VM_*` env var, profile key,
 //! `[defaults]`, built-in default. The last two tiers are already merged by the loader and
@@ -30,8 +30,8 @@ use std::time::Duration;
 use clap::Parser;
 
 use crate::config::{
-    resolve_profile, ErasedReport, Registry, ResolvedProfile, RunError, RunOptions, SetupFuture,
-    SetupRequest, Target,
+    resolve_profile, write_json_report, ErasedReport, Registry, ResolvedProfile, RunError,
+    RunOptions, SetupFuture, SetupRequest, Target,
 };
 use crate::harness::{FailureKind, Harness};
 
@@ -216,7 +216,16 @@ impl Cli {
             }
         });
 
-        let code = run_selected(&self.registry, cfg, &names, &opts, stop_on_failure).await;
+        let config_path = args.config.to_string_lossy();
+        let code = run_selected(
+            &self.registry,
+            cfg,
+            &names,
+            &opts,
+            stop_on_failure,
+            &config_path,
+        )
+        .await;
         tracing::info!(exit_code = code, profiles = names.len(), "run summary");
         code
     }
@@ -391,8 +400,8 @@ struct RunArgs {
     /// Overrides the invariant sweep cadence.
     #[arg(long = "check-every")]
     check_every: Option<usize>,
-    /// Overrides the JSON report output path. Parsed and carried; the write itself is Task 11
-    /// (see the `TODO(T11)` marker in [`run_selected`]).
+    /// Overrides the JSON report output path (spec section 9). The envelope is written once,
+    /// after every selected profile has run, by [`run_selected`].
     #[arg(long = "json-report")]
     json_report: Option<String>,
     /// Overrides the replay-artifact/report directory.
@@ -612,14 +621,29 @@ fn combine(codes: impl IntoIterator<Item = u8>) -> u8 {
 /// [`combine`]. When `stop_on_failure` is set, stops after the first profile whose code is
 /// non-zero (whether a config/usage error resolving the profile, a `RunError`, or a failing
 /// report).
+///
+/// Accumulates every profile's [`ErasedReport`] into one `Vec`, and — if a JSON report path is
+/// set, either `opts.json_report` (the CLI `--json-report` flag, checked first) or the first
+/// resolved profile's own `json_report` key — writes the whole invocation's envelope exactly
+/// once at the end via [`write_json_report`], never per-profile (spec section 9: one file holds
+/// every profile of one invocation). `config_path` is the config file path exactly as the user
+/// passed it, `names` is the invocation's selected profile names (recorded in the envelope
+/// regardless of whether `stop_on_failure` cut the run short before every one of them ran).
 async fn run_selected(
     registry: &Registry,
     cfg: &cross_vm_config::RunConfig,
     names: &[String],
     opts: &RunOptions,
     stop_on_failure: bool,
+    config_path: &str,
 ) -> u8 {
     let mut code = 0u8;
+    let mut reports: Vec<ErasedReport> = Vec::new();
+    // CLI flag wins over a profile's own `json_report` key (same precedence every other
+    // `RunOptions` field follows); once a path is found it is never overwritten by a later
+    // profile's own key, since the envelope is written to exactly one file.
+    let mut json_report_path = opts.json_report.clone();
+
     for name in names {
         let resolved: ResolvedProfile = match resolve_profile(cfg, name, opts) {
             Ok(r) => r,
@@ -633,18 +657,15 @@ async fn run_selected(
             }
         };
 
+        if json_report_path.is_none() {
+            json_report_path = resolved.json_report.clone();
+        }
+
         match registry.run(&cfg.harness.name, &resolved, opts).await {
             Ok(report) => {
                 let this_code = exit_code_for(&report);
                 log_profile_result(&report);
-
-                if let Some(path) = &resolved.json_report {
-                    // TODO(T11): write_json_report(path, &invocation, &report). The actual JSON
-                    // write needs `Serialize` on `Coverage`/`Stats`/`FailureKind` (Task 11's
-                    // `serde` feature work); until then, never silently claim the report was
-                    // written.
-                    tracing::debug!(path, "TODO(T11): json report not written yet");
-                }
+                reports.push(report);
 
                 code = combine([code, this_code]);
                 if stop_on_failure && this_code != 0 {
@@ -661,7 +682,76 @@ async fn run_selected(
             }
         }
     }
+
+    if let Some(path) = &json_report_path {
+        let overrides = overrides_json(opts);
+        match write_json_report(Path::new(path), config_path, names, &reports, overrides) {
+            Ok(()) => tracing::info!(path, "wrote JSON report"),
+            Err(e) => {
+                // An IO failure here (bad directory, permissions, disk full) is a property of
+                // the invocation's own `--json-report`/`json_report` argument, not of anything
+                // the run discovered about the system under test: it belongs in the same
+                // usage/config bucket (exit 3) as an unresolvable profile name or a malformed
+                // config, not the infra bucket (2) reserved for chain/RPC/deploy failures during
+                // a run. `combine` folds it in, so it dominates a clean pass but never silently
+                // downgrades a worse code a profile already reported.
+                tracing::error!(path, error = %e, "failed to write JSON report");
+                code = combine([code, 3]);
+            }
+        }
+    }
+
     code
+}
+
+/// Builds the `invocation.overrides` object for a [`write_json_report`] call: every CLI-set
+/// scalar on `opts`, skipping anything left at its `None`/empty/`false` default. Deliberately
+/// narrow — only the run-shape knobs (`seed`/`ops`/`cases`/`duration`/`target`/`target_chain`/
+/// `stats`/`check_every`/`no_shrink`), never a config value (env params, rpc URLs, ...), so the
+/// envelope can never leak a config secret through this field.
+fn overrides_json(opts: &RunOptions) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    if let Some(v) = opts.seed {
+        map.insert("seed".to_string(), v.into());
+    }
+    if let Some(v) = opts.ops {
+        map.insert("ops".to_string(), v.into());
+    }
+    if let Some(v) = opts.cases {
+        map.insert("cases".to_string(), v.into());
+    }
+    if let Some(v) = opts.duration {
+        map.insert("duration_secs".to_string(), v.as_secs().into());
+    }
+    if let Some(t) = opts.target {
+        map.insert("target".to_string(), target_label(t).into());
+    }
+    if !opts.target_chains.is_empty() {
+        let per_chain: serde_json::Map<String, serde_json::Value> = opts
+            .target_chains
+            .iter()
+            .map(|(label, target)| (label.clone(), serde_json::Value::from(target_label(*target))))
+            .collect();
+        map.insert("target_chain".to_string(), serde_json::Value::Object(per_chain));
+    }
+    if let Some(v) = opts.stats {
+        map.insert("stats".to_string(), v.into());
+    }
+    if let Some(v) = opts.check_every {
+        map.insert("check_every".to_string(), v.into());
+    }
+    if opts.no_shrink {
+        map.insert("no_shrink".to_string(), true.into());
+    }
+    serde_json::Value::Object(map)
+}
+
+/// `"mock"`/`"rpc"`, the JSON-friendly label for a [`Target`] (the inverse of [`parse_target`]).
+fn target_label(t: Target) -> &'static str {
+    match t {
+        Target::Mock => "mock",
+        Target::Rpc => "rpc",
+    }
 }
 
 /// Logs one profile's per-run result line (pass/fail, mode, seed, steps, elapsed).
@@ -1289,5 +1379,132 @@ kinds = ["Ping"]
         // or error inside `run_with`, so a clean 0 here demonstrates the override was accepted
         // and threaded through `RunOptions` end to end via the CLI dispatch path.
         assert_eq!(cli.run_with_config(&cfg, &args).await, 0);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // --json-report (spec section 9): overrides_json, and the envelope written once per
+    // invocation by run_selected/run_with_config.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn overrides_json_is_empty_object_when_nothing_is_set() {
+        assert_eq!(overrides_json(&RunOptions::default()), serde_json::json!({}));
+    }
+
+    #[test]
+    fn overrides_json_includes_only_the_scalars_that_were_set() {
+        let opts = RunOptions {
+            seed: Some(7),
+            cases: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(overrides_json(&opts), serde_json::json!({"seed": 7, "cases": 2}));
+    }
+
+    #[test]
+    fn overrides_json_never_includes_json_report_or_artifacts_dir() {
+        // Both are file paths, not "run-shape" overrides; asserting their absence documents
+        // that this function's field list is deliberately narrow, not merely incomplete.
+        let opts = RunOptions {
+            json_report: Some("out.json".to_string()),
+            artifacts_dir: Some("/tmp/artifacts".to_string()),
+            no_shrink: true,
+            ..Default::default()
+        };
+        let value = overrides_json(&opts);
+        assert!(value.get("json_report").is_none());
+        assert!(value.get("artifacts_dir").is_none());
+        assert_eq!(value["no_shrink"], true);
+    }
+
+    /// A fresh temp file path under the OS temp dir, unique per test invocation (process id +
+    /// a monotonic counter), so parallel test runs never collide. No new dev-dependency needed
+    /// for this one narrow use.
+    fn temp_json_path(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "cross-vm-cli-json-report-{}-{}-{label}.json",
+            std::process::id(),
+            n
+        ))
+    }
+
+    #[tokio::test]
+    async fn run_with_config_writes_json_report_once_for_the_whole_invocation() {
+        let cfg = load(
+            r#"
+[harness]
+name = "vault"
+
+[profile.smoke]
+mode = "fuzz"
+cases = 1
+ops = 1
+kinds = ["Ping"]
+
+[profile.deep]
+mode = "invariant"
+ops = 1
+kinds = ["Ping"]
+"#,
+        );
+        let cli = cli_with_mock();
+        let path = temp_json_path("multi-profile");
+        let args = RunArgs {
+            config: PathBuf::from("vault.cross-vm.toml"),
+            profile: vec!["smoke".to_string(), "deep".to_string()],
+            json_report: Some(path.to_str().unwrap().to_string()),
+            seed: Some(42),
+            ..Default::default()
+        };
+        assert_eq!(cli.run_with_config(&cfg, &args).await, 0);
+
+        let raw = std::fs::read_to_string(&path).expect("json report was written");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["invocation"]["config"], "vault.cross-vm.toml");
+        assert_eq!(
+            value["invocation"]["profiles"],
+            serde_json::json!(["smoke", "deep"])
+        );
+        assert_eq!(value["invocation"]["overrides"], serde_json::json!({"seed": 42}));
+        let profiles = value["profiles"].as_array().expect("profiles array");
+        // One entry per profile in the invocation: the envelope is written once, not per
+        // profile, so both selected profiles land in the same file's `profiles` array.
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0]["profile"], "smoke");
+        assert_eq!(profiles[1]["profile"], "deep");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn run_with_config_no_json_report_flag_writes_nothing() {
+        // `kinds = ["Ping"]` (unlike `SINGLE_PROFILE`) so the run is deterministically a pass:
+        // this test asserts absence of a file, which a stray `Boom`-triggered exit code 1 must
+        // not be able to cause a false failure on.
+        let cfg = load(
+            r#"
+[harness]
+name = "vault"
+
+[profile.smoke]
+mode = "fuzz"
+cases = 1
+ops = 1
+kinds = ["Ping"]
+"#,
+        );
+        let cli = cli_with_mock();
+        let path = temp_json_path("not-requested");
+        assert!(!path.exists());
+        let args = RunArgs {
+            config: PathBuf::from("vault.cross-vm.toml"),
+            ..Default::default()
+        };
+        assert_eq!(cli.run_with_config(&cfg, &args).await, 0);
+        assert!(!path.exists(), "no --json-report flag was given; nothing should be written");
     }
 }

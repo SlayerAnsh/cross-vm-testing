@@ -139,6 +139,54 @@ fn run_with_target_chain_rpc_and_no_rpc_url_is_a_usage_error() {
 }
 
 #[test]
+fn run_with_json_report_writes_a_schema_version_one_envelope() {
+    // A dedicated temp path (process id + a nanosecond timestamp) so parallel `cargo test`
+    // runs of this file never collide on the same file.
+    let path = std::env::temp_dir().join(format!(
+        "cross-vm-cli-e2e-json-report-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let out = cross_vm(&[
+        "run",
+        config_path().to_str().unwrap(),
+        "--profile",
+        "smoke",
+        "--seed",
+        "42",
+        "--json-report",
+        path.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let raw = std::fs::read_to_string(&path).expect("json report was written");
+    let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["invocation"]["profiles"], serde_json::json!(["smoke"]));
+    let profiles = value["profiles"].as_array().expect("profiles array");
+    assert_eq!(profiles.len(), 1, "one profile ran; one entry in the envelope");
+    assert_eq!(profiles[0]["profile"], "smoke");
+    assert_eq!(profiles[0]["harness"], "vault");
+    assert_eq!(profiles[0]["mode"], "fuzz");
+    // `--seed 42` is the *base* seed the run is driven with; a fuzz report's own `seed` field is
+    // the sub-seed of the last case (see `ErasedReport::seed`'s docs), not the base seed itself,
+    // so this deliberately does not assert an exact seed value (a per-run derived, not fixed,
+    // number) — only that the field is present as a number.
+    assert!(profiles[0]["seed"].is_number());
+    assert!(profiles[0]["steps"].as_u64().unwrap() > 0);
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn run_passes_on_a_config_with_no_chain_declarations() {
     // `vault.no-chains.cross-vm.toml` has no `[[chain]]` entries, so `SetupRequest::chain_specs`
     // is empty and `vault_config_setup` falls back to hard coding the three mock chains, exactly

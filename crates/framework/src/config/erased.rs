@@ -18,10 +18,14 @@ pub(crate) type LocalBoxFuture<'a, T> =
 /// Mode-agnostic outcome of one profile run: [`RunReport`] with the operation type erased.
 ///
 /// Produced by `erase_report` from a monomorphized `RunReport<H::Operation>`. This is the
-/// shape the CLI (a later task) prints, maps to an exit code, and serializes as the
-/// `--json-report` payload (`Serialize` lands on this and its fields in a later task's `serde`
-/// feature work).
-#[derive(Debug)]
+/// shape the CLI prints, maps to an exit code, and serializes as one entry of the
+/// `--json-report` payload's `profiles` array (spec section 9); `config::report::JsonReport`
+/// wraps a `&[ErasedReport]` in the envelope written once per invocation. `elapsed` serializes
+/// with `Duration`'s default serde representation (`{"secs": .., "nanos": ..}`), matching how
+/// every other `Duration` field in this crate's serde surface serializes; no custom
+/// millisecond `serialize_with` was added, since a single, predictable shape across the report
+/// is worth more than shaving one nesting level.
+#[derive(Debug, serde::Serialize)]
 pub struct ErasedReport {
     /// The registered harness name this run used.
     pub harness: String,
@@ -50,7 +54,7 @@ pub struct ErasedReport {
 }
 
 /// The type-erased counterpart of [`crate::harness::Failure`].
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ErasedFailure {
     /// 1-based index of the operation that failed, or `0` for a pre-operation failure.
     pub step: usize,

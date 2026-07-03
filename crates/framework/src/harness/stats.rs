@@ -26,7 +26,18 @@ pub(crate) enum OpOutcome<'a> {
 }
 
 /// Timing and outcome tally for one op label.
+///
+/// Serializes (behind the `serde` feature) with all fields, including the private `_ns`
+/// accumulators (`total_ns`/`sum_sq_ns`/`min_ns`/`max_ns`): every field here is already a plain
+/// `usize`/`u128`/`BTreeMap<String, usize>`, all natively `Serialize`, so nothing needs
+/// `#[serde(skip)]` or a `serialize_with` conversion. Field visibility does not affect what a
+/// derive emits, so the raw nanosecond totals appear in a JSON report by their internal names
+/// rather than as `Duration`s; this keeps the derive a plain, lossless mirror of the struct
+/// instead of re-deriving `min()`/`max()`/`avg()`/`stddev()` by hand. A JSON consumer wanting
+/// `Duration`-shaped values can convert `*_ns` (nanoseconds) itself, the same computation these
+/// accessor methods do.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct OpStat {
     /// Legitimate acceptances.
     pub accepted: usize,
@@ -93,7 +104,14 @@ impl OpStat {
 
 /// Per-op-kind success/failure counts, `apply` timing, and an error breakdown, collected only when
 /// a run opts in. Keyed by op variant name.
+///
+/// Serializes (behind `serde`) as `{"ops": {"Deposit": {...}, "Withdraw": {...}}}`: the single
+/// private `ops` field derives like any other (visibility does not change what a derive emits),
+/// and is left un-flattened (unlike [`crate::harness::Coverage`]'s `#[serde(transparent)]`) so a
+/// `Stats` value nests as a `stats` key with an unambiguous shape inside `ErasedReport` rather
+/// than colliding with a future top-level field of the same name.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Stats {
     ops: BTreeMap<String, OpStat>,
 }
@@ -233,5 +251,50 @@ mod tests {
         // Saturates at the Duration accessor, not silently wrapped at record time.
         assert_eq!(s.max(), Duration::from_nanos(u64::MAX));
         assert_eq!(s.min(), Duration::from_nanos(u64::MAX));
+    }
+
+    // -------------------------------------------------------------------------------------
+    // serde (spec section 9): OpStat/Stats shapes. Gated on `cli` (not just `serde`) for the
+    // same reason as `outcome.rs`'s equivalent module: `serde_json`, used here to assert JSON
+    // shape, is only pulled in by `cli`.
+    // -------------------------------------------------------------------------------------
+
+    #[cfg(feature = "cli")]
+    mod serde_shapes {
+        use super::*;
+
+        #[test]
+        fn op_stat_serializes_outcome_counts_and_timing_fields() {
+            let mut stats = Stats::default();
+            stats.record("Deposit", Duration::from_millis(5), OpOutcome::Accepted);
+            stats.record("Deposit", Duration::from_millis(15), OpOutcome::Rejected("cap"));
+
+            let stat = stats.get("Deposit").unwrap();
+            let value = serde_json::to_value(stat).unwrap();
+
+            assert_eq!(value["accepted"], 1);
+            assert_eq!(value["rejected"], 1);
+            assert_eq!(value["bug"], 0);
+            assert_eq!(value["infra"], 0);
+            assert_eq!(value["count"], 2);
+            assert_eq!(value["errors"], serde_json::json!({"cap": 1}));
+            // Timing accumulators are plain, already-`Serialize` `u128` nanosecond totals (no
+            // field needed `#[serde(skip)]`/`serialize_with`): present, and consistent with
+            // `min()`/`max()`'s own nanosecond math.
+            assert_eq!(value["min_ns"], 5_000_000u64);
+            assert_eq!(value["max_ns"], 15_000_000u64);
+        }
+
+        #[test]
+        fn stats_serializes_as_an_ops_object_keyed_by_op_label() {
+            let mut stats = Stats::default();
+            stats.record("Deposit", Duration::from_millis(1), OpOutcome::Accepted);
+            stats.record("Withdraw", Duration::from_millis(1), OpOutcome::Accepted);
+
+            let value = serde_json::to_value(&stats).unwrap();
+            let ops = value["ops"].as_object().expect("ops is an object");
+            assert!(ops.contains_key("Deposit"));
+            assert!(ops.contains_key("Withdraw"));
+        }
     }
 }
