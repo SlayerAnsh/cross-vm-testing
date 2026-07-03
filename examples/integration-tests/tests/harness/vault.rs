@@ -16,9 +16,9 @@ use cross_vm_macros::fuzz_runner;
 #[cfg(feature = "invariant")]
 use cross_vm_macros::invariant_runner;
 
-use cross_vm_integration_tests::vault::{vault_setup, VaultHarness, VaultOp};
 #[cfg(feature = "fuzz")]
 use cross_vm_integration_tests::vault::VaultOpKind;
+use cross_vm_integration_tests::vault::{vault_setup, VaultHarness, VaultOp};
 
 #[cfg(feature = "invariant")]
 #[invariant_runner(harness = VaultHarness, seed = 42)]

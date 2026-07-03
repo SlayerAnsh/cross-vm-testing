@@ -11,6 +11,14 @@ publish = false
 [lib]
 name = "cross_vm_integration_tests"
 
+# The config-driven CLI binary (spec section 8): registers the vault harness and drives it against
+# a `*.cross-vm.toml` config (see `vault.cross-vm.toml`). `cross_vm_framework::cli::Cli` (the
+# framework's `cli` feature) does the argument parsing, profile selection, and exit-code mapping;
+# this binary is just the registration glue.
+[[bin]]
+name = "cross-vm"
+path = "src/bin/cross_vm.rs"
+
 # Heavier harness runs are opt-in so the default `cargo test` stays fast (scenario / rstest matrices
 # and the runner-mechanics self-tests always run). Enable per category, e.g.
 # `cargo test -p cross-vm-integration-tests --features fuzz`.

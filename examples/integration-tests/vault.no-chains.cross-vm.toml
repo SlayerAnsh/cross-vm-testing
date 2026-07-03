@@ -1,0 +1,14 @@
+# A minimal config with no [[chain]] declarations: `SetupRequest::chain_specs` is empty, so
+# `vault_config_setup` falls back to the same hard coded OSMOSIS/ETHEREUM/SOLANA_DEVNET mocks
+# `vault_setup` always has (spec section 4.2's backward-compatible "setup fn hard codes chains"
+# path). Used by the CLI e2e suite to prove that path still works end to end.
+
+[harness]
+name = "vault"
+
+[profile.smoke]
+mode = "fuzz"
+seed = 7
+cases = 2
+ops = 10
+kinds = ["Deposit", "Withdraw"]

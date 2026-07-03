@@ -105,6 +105,37 @@ Each crate has unit tests (chain metadata, account creation, balance set/get, bl
   * CosmWasm: the `examples/cosmwasm-contracts/counter` crate is consumed as an rlib (no artifact build needed).
   * EVM: `sol!` parses `examples/solidity-contracts/out/Counter.sol/Counter.json` (forge build) for the ABI and creation bytecode.
   * Solana: `include_bytes!` loads `examples/solana-contracts/target/deploy/counter.so` (`cargo-build-sbf`).
+  * `tests/cli_e2e.rs` drives the `cross-vm` binary itself as a subprocess (`Command::new(env!("CARGO_BIN_EXE_cross-vm"))`) against `vault.cross-vm.toml` and `vault.no-chains.cross-vm.toml`, checking exit codes and seed reproducibility exactly as a user would see them. See "The `cross-vm` CLI binary" below.
+
+## The `cross-vm` CLI binary
+
+`cross-vm-integration-tests` ships a small binary (`src/bin/cross_vm.rs`) built by the framework's config-driven CLI (`docs/config-runs-spec.md` section 8, `cross_vm_framework::cli::Cli`). It registers the vault harness once:
+
+```rust
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::process::ExitCode {
+    cross_vm_framework::cli::Cli::new()
+        .env_file(".env")
+        .register("vault", || VaultHarness, vault_config_setup)
+        .main()
+        .await
+}
+```
+
+`current_thread` is required, not a style choice: the erased registry layer and every mock VM are `!Send` by construction, and `Cli::main` asserts the runtime flavor at startup.
+
+```sh
+# type-check a config against the registered harness; touches no chains
+cargo run -p cross-vm-integration-tests --bin cross-vm -- validate examples/integration-tests/vault.cross-vm.toml
+
+# run one profile against the mock chains
+cargo run -p cross-vm-integration-tests --bin cross-vm -- run examples/integration-tests/vault.cross-vm.toml --profile smoke
+
+# list registered harnesses and a config's profiles/suites
+cargo run -p cross-vm-integration-tests --bin cross-vm -- list examples/integration-tests/vault.cross-vm.toml
+```
+
+`examples/integration-tests/vault.cross-vm.toml` declares the same three chains (`osmosis`/`eth`/`solana`) `vault_setup` hard codes, plus a `smoke` / `deep` / `invariant-long` / `mixed-targets` profile set; `vault.no-chains.cross-vm.toml` has no `[[chain]]` entries at all, exercising `vault_config_setup`'s backward-compatible fallback (hard code the three mocks, exactly like `vault_setup`) when a config declares none. Exit codes follow the CI contract in spec section 8: `0` every run passed, `1` a run failed with a `Bug`/invariant violation, `2` an `Infra`-only failure, `3` a config or usage error (an unknown profile, an unresolvable `${VAR}`, or `--target-chain LABEL=rpc` on a chain with no `rpc_url`).
 
 ## Property-testing harness diagnostics
 

@@ -1,0 +1,87 @@
+# Config-driven run definitions for the DeFi vault harness (`cross-vm-integration-tests`).
+#
+# Run with, e.g.:
+#   cargo run -p cross-vm-integration-tests --bin cross-vm -- validate examples/integration-tests/vault.cross-vm.toml
+#   cargo run -p cross-vm-integration-tests --bin cross-vm -- run examples/integration-tests/vault.cross-vm.toml --profile smoke
+#
+# The three [[chain]] declarations below mirror today's hard coded OSMOSIS / ETHEREUM /
+# SOLANA_DEVNET presets (crates/cosmwasm/src/chains/presets.rs, crates/solidity/src/chains/presets.rs,
+# crates/solana/src/chains/presets.rs); labels osmosis/eth/solana match vault_setup's LABELS
+# exactly, so a mock run against this config exercises the identical topology.
+
+[harness]
+name = "vault"
+
+[[chain]]
+label = "osmosis"
+kind = "cosmwasm"
+chain_id = "osmosis-1"
+name = "Osmosis"
+bech32_prefix = "osmo"
+native_denom = "uosmo"
+native_symbol = "OSMO"
+gas_price = 0.025
+rpc_url = "https://rpc.osmosis.zone:443"
+
+# No rpc_url declared: every profile in this file targets mock (see [env] and [defaults] below),
+# so none needs one. A `--target-chain eth=rpc` override therefore hits the framework's
+# "rpc target requires rpc_url" validation cleanly (exit code 3), never an actual network call;
+# a real deployment config would add `rpc_url = "${ETH_RPC:-https://eth.llamarpc.com}"` here.
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "1"
+name = "Ethereum"
+native_symbol = "ETH"
+spec_id = "cancun"
+
+[[chain]]
+label = "solana"
+kind = "svm"
+chain_id = "devnet"
+name = "Solana Devnet"
+native_symbol = "SOL"
+commitment = "finalized"
+rpc_url = "https://api.devnet.solana.com"
+ws_url = "wss://api.devnet.solana.com"
+
+[env]
+target = "mock"
+chains = ["osmosis", "eth", "solana"]
+
+[defaults]
+seed = 42
+check_every = 1
+
+# A fast, CI-friendly smoke profile: few cases, few ops per case, restricted to the two simplest
+# op kinds.
+[profile.smoke]
+mode = "fuzz"
+cases = 8
+ops = 20
+kinds = ["Deposit", "Withdraw"]
+
+# A deeper fuzz profile over the full op mix, weighted toward deposits.
+[profile.deep]
+mode = "fuzz"
+cases = 200
+ops = 50
+weights = { Deposit = 40, Withdraw = 25, Borrow = 20, Repay = 15 }
+
+# A single long invariant run, checked every 5 ops.
+[profile.invariant-long]
+mode = "invariant"
+ops = 2000
+check_every = 5
+
+# Demonstrates the approved per-chain `env.targets` override (spec section 6.2): every chain
+# still defaults to mock (`[env].target`), but `osmosis` (which declares a real `rpc_url`) is
+# promoted to a live RPC target for this profile only, while `eth` and `solana` stay mock. Not
+# run by any make target or e2e test (it would need a funded live wallet); it exists purely as a
+# documented example of the mixed mock/rpc shape a deployment or canary profile would use.
+[profile.mixed-targets]
+mode = "fuzz"
+cases = 4
+ops = 10
+kinds = ["Deposit", "Withdraw"]
+env = { targets = { osmosis = "rpc" } }

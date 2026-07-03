@@ -16,7 +16,7 @@ mod ping_pong;
 
 pub use bridge::{parse_packets, record_hook, Bridge, BridgeLedger, PacketEvent, PacketKind};
 pub use counter::{Counter, CounterSpec};
-pub use ping_pong::{PingPong, PingPongSpec, StatsView};
 pub use cross_vm_integration_tests::support::{
     empty_wallets, fund_alice, fund_evm, fund_user, init_tracing, test_wallets, Vault,
 };
+pub use ping_pong::{PingPong, PingPongSpec, StatsView};
