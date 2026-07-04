@@ -2,7 +2,7 @@
 //! CLI, plus [`erase_report`], the conversion from a monomorphized [`RunReport`].
 //!
 //! The registry's `run` closure (`crate::config::registry`) is generic over the registered
-//! [`Harness`](crate::harness::Harness), so no `dyn Harness` ever exists inside it; `ErasedReport`
+//! [`Harness`](harness_core::Harness), so no `dyn Harness` ever exists inside it; `ErasedReport`
 //! is the one place a run's outcome crosses from "generic over `H::Operation`" into
 //! "harness-agnostic data the CLI can print or serialize as JSON" (spec section 7).
 
@@ -44,7 +44,7 @@ pub struct ErasedReport {
     /// Per-invariant tallies (held / skipped / violated), keyed by the invariant's `Debug` name.
     pub coverage: Coverage,
     /// Collected per-op diagnostics, present only when the profile enabled
-    /// [`stats`](crate::config::ResolvedProfile::stats).
+    /// [`stats`](crate::ResolvedProfile::stats).
     pub stats: Option<Stats>,
     /// Wall-clock time the whole profile run took: every fuzz case's setup and drive combined,
     /// or the one setup and drive for invariant.
@@ -53,7 +53,7 @@ pub struct ErasedReport {
     pub failure: Option<ErasedFailure>,
 }
 
-/// The type-erased counterpart of [`crate::harness::Failure`].
+/// The type-erased counterpart of [`harness_core::Failure`].
 #[derive(Debug, serde::Serialize)]
 pub struct ErasedFailure {
     /// 1-based index of the operation that failed, or `0` for a pre-operation failure.

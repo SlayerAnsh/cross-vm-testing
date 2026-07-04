@@ -1,6 +1,6 @@
 //! [`run_profile_for_test`]: the `cargo test` bridge from a config file to a plain
 //! `#[tokio::test]` body, used by the `#[config_runner]` proc-macro
-//! (`crates/harness-macros/src/config_runner.rs`).
+//! (`crates/macros/src/config_runner.rs`).
 //!
 //! The macro reads the config file at **expansion** time only to learn how many `#[tokio::test]`
 //! fns to fan out for a fuzz profile (one per case, mirroring `#[fuzz_runner]`); it never trusts
@@ -13,7 +13,7 @@
 //! rebuild too); the assertion just turns a silent under/over-count into a loud test failure
 //! instead of a subtly wrong fan-out.
 //!
-//! For a fuzz case, driving the case itself reuses [`crate::registry::run_one_fuzz_case`] — the
+//! For a fuzz case, driving the case itself reuses `crate::registry::run_one_fuzz_case` — the
 //! exact function [`Registry::run`]'s fuzz arm calls per case — so the seeded op sequence a
 //! `#[config_runner]` test drives is byte-for-byte identical to what a CLI `run` would drive for
 //! the same case (see that function's docs for why this matters: the fuzz golden stream must
@@ -34,7 +34,7 @@ use crate::resolve::{resolve_profile, RunOptions};
 /// Loads `config_path`, resolves `profile`, and runs it as a `#[tokio::test]` body: panics on
 /// any failure encountered (setup, resolve, or a discovered bug), so a failing run fails the
 /// test. Reuses the [`harness_config::load`] loader and the [`Registry`]
-/// ([`Registry`]/[`registry::run_one_fuzz_case`]) end to end; no run logic is reimplemented here.
+/// ([`Registry`]/`registry::run_one_fuzz_case`) end to end; no run logic is reimplemented here.
 ///
 /// Generic over a [`CliDomain`] `D`: the config loads with `D`'s schema extension
 /// ([`CliDomain::Ext`]) and each run's setup value is built via [`CliDomain::build_setup`].
@@ -47,7 +47,7 @@ use crate::resolve::{resolve_profile, RunOptions};
 /// config-driven test that needs `export_world` should go through the CLI, not this bridge.
 ///
 /// `case`: for a fuzz profile, drives only that case index (seed = `sub_seed(base, case)`, via
-/// [`registry::run_one_fuzz_case`]); `None` runs the whole profile through a fresh [`Registry`]
+/// `registry::run_one_fuzz_case`); `None` runs the whole profile through a fresh [`Registry`]
 /// (the shape every non-fuzz mode — invariant/scenario/endurance — always uses, and a fuzz
 /// profile could too, though the `#[config_runner]` macro never emits that combination).
 ///

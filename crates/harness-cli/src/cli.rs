@@ -529,7 +529,7 @@ pub fn build_run_options<A: clap::Args>(
 ///
 /// The suite path maps `Suite.phases` directly. Every other selection path (`--profile` flags, the
 /// single-profile default, `{PREFIX}_PROFILE`) wraps its names in dependency-free
-/// [`WorldSource::Fresh`] phases, so [`run_selected`] only ever handles one shape.
+/// [`WorldSource::Fresh`] phases, so `run_selected` only ever handles one shape.
 #[derive(Debug, Clone)]
 pub struct PhasePlan {
     /// A `[profile.*]` name in the config.
@@ -563,7 +563,7 @@ fn fresh_phase(profile: String) -> PhasePlan {
 /// listing the available names. `prefix` is the domain's [`CliDomain::ENV_PREFIX`].
 ///
 /// The suite path carries each phase's `needs`/`world` through verbatim (honored by
-/// [`run_selected`]); every other path emits [`fresh_phase`]s.
+/// `run_selected`); every other path emits `fresh_phase`s.
 // `RunArgs` is deliberately a private arg-model type; this fn is `pub` (and re-exported) as a
 // unit-testable building block, so it is intentionally more visible than its argument.
 #[allow(private_interfaces)]
@@ -709,7 +709,7 @@ fn severity_rank(code: u8) -> u8 {
     }
 }
 
-/// Combines a sequence of exit codes into the single worst one, per [`severity_rank`]'s ordering.
+/// Combines a sequence of exit codes into the single worst one, per `severity_rank`'s ordering.
 /// `combine([])` is `0` (no runs, nothing failed).
 pub fn combine(codes: impl IntoIterator<Item = u8>) -> u8 {
     codes.into_iter().fold(0u8, |worst, code| {
@@ -947,7 +947,7 @@ async fn run_selected<D: CliDomain>(
 /// `opts`, skipping anything left at its `None`/empty/`false` default. Deliberately narrow — only the
 /// run-shape knobs (`seed`/`ops`/`cases`/`duration`/`stats`/`check_every`/`no_shrink`), never a config
 /// value (env params, rpc URLs, ...), so the envelope can never leak a config secret through this
-/// field. The domain's own flags are merged in on top by [`run_selected`] via
+/// field. The domain's own flags are merged in on top by `run_selected` via
 /// [`CliDomain::overrides_json`].
 pub fn overrides_json(opts: &RunOptions) -> serde_json::Value {
     let mut map = serde_json::Map::new();
