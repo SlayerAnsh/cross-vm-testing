@@ -10,6 +10,7 @@ mod erased;
 mod registry;
 mod report;
 mod resolve;
+pub mod test_bridge;
 
 pub use artifact::write_replay_artifact;
 pub use cli::{
