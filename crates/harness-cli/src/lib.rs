@@ -3,10 +3,12 @@
 //! [`CliDomain`] to add domain config sections, CLI flags, and a custom setup
 //! request type; see the cross-vm framework crate for a worked example.
 
+mod domain;
 mod erased;
 mod report;
 mod resolve;
 
+pub use domain::{BasicSetup, CliDomain, GenericDomain, NoArgs, SetupBuildError, SetupFuture};
 pub use erased::{ErasedFailure, ErasedReport};
 pub use report::{write_json_report, Invocation, JsonReport};
 pub use resolve::{resolve_profile, ResolvedProfile, RunOptions};
