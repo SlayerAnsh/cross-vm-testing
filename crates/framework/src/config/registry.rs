@@ -773,26 +773,32 @@ where
             let selection = parse_kind_selection::<H>(&p.kinds, &p.weights)?;
 
             // Pipeline handoff (inherit a donor world, or stash this world for the next phase)
-            // needs a single, well-defined starting/ending world. Fuzz does a *fresh* setup per
-            // case, so a multi-case fuzz phase has neither: reject it here as a run-layer backstop
-            // (the config layer rejects it too). A `cases == 1` fuzz phase does have exactly one,
-            // so it can take part in the handoff.
+            // and a per-phase `params` patch each need a single, well-defined starting world.
+            // Fuzz does a *fresh* setup per case, so a multi-case fuzz phase has no single world
+            // to inherit into, stash from, or patch: reject it here as a run-layer backstop (the
+            // config layer rejects the handoff cases too). A `cases == 1` fuzz phase does have
+            // exactly one world, so it can take part in the handoff and be patched.
             if (resolved.world_source == cross_vm_config::WorldSource::Inherit
-                || resolved.stash_world)
+                || resolved.stash_world
+                || resolved.phase_params.is_some())
                 && cases != 1
             {
                 return Err(RunError::Invalid(
-                    "pipeline handoff requires fuzz cases = 1 (fuzz does a fresh setup per case)"
+                    "pipeline handoff and per-phase params require fuzz cases = 1 \
+                     (fuzz does a fresh setup per case)"
                         .to_string(),
                 ));
             }
 
-            // The `cases == 1` handoff path drives the single case inline (rather than through
-            // `run_one_fuzz_case`, which always does a fresh setup and cannot surface the runner
-            // for stashing), so the obtained start state can be inherited and the ending world
-            // stashed. The seed derivation `sub_seed(base_seed, 0)` is identical to case 0 of the
-            // loop, so a stashing single-case run stays byte-identical to a plain one.
-            if resolved.world_source == cross_vm_config::WorldSource::Inherit || resolved.stash_world
+            // The `cases == 1` handoff/patch path drives the single case inline (rather than
+            // through `run_one_fuzz_case`, which always does a fresh setup, never applies the
+            // phase patch, and cannot surface the runner for stashing), so the obtained start
+            // state can be inherited, patched, and the ending world stashed. The seed derivation
+            // `sub_seed(base_seed, 0)` is identical to case 0 of the loop, so a single-case run
+            // that neither stashes, inherits, nor patches stays byte-identical to a plain one.
+            if resolved.world_source == cross_vm_config::WorldSource::Inherit
+                || resolved.stash_world
+                || resolved.phase_params.is_some()
             {
                 let seed_i = sub_seed(base_seed, 0);
                 tracing::info!(case = 0, seed = seed_i, "fuzz case starting");
@@ -2181,5 +2187,91 @@ mod tests {
             RunError::Setup(msg) => assert!(msg.contains("bad params"), "{msg}"),
             other => panic!("expected RunError::Setup, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn phase_params_patch_a_fresh_single_case_fuzz() {
+        let mut registry = Registry::new();
+        registry.register_persistent_with_patch(
+            "mock",
+            || MockHarness,
+            mock_setup,
+            |world: &mut u32, params: &toml::Table| {
+                if let Some(n) = params.get("add").and_then(|v| v.as_integer()) {
+                    *world += n as u32;
+                }
+                Ok(())
+            },
+        );
+
+        // A Fresh single-case fuzz (cases=1, ops=2, kinds=["Ping"]) with phase_params add = 5.
+        // The single case seeds a fresh world at sub_seed(7, 0), the patch adds 5, then two Ping
+        // ops each add 1. stash_world hands that world to the inheritor scenario below, which
+        // exports it after one more Ping.
+        let donor = {
+            let mut d = resolved_pipeline(
+                fuzz_profile(1, 2, Some(vec!["Ping".to_string()]), None),
+                cross_vm_config::WorldSource::Fresh,
+                true,
+            );
+            d.phase_params = Some(toml::toml! { add = 5 });
+            d
+        };
+        let report = registry
+            .run("mock", &donor, &RunOptions::default())
+            .await
+            .unwrap();
+        assert!(report.failure.is_none());
+
+        let path = temp_export_path("fresh-fuzz-patched");
+        let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Accepted)];
+        let inheritor = resolved_pipeline(
+            scenario_profile_with_export(steps, path.to_str().unwrap()),
+            cross_vm_config::WorldSource::Inherit,
+            false,
+        );
+        registry
+            .run("mock", &inheritor, &RunOptions::default())
+            .await
+            .unwrap();
+        let expected = sub_seed(7, 0) as u32 + 5 + 2 + 1;
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!(expected),
+            "fresh seed + 5 patched + 2 fuzz Ping + 1 scenario Ping"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn multi_case_fuzz_with_params_is_invalid() {
+        let mut registry = Registry::new();
+        registry.register_with_patch(
+            "mock",
+            || MockHarness,
+            mock_setup,
+            |world: &mut u32, params: &toml::Table| {
+                if let Some(n) = params.get("add").and_then(|v| v.as_integer()) {
+                    *world += n as u32;
+                }
+                Ok(())
+            },
+        );
+
+        // fuzz cases=5 with phase_params -> RunError::Invalid (fuzz does a fresh setup per case,
+        // so there is no single world to patch).
+        let mut run = resolved_pipeline(
+            fuzz_profile(5, 1, Some(vec!["Ping".to_string()]), None),
+            cross_vm_config::WorldSource::Fresh,
+            false,
+        );
+        run.phase_params = Some(toml::toml! { add = 5 });
+        let err = registry
+            .run("mock", &run, &RunOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Invalid(_)), "{err:?}");
     }
 }
