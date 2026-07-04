@@ -2,3 +2,7 @@
 //! and `harness-config`. Use raw via [`GenericDomain`], or implement
 //! [`CliDomain`] to add domain config sections, CLI flags, and a custom setup
 //! request type; see the cross-vm framework crate for a worked example.
+
+mod erased;
+
+pub use erased::{ErasedFailure, ErasedReport};
