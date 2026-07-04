@@ -103,14 +103,15 @@ pub trait Harness {
         op: &Self::Operation,
     ) -> Result<Verdict, HarnessError>;
 
-    /// Every operation kind this harness can produce. The default pool [`generate`](Self::generate)
-    /// draws from, and the set a `kinds`-restricted [`Runner`] run picks from. Must be non-empty.
+    /// Every operation kind this harness can produce. The default candidate pool every random
+    /// mode draws from (weighted by [`weight`](Self::weight)), and the set a `kinds`-restricted
+    /// [`Runner`] run picks from. Must be non-empty.
     fn op_kinds(&self) -> Vec<Self::OpKind>;
 
     /// Build a random operation of exactly `kind`, filling its data from `rng` (state-aware via
     /// `world`, e.g. an amount `<=` a user's balance). This is the single data-generation
-    /// primitive: [`generate`](Self::generate) picks a kind and calls this, and per-kind fuzzing
-    /// fixes the kind and calls this repeatedly.
+    /// primitive: every random mode picks a kind (weighted by [`weight`](Self::weight)) and
+    /// calls this, and per-kind fuzzing fixes the kind and calls this repeatedly.
     fn generate_op(
         &self,
         rng: &mut Prng,
@@ -118,14 +119,23 @@ pub trait Harness {
         kind: Self::OpKind,
     ) -> Self::Operation;
 
-    /// Produce the next operation for the mixed modes. Defaults to a uniform choice over
-    /// [`op_kinds`](Self::op_kinds) followed by [`generate_op`](Self::generate_op). Override only
-    /// to bias the kind distribution (e.g. `rng.weighted(..)`); reuse `generate_op` for the data
-    /// so generation logic is not duplicated.
-    fn generate(&self, rng: &mut Prng, world: &Self::World) -> Self::Operation {
-        let kinds = self.op_kinds();
-        let kind = kinds[rng.index(kinds.len())];
-        self.generate_op(rng, world, kind)
+    /// Relative selection weight of `kind` for the current live state. The default is `1` for
+    /// every kind (a uniform mix). Return `0` to exclude a kind from the draw while the state
+    /// makes it meaningless (e.g. `Withdraw` before any deposit exists); it may become nonzero
+    /// again later in the same run. Called freshly before every random draw, so the mix follows
+    /// the `World` as it evolves.
+    ///
+    /// When a run also carries config-supplied static weights (`KindMix::Weighted`, the config
+    /// `weights` table), the effective weight is `static * dynamic` (saturating); either side
+    /// returning `0` excludes the kind. If every candidate kind's effective weight is `0` at a
+    /// draw, the run fails with an `Infra` failure at that step.
+    ///
+    /// Must be deterministic in `(ctx, world, kind)` and must not mutate anything: it runs on
+    /// the seed-pinned generation path, so a nondeterministic weight breaks same-seed
+    /// reproduction. It receives no rng by design.
+    fn weight(&self, ctx: &Self::Ctx, world: &Self::World, kind: Self::OpKind) -> u32 {
+        let _ = (ctx, world, kind);
+        1
     }
 
     /// All invariants attached to this harness.
