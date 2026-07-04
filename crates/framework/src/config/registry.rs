@@ -972,6 +972,8 @@ mod tests {
             shrink_limit: 256,
             artifacts_dir: "target/cross-vm".to_string(),
             json_report: None,
+            world_source: cross_vm_config::WorldSource::Fresh,
+            stash_world: false,
         }
     }
 

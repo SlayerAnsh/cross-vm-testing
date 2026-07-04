@@ -101,6 +101,13 @@ pub struct ResolvedProfile {
     pub artifacts_dir: String,
     /// JSON report output path, `RunOptions.json_report` over the profile's own key.
     pub json_report: Option<String>,
+    /// Where this run's starting `(Ctx, World)` comes from. `Fresh` (the default) calls the
+    /// registered setup fn; `Inherit` takes the pair a donor phase stashed. Set only by the
+    /// CLI's pipeline driver; `resolve_profile` always emits `Fresh`.
+    pub world_source: cross_vm_config::WorldSource,
+    /// Whether a later phase inherits from this run: when true and the run passes, the final
+    /// `(Ctx, World)` is stashed in the harness's session slot instead of being dropped.
+    pub stash_world: bool,
 }
 
 /// Per-kind `native_symbol` default (spec section 4.6), applied here when a `[[chain]]`
@@ -294,6 +301,8 @@ pub fn resolve_profile(
         shrink_limit,
         artifacts_dir,
         json_report,
+        world_source: cross_vm_config::WorldSource::Fresh,
+        stash_world: false,
     })
 }
 
