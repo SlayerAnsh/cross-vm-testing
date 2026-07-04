@@ -67,7 +67,7 @@ pub async fn run_profile_for_test<H, F, S>(
     case: Option<usize>,
     expected_cases: Option<usize>,
 ) where
-    H: Harness + 'static,
+    H: Harness<Ctx = crate::harness::Ctx> + 'static,
     H::Operation: Serialize + DeserializeOwned + 'static,
     H::OpKind: Serialize + DeserializeOwned + Copy + 'static,
     F: Fn() -> H + 'static,
@@ -165,6 +165,7 @@ mod tests {
     struct MockHarness;
 
     impl Harness for MockHarness {
+        type Ctx = Ctx;
         type World = u32;
         type Operation = MockOp;
         type Invariant = MockInvariant;

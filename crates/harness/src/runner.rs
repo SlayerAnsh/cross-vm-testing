@@ -1,8 +1,8 @@
 //! Drives a [`Harness`] over an injected, already-live `(Ctx, World)`.
 //!
-//! The run *shape* is encoded in the runner's type via a phantom [`RunMode`] marker, mirroring the
-//! [`MultiChainEnv<S>`](crate::MultiChainEnv) phase typestate: [`FuzzRunner`], [`InvariantRunner`],
-//! [`EnduranceRunner`], and [`ScenarioRunner`] each expose only the driver method that mode needs.
+//! The run *shape* is encoded in the runner's type via a phantom [`RunMode`] marker, a phase
+//! typestate: [`FuzzRunner`], [`InvariantRunner`], [`EnduranceRunner`], and [`ScenarioRunner`]
+//! each expose only the driver method that mode needs.
 //!
 //! Construction is two-phase. A constructor ([`Runner::fuzz`], [`Runner::endurance`], ...) builds a
 //! *shell* (harness + seed + seeded rng + mode); the developer then builds the live env+world
@@ -19,12 +19,11 @@ use std::time::Duration;
 
 use tokio::time::{sleep, Instant};
 
-use super::ctx::Ctx;
-use harness_core::{
-    op_label, CheckOutcome, Coverage, Failure, FailureKind, HarnessError, OpOutcome, RunReport,
-    Stats, Verdict,
+use crate::outcome::{
+    CheckOutcome, Coverage, Failure, FailureKind, HarnessError, RunReport, Verdict,
 };
-use super::{Harness, Prng};
+use crate::stats::{op_label, OpOutcome, Stats};
+use crate::{Harness, Prng};
 
 /// A run-mode marker. The unit type parameter `M` on [`Runner`] selects which driver method is
 /// available and labels the [`RunReport`].
@@ -175,7 +174,7 @@ impl EnduranceConfig {
 /// state with [`setup`](Runner::setup), then call the mode's driver.
 pub struct Runner<H: Harness, M: RunMode = Fuzz> {
     harness: H,
-    ctx: Option<Ctx>,
+    ctx: Option<H::Ctx>,
     world: Option<H::World>,
     seed: u64,
     rng: Prng,
@@ -224,7 +223,7 @@ impl<H: Harness, M: RunMode> Runner<H, M> {
 
     /// Load the live env and primed world. The one call a macro-driven test must add; returns
     /// `&mut Self` so it can chain into a driver (`runner.setup(ctx, world).run(..)`).
-    pub fn setup(&mut self, ctx: Ctx, world: H::World) -> &mut Self {
+    pub fn setup(&mut self, ctx: H::Ctx, world: H::World) -> &mut Self {
         self.ctx = Some(ctx);
         self.world = Some(world);
         self
@@ -251,14 +250,14 @@ impl<H: Harness, M: RunMode> Runner<H, M> {
         self.world.as_ref().expect(NOT_SET_UP)
     }
 
-    /// Mutably borrow the loaded env, e.g. to poke a chain directly. Panics if not set up.
-    pub fn ctx_mut(&mut self) -> &mut Ctx {
+    /// Mutably borrow the loaded ctx, e.g. to poke the system directly. Panics if not set up.
+    pub fn ctx_mut(&mut self) -> &mut H::Ctx {
         self.ctx.as_mut().expect(NOT_SET_UP)
     }
 
     /// Recover the live env + world after a run (e.g. to hand off or chain a second run). Panics if
     /// [`setup`](Runner::setup) has not been called.
-    pub fn into_parts(self) -> (Ctx, H::World) {
+    pub fn into_parts(self) -> (H::Ctx, H::World) {
         (self.ctx.expect(NOT_SET_UP), self.world.expect(NOT_SET_UP))
     }
 }
@@ -478,6 +477,12 @@ impl<H: Harness> Runner<H, Endurance> {
             heartbeat,
             stop,
         } = cfg;
+        if advance_blocks.is_some() {
+            tracing::debug!(
+                "advance_blocks is set: ensure this harness overrides `Harness::advance` \
+                 (the default is a no-op)"
+            );
+        }
         let Self {
             harness,
             ctx,
@@ -795,7 +800,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> Vec<H::Operation>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         self.shrink_with(failing, 1, rebuild).await
     }
@@ -838,7 +843,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> Vec<H::Operation>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         self.shrink_with_limit(failing, check_every, DEFAULT_SHRINK_LIMIT, rebuild)
             .await
@@ -862,7 +867,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> Vec<H::Operation>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         // Park stats for the whole shrink: replays are throwaway diagnostics-wise, and the caller's
         // tallies must keep describing the run they came from.
@@ -883,7 +888,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> Vec<H::Operation>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         // Establish the reference failure the shrink must preserve.
         let (ctx, world) = rebuild().await;
@@ -978,7 +983,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> Option<bool>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         if *budget == 0 {
             tracing::warn!(
@@ -1011,7 +1016,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> RunReport<H::Operation>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         self.run_and_shrink_with(ops, 1, rebuild).await
     }
@@ -1027,7 +1032,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> RunReport<H::Operation>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         let report = self.run_fixed(ops, Scenario::LABEL, check_every).await;
         if report.passed() {
@@ -1206,7 +1211,7 @@ impl<H: Harness> OpSource<'_, H> {
 #[allow(clippy::too_many_arguments)]
 async fn drive<H: Harness>(
     harness: &H,
-    ctx: &mut Ctx,
+    ctx: &mut H::Ctx,
     world: &mut H::World,
     rng: &mut Prng,
     mut source: OpSource<'_, H>,
@@ -1241,7 +1246,7 @@ async fn drive<H: Harness>(
 /// final sweep.
 async fn sweep<H: Harness>(
     harness: &H,
-    ctx: &mut Ctx,
+    ctx: &mut H::Ctx,
     world: &mut H::World,
     coverage: &mut Coverage,
 ) -> Result<(), FailureKind> {
@@ -1282,7 +1287,7 @@ async fn sweep<H: Harness>(
 /// [`Runner::run_steps`], which inspects it against a [`ScenarioStep`]'s [`Expectation`].
 async fn apply_op<H: Harness>(
     harness: &H,
-    ctx: &mut Ctx,
+    ctx: &mut H::Ctx,
     world: &mut H::World,
     op: &H::Operation,
     mut stats: Option<&mut Stats>,
@@ -1327,7 +1332,7 @@ async fn apply_op<H: Harness>(
 /// function's behavior before [`apply_op`] was split out.
 async fn step<H: Harness>(
     harness: &H,
-    ctx: &mut Ctx,
+    ctx: &mut H::Ctx,
     world: &mut H::World,
     op: &H::Operation,
     check: bool,

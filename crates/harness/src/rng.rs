@@ -8,7 +8,7 @@
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-/// A seeded pseudo-random generator handed to `Harness::generate`.
+/// A seeded pseudo-random generator handed to [`Harness::generate`](crate::Harness::generate).
 pub struct Prng(ChaCha8Rng);
 
 impl Prng {

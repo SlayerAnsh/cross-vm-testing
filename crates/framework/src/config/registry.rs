@@ -183,7 +183,7 @@ impl Registry {
     /// stored past that point.
     pub fn register<H, F, S>(&mut self, name: &str, harness: F, setup: S) -> &mut Self
     where
-        H: Harness + 'static,
+        H: Harness<Ctx = crate::harness::Ctx> + 'static,
         H::Operation: serde::Serialize + DeserializeOwned + 'static,
         H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
         F: Fn() -> H + 'static,
@@ -210,7 +210,7 @@ impl Registry {
     /// happens to hold something sensitive would export it verbatim.
     pub fn register_persistent<H, F, S>(&mut self, name: &str, harness: F, setup: S) -> &mut Self
     where
-        H: Harness + 'static,
+        H: Harness<Ctx = crate::harness::Ctx> + 'static,
         H::Operation: serde::Serialize + DeserializeOwned + 'static,
         H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
         H::World: serde::Serialize + 'static,
@@ -238,7 +238,7 @@ impl Registry {
         export: Option<WorldExportFn<H::World>>,
     ) -> &mut Self
     where
-        H: Harness + 'static,
+        H: Harness<Ctx = crate::harness::Ctx> + 'static,
         H::Operation: serde::Serialize + DeserializeOwned + 'static,
         H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
         F: Fn() -> H + 'static,
@@ -350,7 +350,7 @@ impl<K> KindSelection<K> {
 /// Parses one profile's `kinds`/`weights` against `H::OpKind`. Precedence matches spec section
 /// 6.1 (`weights` beats `kinds` beats the harness default); `cross-vm-config`'s structural
 /// validation already rejects a profile that sets both, so this is belt and suspenders.
-pub(super) fn parse_kind_selection<H: Harness>(
+pub(super) fn parse_kind_selection<H: Harness<Ctx = crate::harness::Ctx>>(
     kinds: &Option<Vec<String>>,
     weights: &Option<BTreeMap<String, u32>>,
 ) -> Result<KindSelection<H::OpKind>, ValidationError>
@@ -380,7 +380,9 @@ where
 /// `serde::Deserializer`, so a bare kind name string deserializes exactly as it would from
 /// `kinds = ["Deposit"]` in TOML. An unknown name surfaces serde's own "unknown variant, expected
 /// one of ..." message, which already lists the valid names.
-fn parse_kind<H: Harness>(name: &str) -> Result<H::OpKind, ValidationError>
+fn parse_kind<H: Harness<Ctx = crate::harness::Ctx>>(
+    name: &str,
+) -> Result<H::OpKind, ValidationError>
 where
     H::OpKind: DeserializeOwned,
 {
@@ -390,7 +392,9 @@ where
 
 /// Type-checks one profile's `kinds`/`weights`/scenario `op`s against `H`, without running or
 /// touching a chain. Powers [`Registry::validate`].
-fn validate_profile<H: Harness>(profile: &cross_vm_config::Profile) -> Result<(), ValidationError>
+fn validate_profile<H: Harness<Ctx = crate::harness::Ctx>>(
+    profile: &cross_vm_config::Profile,
+) -> Result<(), ValidationError>
 where
     H::OpKind: DeserializeOwned,
     H::Operation: DeserializeOwned,
@@ -514,7 +518,7 @@ async fn maybe_shrink<H, F, S>(
     seed: u64,
 ) -> (RunReport<H::Operation>, bool)
 where
-    H: Harness,
+    H: Harness<Ctx = crate::harness::Ctx>,
     F: Fn() -> H,
     S: Fn(SetupRequest) -> SetupFuture<'static, H::World>,
 {
@@ -566,7 +570,7 @@ pub(super) async fn run_one_fuzz_case<H, F, S>(
     case: usize,
 ) -> Result<(RunReport<H::Operation>, Option<Stats>, u64), RunError>
 where
-    H: Harness,
+    H: Harness<Ctx = crate::harness::Ctx>,
     F: Fn() -> H,
     S: Fn(SetupRequest) -> SetupFuture<'static, H::World>,
 {
@@ -600,7 +604,7 @@ async fn run_profile<H, F, S>(
     export: Option<&WorldExportFn<H::World>>,
 ) -> Result<ErasedReport, RunError>
 where
-    H: Harness,
+    H: Harness<Ctx = crate::harness::Ctx>,
     H::Operation: serde::Serialize + DeserializeOwned,
     H::OpKind: DeserializeOwned + Copy,
     F: Fn() -> H,
@@ -847,6 +851,7 @@ mod tests {
     struct MockHarness;
 
     impl Harness for MockHarness {
+        type Ctx = Ctx;
         type World = u32;
         type Operation = MockOp;
         type Invariant = MockInvariant;

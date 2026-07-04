@@ -47,6 +47,7 @@ use crate::harness::{FailureKind, Harness};
 /// # use cross_vm_framework::harness::{Ctx, HarnessError};
 /// # struct MyHarness;
 /// # impl cross_vm_framework::harness::Harness for MyHarness {
+/// #     type Ctx = Ctx;
 /// #     type World = ();
 /// #     type Operation = ();
 /// #     type Invariant = ();
@@ -92,7 +93,7 @@ impl Cli {
     /// [`SetupRequest`]).
     pub fn register<H, F, S>(mut self, name: &str, harness: F, setup: S) -> Self
     where
-        H: Harness + 'static,
+        H: Harness<Ctx = crate::harness::Ctx> + 'static,
         H::Operation: serde::Serialize + serde::de::DeserializeOwned + 'static,
         H::OpKind: serde::Serialize + serde::de::DeserializeOwned + Copy + 'static,
         F: Fn() -> H + 'static,
@@ -110,7 +111,7 @@ impl Cli {
     /// clear error.
     pub fn register_persistent<H, F, S>(mut self, name: &str, harness: F, setup: S) -> Self
     where
-        H: Harness + 'static,
+        H: Harness<Ctx = crate::harness::Ctx> + 'static,
         H::Operation: serde::Serialize + serde::de::DeserializeOwned + 'static,
         H::OpKind: serde::Serialize + serde::de::DeserializeOwned + Copy + 'static,
         H::World: serde::Serialize + 'static,
@@ -1279,6 +1280,7 @@ stop_on_failure = true
     struct MockHarness;
 
     impl Harness for MockHarness {
+        type Ctx = Ctx;
         type World = u32;
         type Operation = MockOp;
         type Invariant = MockInvariant;

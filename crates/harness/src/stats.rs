@@ -2,7 +2,7 @@
 //!
 //! [`Stats`] answers "what did the fuzzer actually exercise?" — the failure mode where 80% of
 //! generated swaps revert and the run tested almost nothing. It is **off by default**: a run only
-//! collects it when the test opts in with `Runner::with_stats`,
+//! collects it when the test opts in with [`Runner::with_stats`](crate::Runner::with_stats),
 //! so the zero-config path pays nothing.
 //!
 //! Operations are grouped by **variant name** (the leading token of their `Debug` rendering, e.g.
@@ -15,11 +15,9 @@ use std::time::Duration;
 
 /// What `apply` did with one operation, as observed by the runner.
 ///
-/// Implementation detail, not part of the stable surface: it is `pub` only so the framework's
-/// not-yet-moved `runner.rs` can name it for one release, and reverts to `pub(crate)` once the
-/// runner moves into this crate. Hidden from the docs for that reason.
-#[doc(hidden)]
-pub enum OpOutcome<'a> {
+/// Implementation detail, not part of the stable surface: crate-private, named only by the
+/// in-crate [`runner`](crate::Runner) when it records a [`Stats`] entry.
+pub(crate) enum OpOutcome<'a> {
     /// The op was accepted (a legitimate success).
     Accepted,
     /// The op was rejected legitimately; the string is the revert reason.
@@ -153,11 +151,9 @@ pub struct Stats {
 impl Stats {
     /// Record one `apply` call: its op `label`, wall-clock `elapsed`, and `outcome`.
     ///
-    /// Implementation detail, not part of the stable surface: `pub` only so the framework's
-    /// not-yet-moved `runner.rs` can drive it for one release, and reverts to `pub(crate)` once
-    /// the runner moves into this crate. Hidden from the docs for that reason.
-    #[doc(hidden)]
-    pub fn record(&mut self, label: &str, elapsed: Duration, outcome: OpOutcome<'_>) {
+    /// Implementation detail, not part of the stable surface: crate-private, driven only by the
+    /// in-crate [`runner`](crate::Runner).
+    pub(crate) fn record(&mut self, label: &str, elapsed: Duration, outcome: OpOutcome<'_>) {
         let stat = self.ops.entry(label.to_string()).or_default();
         let ns = elapsed.as_nanos();
         if stat.count == 0 || ns < stat.min_ns {

@@ -149,7 +149,8 @@ pub struct Failure<Op> {
     pub step: usize,
     /// The operation that triggered the failure. `None` for a pre-operation failure.
     pub op: Option<Op>,
-    /// The full operation history up to and including the failing op, for `Runner::replay`.
+    /// The full operation history up to and including the failing op, for
+    /// [`Runner::replay`](crate::Runner::replay).
     pub history: Vec<Op>,
     /// What went wrong.
     pub kind: FailureKind,

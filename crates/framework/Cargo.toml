@@ -10,8 +10,8 @@ description = "Cross-VM testing framework: hold and drive CosmWasm, EVM, Solana,
 [dependencies]
 cross-vm-core.workspace = true
 cross-vm-macros.workspace = true
-# The dependency-free half of the property harness (rng + per-op stats); the rest lands here in
-# later tasks.
+# The standalone property harness: the `Harness` trait, the mode-typed `Runner`, rng, per-op
+# stats, and outcome types. Re-exported through `crate::harness` and pinned to the cross-VM `Ctx`.
 harness-core.workspace = true
 cross-vm-cosmwasm = { workspace = true, optional = true }
 cross-vm-solidity = { workspace = true, optional = true }
@@ -21,9 +21,9 @@ thiserror.workspace = true
 tokio.workspace = true
 # Emit per-operation / per-invariant debug logs through the tracing facade.
 tracing.workspace = true
-# Property testing: portable, seedable RNG (ChaCha) for deterministic, replayable runs.
+# `cli`-only helper: draws a fresh `u64` base seed for a `Random` seed spec (`resolve_base_seed`).
+# The deterministic run RNG (ChaCha) now lives entirely in `harness-core`.
 rand.workspace = true
-rand_chacha.workspace = true
 # `cli`-only: the declarative run-config schema the `config` module bridges into framework types.
 cross-vm-config = { workspace = true, optional = true }
 # `cli`-only: CLI argument parsing (Task 7).
