@@ -182,15 +182,6 @@ impl Harness for Bank {
         }
     }
 
-    fn generate(&self, rng: &mut Prng, w: &World) -> Op {
-        let kind = if rng.weighted(&[1, 1]) == 0 {
-            OpKind::Deposit
-        } else {
-            OpKind::Withdraw
-        };
-        self.generate_op(rng, w, kind)
-    }
-
     fn invariants(&self) -> Vec<Inv> {
         vec![Inv::ModelMatches, Inv::Bounded, Inv::Untriggered]
     }

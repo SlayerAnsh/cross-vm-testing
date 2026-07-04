@@ -156,14 +156,12 @@ impl Harness for PingPongHarness {
         }
     }
 
-    // Bias toward pings (relay every ~third op) so packets accumulate and then drain.
-    fn generate(&self, rng: &mut Prng, w: &PingPongWorld) -> PingPongOp {
-        let kind = if rng.chance(0.34) {
-            PingPongOpKind::Relay
-        } else {
-            PingPongOpKind::Ping
-        };
-        self.generate_op(rng, w, kind)
+    // Bias toward pings (relay roughly every third op) so packets accumulate and then drain.
+    fn weight(&self, _ctx: &Ctx, _w: &PingPongWorld, kind: PingPongOpKind) -> u32 {
+        match kind {
+            PingPongOpKind::Ping => 2,
+            PingPongOpKind::Relay => 1,
+        }
     }
 
     fn invariants(&self) -> Vec<PingPongInv> {

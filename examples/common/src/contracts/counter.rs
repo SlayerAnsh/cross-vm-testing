@@ -356,14 +356,12 @@ impl Harness for CounterHarness {
         }
     }
 
-    // Bias toward single increments (25% double).
-    fn generate(&self, rng: &mut Prng, w: &CounterWorld) -> CounterOp {
-        let kind = if rng.chance(0.25) {
-            CounterOpKind::IncrementTwice
-        } else {
-            CounterOpKind::Increment
-        };
-        self.generate_op(rng, w, kind)
+    // Bias toward single increments (double increments drawn 1 in 4).
+    fn weight(&self, _ctx: &Ctx, _w: &CounterWorld, kind: CounterOpKind) -> u32 {
+        match kind {
+            CounterOpKind::Increment => 3,
+            CounterOpKind::IncrementTwice => 1,
+        }
     }
 
     fn invariants(&self) -> Vec<CounterInv> {

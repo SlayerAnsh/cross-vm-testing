@@ -333,15 +333,14 @@ impl Harness for VaultHarness {
         }
     }
 
-    // Bias the kind mix (deposit-heavy); reuse `generate_op` for the per-kind data.
-    fn generate(&self, rng: &mut Prng, w: &VaultWorld) -> VaultOp {
-        let kind = match rng.weighted(&[40, 25, 20, 15]) {
-            0 => VaultOpKind::Deposit,
-            1 => VaultOpKind::Withdraw,
-            2 => VaultOpKind::Borrow,
-            _ => VaultOpKind::Repay,
-        };
-        self.generate_op(rng, w, kind)
+    // Deposit-heavy kind mix; `generate_op` still owns all per-kind data.
+    fn weight(&self, _ctx: &Ctx, _w: &VaultWorld, kind: VaultOpKind) -> u32 {
+        match kind {
+            VaultOpKind::Deposit => 40,
+            VaultOpKind::Withdraw => 25,
+            VaultOpKind::Borrow => 20,
+            VaultOpKind::Repay => 15,
+        }
     }
 
     fn invariants(&self) -> Vec<VaultInv> {
