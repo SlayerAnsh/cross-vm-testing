@@ -23,7 +23,8 @@ tracing-subscriber.workspace = true
 rand.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+serde = { workspace = true, features = ["derive"] }
 
 [lints]
 workspace = true
