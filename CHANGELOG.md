@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Changed (dynamic operation weights)
+
+* `cross-vm-framework`: operations now carry dynamic selection weights. `Harness::weight(ctx, world, kind)` (provided, default `1`) sets each kind's relative draw weight per draw, recomputed from the live world, so the mix shifts as state evolves; `0` excludes a kind while the state makes it meaningless. Every random mode (fuzz, invariant, endurance) draws through one weighted path: config supplied static weights (`KindMix::Weighted`) multiply the dynamic weight, `kinds` restricted and default pools use static weight `1`. A draw where every effective weight is `0` fails the run as `Infra`. `Harness::generate` is removed; kind biasing that previously overrode it now implements `weight` (see the counter, ping pong, and vault examples). Scenario, replay, and shrink runs use fixed operation lists and ignore weights.
+
 ### Changed (harness extraction: standalone `harness-core` / `harness-core-macros` crates)
 
 * The property-testing harness split out of `cross-vm-framework` into two new, chain-agnostic crates: `harness-core` (`crates/harness`: the `Harness` trait, the mode-typed `Runner` and its fuzz/invariant/endurance/scenario drivers, the seedable `Prng`, per-op `Stats`, and the outcome types `Verdict`/`HarnessError`/`CheckOutcome`/`RunReport`/`Coverage`) and `harness-core-macros` (`crates/harness-macros`: `#[fuzz_runner]`/`#[invariant_runner]`/`#[endurance_runner]`). Neither crate depends on any chain type; `crates/harness/README.md` and `crates/harness/tests/pure_function.rs` show the whole crate driven with a plain `u8` counter and `Ctx = ()`, no `cross-vm-framework` in sight. `cross-vm-framework::harness` re-exports every `harness-core` type unchanged and adds only the two chain-shaped pieces: `Ctx` (a started `MultiChainEnv`) and `classify` (the response classifier). `cross-vm-macros` keeps `config_runner`; the three runner attribute macros left it for `harness-core-macros`, re-exported from `cross_vm_framework::prelude` as before.

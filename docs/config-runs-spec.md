@@ -24,7 +24,7 @@ Both come from the current code and shape everything below.
 
 **The stack is single threaded and `!Send` by construction.** `WalletFactory` is shared as `Rc`, and the existing script binary runs on `#[tokio::main(flavor = "current_thread")]`. Every erased future in the registry is therefore a non `Send` local boxed future (`Pin<Box<dyn Future<Output = T> + 'a>>`). No `futures` crate dependency is needed, and parallel workers inside one process are off the table (see section 12).
 
-**Recorded seeds must keep reproducing across releases.** The comment on `OpSource` in `crates/harness/src/runner.rs` (the standalone `harness-core` crate) pins the rng draw order, guarded by the golden seed test in `mechanics.rs`. Config supplied weights are a new code path (a new `OpSource` arm), never a change to the existing `Generated` or `Fixed` arms.
+**Recorded seeds must keep reproducing across releases.** The comment on `OpSource` in `crates/harness/src/runner.rs` (the standalone `harness-core` crate) pins the rng draw order (weighted kind index first, then op data), guarded by the golden seed tests in `mechanics.rs`. `Harness::weight` never draws from the rng, so dynamic weights change which kind is likely, never how many rng values a draw consumes.
 
 ## 4. Config file schema
 
@@ -333,13 +333,14 @@ How generated runs pick the next op kind becomes explicit:
 ```rust
 /// How generated runs pick the next op kind.
 pub enum KindMix<'a, K> {
-    /// Harness defined: calls Harness::generate, so a harness override (the vault's
-    /// weighted generate) still applies. Config emits this when neither kinds nor
-    /// weights is set.
+    /// Every kind from Harness::op_kinds, static weight 1 each (the mix is then purely the
+    /// harness's dynamic weights; with the default weight this is a uniform draw). Config
+    /// emits this when neither kinds nor weights is set.
     Harness,
-    /// Uniform over a subset (the existing kinds path).
+    /// A subset of kinds, static weight 1 each (uniform up to dynamic weights).
     Restricted(&'a [K]),
-    /// Config supplied weights: rng.weighted over the pairs, then generate_op.
+    /// Config supplied static weights per kind, in sorted-kind-name order (the loader hands
+    /// weights as a BTreeMap). Each static weight is multiplied per draw by Harness::weight.
     Weighted(&'a [(K, u32)]),
 }
 
@@ -356,7 +357,7 @@ impl<H: Harness, M: Sequential> Runner<H, M> {
 
 Implementation constraint: the weighted path is one new arm in `OpSource` (or a third variant `Weighted { pairs, remaining }`). The existing `Generated` and `Fixed` arms keep their exact draw sequences so the golden seed test in `mechanics.rs` passes untouched, and the weighted path gets its own golden test so it is pinned from birth. The iteration order of config supplied weight pairs is the sorted kind name order (the loader hands over a `BTreeMap`), documented so the same file always yields the same op stream.
 
-Precedence, documented in the schema: `weights` beats `kinds` beats the harness `generate` override. A zero total weight or an empty pair list produces the same infra failure an empty `kinds` slice already produces.
+Precedence, documented in the schema: `weights` beats `kinds`, and both compose with the harness's dynamic `weight` (effective weight is static times dynamic, so a dynamic 0 always excludes a kind). A zero total static weight or an empty pair list produces the same infra failure an empty `kinds` slice already produces; a mix whose *effective* weights are all 0 for the current state fails the run at that draw.
 
 The endurance driver gains the same `mix` parameter through its config (section 6.4).
 

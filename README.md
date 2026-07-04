@@ -200,7 +200,7 @@ A worked cross VM flow, a CosmWasm/EVM ping pong relayer driven through one `Mul
 
 ## Property testing harness
 
-You implement one `Harness` (a `World` of persisted bookkeeping, an `Operation` enum, an `Invariant` enum, an `OpKind` enum of the data free operation kinds, and `apply` / `generate_op` / `check`). Generation is decomposed: `generate_op(rng, world, kind)` builds a random instance of one kind, and `generate` (a provided default) picks a kind and calls it. Each test builds its own `(Ctx, World)` (deploy, prime the model, set up op preconditions) and loads it into a mode typed runner with `r.setup(ctx, world)`. The runner sits on top of the env, it does not replace it.
+You implement one `Harness` (a `World` of persisted bookkeeping, an `Operation` enum, an `Invariant` enum, an `OpKind` enum of the data free operation kinds, and `apply` / `generate_op` / `check`). Generation is decomposed: `generate_op(rng, world, kind)` builds a random instance of one kind, and the runner picks each kind by weight. `weight(ctx, world, kind)` (a provided default returning 1) sets the relative draw weight per kind for the current state, so a harness can bias the mix or return 0 to exclude a kind until the world makes it meaningful. Each test builds its own `(Ctx, World)` (deploy, prime the model, set up op preconditions) and loads it into a mode typed runner with `r.setup(ctx, world)`. The runner sits on top of the env, it does not replace it.
 
 That one harness then drives several runner types:
 
