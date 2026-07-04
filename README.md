@@ -276,22 +276,24 @@ Two honest v1 limits remain in the mock. The mock's `CREATE` / `CREATE2` use rev
 | `#[invariant_runner]` | attribute | One `#[tokio::test]` with a seeded `InvariantRunner` |
 | `#[endurance_runner]` | attribute | One `#[tokio::test]` with a seeded `EnduranceRunner` |
 
-Five are re-exported from `cross_vm_framework::prelude`. The two `Cw*Fns` derives are applied on a contract's message enums (often in a separate crate compiled to wasm), so they are named directly as `cross_vm_macros::CwExecuteFns` / `CwQueryFns` behind a `cross-vm` feature. The generated code names framework types unqualified, so any invocation site needs `use cross_vm_framework::prelude::*;` in scope.
+Five are re-exported from `cross_vm_framework::prelude`. The three runner attribute macros live in the standalone `harness-core-macros` crate (the prelude re-exports them directly, since they know nothing about chains); the rest are defined in `cross-vm-macros`. The two `Cw*Fns` derives are applied on a contract's message enums (often in a separate crate compiled to wasm), so they are named directly as `cross_vm_macros::CwExecuteFns` / `CwQueryFns` behind a `cross-vm` feature. The generated code names framework types unqualified, so any invocation site needs `use cross_vm_framework::prelude::*;` in scope.
 
 ## Workspace layout
 
 ```
 crates/
-  core/       cross-vm-core      shared ChainProvider / ChainSpec traits, ChainKind, CrossVmError, FundError
-  cosmwasm/   cross-vm-cosmwasm  CwMockProvider (cw-multi-test), CwRpcProvider (live reads), CwChain, CwAsset
-  solidity/   cross-vm-solidity  EvmMockProvider (revm), EvmRpcProvider (live reads), EvmChain, EvmAsset
-  solana/     cross-vm-solana    SvmMockProvider (litesvm), SvmRpcProvider (live reads), SvmChain, SvmAsset
-  tron/       cross-vm-tron      TronMockProvider (revm + TVM layers), TronRpcProvider (live java-tron over TronGrid HTTP), TronChain, TronAsset
-  macros/     cross-vm-macros    proc-macros: cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, runners
-  framework/  cross-vm-framework MultiChainEnv (umbrella over all VMs), the Harness runners, prelude
+  core/           cross-vm-core         shared ChainProvider / ChainSpec traits, ChainKind, CrossVmError, FundError
+  cosmwasm/       cross-vm-cosmwasm     CwMockProvider (cw-multi-test), CwRpcProvider (live reads), CwChain, CwAsset
+  solidity/       cross-vm-solidity     EvmMockProvider (revm), EvmRpcProvider (live reads), EvmChain, EvmAsset
+  solana/         cross-vm-solana       SvmMockProvider (litesvm), SvmRpcProvider (live reads), SvmChain, SvmAsset
+  tron/           cross-vm-tron         TronMockProvider (revm + TVM layers), TronRpcProvider (live java-tron over TronGrid HTTP), TronChain, TronAsset
+  harness/        harness-core          standalone, VM agnostic property testing runner: the Harness trait, mode typed Runner, rng, stats, outcome types
+  harness-macros/ harness-core-macros   proc-macros for harness-core: fuzz_runner, invariant_runner, endurance_runner
+  macros/         cross-vm-macros       proc-macros: cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, config_runner
+  framework/      cross-vm-framework    MultiChainEnv (umbrella over all VMs), a Ctx/classify layer over harness-core, prelude
 ```
 
-Dependency trees are isolated per crate, so building or testing one VM does not pull the others. Each VM crate carries a `chains` module with predefined chain constants. The `cross-vm-framework` crate re-exports everything and adds the multi chain `MultiChainEnv` and the property testing harness.
+Dependency trees are isolated per crate, so building or testing one VM does not pull the others. Each VM crate carries a `chains` module with predefined chain constants. `harness-core` is VM agnostic and knows nothing about chains; `cross-vm-framework` re-exports everything, adds the multi chain `MultiChainEnv`, and pins `harness-core`'s generic `Ctx` to a started multi-chain environment for the property testing harness.
 
 Example crates and contract sources live outside the root workspace:
 

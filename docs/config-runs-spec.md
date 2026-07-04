@@ -24,7 +24,7 @@ Both come from the current code and shape everything below.
 
 **The stack is single threaded and `!Send` by construction.** `WalletFactory` is shared as `Rc`, and the existing script binary runs on `#[tokio::main(flavor = "current_thread")]`. Every erased future in the registry is therefore a non `Send` local boxed future (`Pin<Box<dyn Future<Output = T> + 'a>>`). No `futures` crate dependency is needed, and parallel workers inside one process are off the table (see section 12).
 
-**Recorded seeds must keep reproducing across releases.** The comment on `OpSource` in `crates/framework/src/harness/runner.rs` pins the rng draw order, guarded by the golden seed test in `mechanics.rs`. Config supplied weights are a new code path (a new `OpSource` arm), never a change to the existing `Generated` or `Fixed` arms.
+**Recorded seeds must keep reproducing across releases.** The comment on `OpSource` in `crates/harness/src/runner.rs` (the standalone `harness-core` crate) pins the rng draw order, guarded by the golden seed test in `mechanics.rs`. Config supplied weights are a new code path (a new `OpSource` arm), never a change to the existing `Generated` or `Fixed` arms.
 
 ## 4. Config file schema
 
