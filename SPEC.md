@@ -122,6 +122,17 @@ The harness itself does not build the environment. Each test builds its own `(Ct
 
 The fuzz, invariant, and endurance runs are attribute macros (`#[fuzz_runner]`, `#[invariant_runner]`, `#[endurance_runner]`) that inject a seeded, mode typed runner shell into a `#[runner]` argument; the developer writes setup, the `run(..)` call, and the asserts in the body. `#[fuzz_runner]` fans out into one `#[tokio::test]` per case (case `i` seeded by `sub_seed(seed, i)`, so a flagged case re-runs by name); the others emit one test each. A negative seed picks a fresh random seed per run and prints it for reproducibility. Invariants whose precondition has not happened yet return `CheckOutcome::Skipped` rather than failing.
 
+The config driven CLI (`docs/config-runs-spec.md`) layers a pipeline shape over the same harness: `[suite.<name>]` can declare `[[suite.<name>.phases]]`, an ordered list of profiles where a later phase names an earlier one in `needs` (skipped unless the dependency passed) and, with `world = "inherit"`, continues from the exact `(Ctx, World)` that donor phase ended with rather than a fresh setup.
+
+```toml
+[[suite.progressive.phases]]
+profile = "mixed-after-deposits"
+needs = ["deposit-soak"]
+world = "inherit"
+```
+
+See `docs/config-runs-spec.md` section 4.7 for the full phase schema and its structural rules.
+
 ### Predefined chains
 
 Each VM crate defines its own `ChainInfo` struct (with VM specific fields) implementing `ChainSpec`, plus constants in its `chains` module. The two construction styles are equivalent:

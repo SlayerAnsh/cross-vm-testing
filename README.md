@@ -231,6 +231,22 @@ Case `i` is seeded by `sub_seed(seed, i)`, so a flagged case re-runs in isolatio
 
 In the example crate the heavier runs are opt in so the default `cargo test` stays fast: the fuzz, invariant, and endurance tests sit behind the `fuzz`, `invariant`, and `endurance` cargo features, while the scenario (rstest matrix) tests and the runner mechanics self tests always run. See `examples/cross-vm-tests/tests/harness/` for a multi chain counter, a DeFi vault, and the runner mechanics.
 
+A config file's `[suite.<name>]` can also chain profiles into a dependency gated pipeline, with a later phase continuing from an earlier one's finished state instead of a fresh setup:
+
+```toml
+[suite.progressive]
+
+  [[suite.progressive.phases]]
+  profile = "deposit-soak"
+
+  [[suite.progressive.phases]]
+  profile = "mixed-after-deposits"
+  needs = ["deposit-soak"]
+  world = "inherit"
+```
+
+See `docs/config-runs-spec.md` section 4.7 for the phase schema and structural rules, and `examples/cross-vm-tests/vault.cross-vm.toml`'s `progressive` suite for the checked in, runnable version.
+
 ## Wallets
 
 Mnemonics are the only secret, and they live in a `.env` (gitignored). Everything else, the wallet roster (labels, account indices, how each wallet sources its key), is a compile time const built with `define_wallet_roster!`, resolved by a single shared `WalletFactory`. Each roster row picks one source:

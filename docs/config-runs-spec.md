@@ -141,7 +141,7 @@ stop_on_failure = false
 | `[env]` | no | default environment request for every profile (section 6.2) |
 | `[defaults]` | no | table shallow merged under every profile, profile keys win |
 | `[profile.<name>]` | at least one | one runnable configuration |
-| `[suite.<name>]` | no | ordered list of profile names plus `stop_on_failure` (bool, default false) |
+| `[suite.<name>]` | no | ordered pipeline of phases (`[[suite.<name>.phases]]`, section 4.7) plus `stop_on_failure` (bool, default false). The legacy `profiles = [...]` list is sugar for dependency free, fresh world phases (updated: see 4.7) |
 | `[replay]` | no | provenance metadata written by the artifact writer, ignored by the run schema (section 10) |
 
 There is no `single` mode. A scenario with one step is the same thing.
@@ -255,6 +255,42 @@ Each `[[chain]]` entry declares one chain the framework builds via `build_chain`
 **Preset equivalence.** The `[[chain]]` entries in the full example (section 4.1) are equivalent to today's `OSMOSIS`, `ETHEREUM`, and `SOLANA_DEVNET` presets, but with config supplied `rpc_url` and no Rust edit to switch endpoints.
 
 **Compiled VM boundary.** `kind` must be one of the four backends compiled into the framework. Config cannot introduce a new VM; that requires a new crate with a `ChainProvider` implementation, `WalletDeriver`, and an `AnyChain` variant.
+
+### 4.7 Pipeline suites: `[[suite.<name>.phases]]`
+
+A suite can express an ordered pipeline of phases instead of (or in place of) the legacy flat `profiles` list, so a later phase can require an earlier one to have passed, and optionally continue from the exact `(Ctx, World)` the earlier phase ended with, rather than paying a fresh setup again.
+
+```toml
+[suite.progressive]
+
+  [[suite.progressive.phases]]
+  profile = "deposit-soak"
+
+  [[suite.progressive.phases]]
+  profile = "mixed-after-deposits"
+  needs = ["deposit-soak"]
+  world = "inherit"
+```
+
+Per phase keys:
+
+| key | type | default | meaning |
+|---|---|---|---|
+| `profile` | string | required | a `[profile.<name>]` in the same config file |
+| `needs` | array of phase profile names | empty | earlier phases in this suite that must have passed; a failed or skipped dependency skips this phase |
+| `world` | `"fresh"` \| `"inherit"` | `"fresh"` | `"fresh"` builds a new environment via the registered setup fn (today's behavior); `"inherit"` starts from the live environment and world the donor phase (the single `needs` entry) finished with |
+
+Structural rules, checked at load time (a violation is a hard config error, `cross-vm validate` exit code 3):
+
+| rule | detail |
+|---|---|
+| declaration order is execution order | `needs` may only name a phase declared earlier in the same suite; a self reference or a forward reference is rejected |
+| unique phase profiles | a profile may appear as at most one phase within a suite, so `needs` entries name it unambiguously |
+| `world = "inherit"` arity | requires exactly one `needs` entry, the donor |
+| single setup ends | both the donor and the inheriting phase must build exactly one starting world: `invariant`, `endurance`, `scenario`, or `fuzz` with `cases == 1`. A multi case fuzz fans out into many independent worlds, so it can neither donate nor consume a single inherited world |
+| one inheritor per donor | a donor may feed at most one inheriting phase; two phases inheriting from the same donor is a hard error (state forking is not implemented in this milestone; a later replay based fork is tracked separately) |
+
+A skipped or failed dependency skips the dependent phase entirely; a skip contributes nothing to the suite's combined exit code (only an actual failure does). The legacy `profiles = [a, b]` sugar is normalized into fresh, dependency free phases (`needs = []`, `world = "fresh"`) by the loader, so a config written before this feature keeps behaving exactly as it did.
 
 ## 5. Loader pipeline: the `cross-vm-config` crate
 
@@ -505,6 +541,12 @@ Driver changes:
 The CLI installs `tokio::signal::ctrl_c` to flip the flag, so a SIGINT on an eight hour soak still yields a full report, artifacts and the correct exit code. A second ctrl-c hard exits (the standard double ctrl-c contract). Stopping is cooperative, never a `select!` abort mid `apply`, so the process global `wallet_lock` is never stranded and a live broadcast is never left half observed.
 
 Deferred: stop file polling, resume seed continuation, staged load (section 12).
+
+### 6.5 Pipeline handoff: the session slot
+
+A `world = "inherit"` phase (section 4.7) is served by one session slot per registered harness, `Rc<RefCell<Option<(Ctx, H::World)>>>`, alive for the whole registry's lifetime. A donor phase whose ending world a later phase inherits stashes its final `(Ctx, World)` pair into the slot after it passes; the inheriting phase takes (moves) the pair out of the slot, leaving it empty again. Because the CLI process runs exactly one invocation and every inheritor consumes the slot by move rather than by reference, an accidental reuse (an inheriting phase whose donor never ran, or already handed its world to someone else) finds an empty slot and fails loudly with `RunError::Invalid`, never a silent reuse of stale state. A donor that fails never stashes anything, so a dependent phase gated on it is skipped by the `needs` rule (section 4.7) before it would ever reach the empty slot.
+
+Two behaviors follow from the pair being a real, live, moved value rather than a serialized snapshot. First, shrinking an inherited phase's failure is disabled: a shrink rebuild always starts from a fresh setup, which cannot reproduce the state a donor handed over, so shrinking under a different starting world would compare unrelated runs; the raw (unshrunk) failing history is kept instead. Second, a replay artifact written for an inherited phase's failure records `world_source = "inherited"` in its `[replay]` provenance and warns in the log: a standalone `cross-vm replay` of that artifact starts from a fresh setup, exactly like every other artifact, so it may not reproduce the same failure the pipeline run saw. Both caveats lift with the forthcoming replay fork design, which rematerializes an inherited starting state by replaying the donor's accepted op history instead of requiring the live pair.
 
 ## 7. Registry and type erasure
 

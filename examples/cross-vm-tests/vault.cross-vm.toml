@@ -99,3 +99,26 @@ mode = "scenario"
   [[profile.deposit-then-overdraw.steps]]
   op = { Withdraw = { chain = "osmosis", user = 0, amount = 5000 } }
   expect = "rejected"
+
+# Progressive pipeline (dependency gated phases with world handoff): prove deposits
+# work first, then drive the riskier mix against the state the deposit phase built,
+# never re-paying the deposit work. A failing first phase skips the second.
+[profile.deposit-soak]
+mode = "invariant"
+ops = 200
+kinds = ["Deposit"]
+
+[profile.mixed-after-deposits]
+mode = "invariant"
+ops = 150
+weights = { Withdraw = 40, Borrow = 30, Repay = 30 }
+
+[suite.progressive]
+
+  [[suite.progressive.phases]]
+  profile = "deposit-soak"
+
+  [[suite.progressive.phases]]
+  profile = "mixed-after-deposits"
+  needs = ["deposit-soak"]
+  world = "inherit"
