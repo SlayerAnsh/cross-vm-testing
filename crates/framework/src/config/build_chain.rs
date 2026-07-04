@@ -93,7 +93,7 @@ pub fn parse_spec_id(s: &str) -> Result<revm::primitives::hardfork::SpecId, Harn
         "shanghai" => Ok(SpecId::SHANGHAI),
         "cancun" => Ok(SpecId::CANCUN),
         "prague" => Ok(SpecId::PRAGUE),
-        other => Err(HarnessError::Infra(CrossVmError::Other {
+        other => Err(HarnessError::infra(CrossVmError::Other {
             kind: ChainKind::Evm,
             reason: format!(
                 "unknown spec_id \"{other}\": expected one of frontier, homestead, tangerine, \
@@ -127,7 +127,7 @@ pub fn build_chain(
 /// (all four VMs on) build this crate ships and tests with.
 #[cfg(not(all(feature = "cw", feature = "evm", feature = "solana", feature = "tron")))]
 fn feature_not_compiled(kind: ChainKind) -> HarnessError {
-    HarnessError::Infra(CrossVmError::Other {
+    HarnessError::infra(CrossVmError::Other {
         kind,
         reason: "chain kind not compiled in (enable the feature)".to_string(),
     })
@@ -204,7 +204,7 @@ fn build_svm(spec: &ChainSpecData, wallets: Rc<WalletFactory>) -> Result<AnyChai
     // `finalized`. A bad value errors with the valid-names message the `Commitment` parser emits.
     let commitment = match spec.commitment.as_deref() {
         Some(s) => s.parse::<Commitment>().map_err(|e| {
-            HarnessError::Infra(CrossVmError::Other {
+            HarnessError::infra(CrossVmError::Other {
                 kind: ChainKind::Svm,
                 reason: format!("chain `{}`: {e}", spec.label),
             })

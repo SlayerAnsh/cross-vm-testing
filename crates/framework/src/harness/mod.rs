@@ -28,14 +28,15 @@
 //! The same `apply` is reused by every mode: no test logic is written twice. An invariant whose
 //! precondition has not occurred yet returns [`CheckOutcome::Skipped`] instead of failing.
 
+mod classify;
 mod ctx;
-mod outcome;
 mod runner;
 
+pub use classify::classify;
 pub use ctx::Ctx;
-pub use outcome::{
-    classify, CheckOutcome, Coverage, Failure, FailureKind, HarnessError, InvCoverage, RunReport,
-    Verdict, Violation,
+pub use harness_core::{
+    CheckOutcome, Coverage, Failure, FailureKind, HarnessError, InvCoverage, RunReport, Verdict,
+    Violation,
 };
 #[cfg(feature = "fuzz")]
 pub use harness_core::sample_arbitrary;

@@ -20,10 +20,10 @@ use std::time::Duration;
 use tokio::time::{sleep, Instant};
 
 use super::ctx::Ctx;
-use super::outcome::{
-    CheckOutcome, Coverage, Failure, FailureKind, HarnessError, RunReport, Verdict,
+use harness_core::{
+    op_label, CheckOutcome, Coverage, Failure, FailureKind, HarnessError, OpOutcome, RunReport,
+    Stats, Verdict,
 };
-use harness_core::{op_label, OpOutcome, Stats};
 use super::{Harness, Prng};
 
 /// A run-mode marker. The unit type parameter `M` on [`Runner`] selects which driver method is

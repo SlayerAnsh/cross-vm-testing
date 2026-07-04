@@ -143,7 +143,7 @@ pub fn resolve_profile(
         } else {
             names.join(", ")
         };
-        HarnessError::Infra(CrossVmError::Other {
+        HarnessError::infra(CrossVmError::Other {
             kind: ChainKind::Evm,
             reason: format!("unknown profile \"{name}\": available profiles: {available}"),
         })
@@ -171,7 +171,7 @@ pub fn resolve_profile(
     let mut chain_specs = Vec::new();
     for decl in selected {
         let kind: ChainKind = decl.kind.parse().map_err(|e| {
-            HarnessError::Infra(CrossVmError::Other {
+            HarnessError::infra(CrossVmError::Other {
                 kind: ChainKind::Evm,
                 reason: format!("chain `{}`: {e}", decl.label),
             })
@@ -183,7 +183,7 @@ pub fn resolve_profile(
             .map(cross_vm_config::parse_target_str)
             .transpose()
             .map_err(|e| {
-                HarnessError::Infra(CrossVmError::Other {
+                HarnessError::infra(CrossVmError::Other {
                     kind,
                     reason: format!("chain `{}`: {e}", decl.label),
                 })
@@ -208,7 +208,7 @@ pub fn resolve_profile(
 
         let rpc_url = decl.rpc_url.clone();
         if target == Target::Rpc && rpc_url.is_none() {
-            return Err(HarnessError::Infra(CrossVmError::Other {
+            return Err(HarnessError::infra(CrossVmError::Other {
                 kind,
                 reason: format!(
                     "chain `{}` resolves to target `rpc` but has no rpc_url",
