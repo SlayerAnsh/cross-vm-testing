@@ -8,7 +8,8 @@
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-/// A seeded pseudo-random generator handed to [`Harness::generate`](crate::Harness::generate).
+/// A seeded pseudo-random generator passed to [`Harness::generate_op`](crate::Harness::generate_op),
+/// which draws from it to fill an operation's data.
 pub struct Prng(ChaCha8Rng);
 
 impl Prng {
@@ -94,7 +95,7 @@ pub fn sub_seed(seed: u64, case: usize) -> u64 {
 }
 
 /// Generate any [`arbitrary::Arbitrary`] value from the seeded stream: the zero-boilerplate,
-/// stateless generation path. Derive `Arbitrary` on an `Operation` and `generate` becomes one
+/// stateless generation path. Derive `Arbitrary` on an `Operation` and `generate_op` becomes one
 /// line. Stateless means invalid operations are produced freely; `apply` must classify them.
 #[cfg(feature = "fuzz")]
 pub fn sample_arbitrary<T>(rng: &mut Prng) -> T
