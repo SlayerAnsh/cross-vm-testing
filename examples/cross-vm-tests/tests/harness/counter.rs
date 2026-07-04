@@ -79,16 +79,17 @@ impl CounterHarness {
     /// out of the env (shared state), so the handle reads and writes the one live counter.
     fn counter(ctx: &Ctx, world: &CounterWorld, label: &str) -> Result<Counter, HarnessError> {
         let chain = ctx.chain(label)?;
-        let addr = world.addrs.get(label).cloned().ok_or_else(|| {
-            HarnessError::Infra(CrossVmError::wallet(format!(
-                "no counter deployed on {label}"
-            )))
-        })?;
+        let addr = world
+            .addrs
+            .get(label)
+            .cloned()
+            .ok_or_else(|| HarnessError::infra(format!("no counter deployed on {label}")))?;
         Ok(Counter::instance(chain, addr))
     }
 }
 
 impl Harness for CounterHarness {
+    type Ctx = Ctx;
     type World = CounterWorld;
     type Operation = CounterOp;
     type Invariant = CounterInv;
@@ -145,6 +146,11 @@ impl Harness for CounterHarness {
         vec![CounterInv::CountMatchesModel]
     }
 
+    async fn advance(&self, ctx: &mut Ctx, blocks: u64) -> Result<(), HarnessError> {
+        ctx.advance_all(blocks).await;
+        Ok(())
+    }
+
     async fn check(&self, ctx: &mut Ctx, w: &CounterWorld, inv: &CounterInv) -> CheckOutcome {
         match inv {
             CounterInv::CountMatchesModel => {
@@ -179,10 +185,10 @@ async fn inc(ctx: &mut Ctx, w: &mut CounterWorld, label: &str) -> Result<(), Har
     counter
         .increment(signer(label))
         .await
-        .map_err(HarnessError::Infra)?;
-    *w.model.get_mut(label).ok_or_else(|| {
-        HarnessError::Infra(CrossVmError::wallet(format!("unknown chain {label}")))
-    })? += 1;
+        .map_err(HarnessError::infra)?;
+    *w.model
+        .get_mut(label)
+        .ok_or_else(|| HarnessError::infra(format!("unknown chain {label}")))? += 1;
     w.any_incremented = true;
     Ok(())
 }
@@ -226,12 +232,10 @@ async fn counter_setup(_seed: u64) -> Result<(Ctx, CounterWorld), HarnessError> 
         counter
             .setup(signer(label))
             .await
-            .map_err(HarnessError::Infra)?;
-        let addr = counter.address().ok_or_else(|| {
-            HarnessError::Infra(CrossVmError::wallet(format!(
-                "{label}: setup recorded no address"
-            )))
-        })?;
+            .map_err(HarnessError::infra)?;
+        let addr = counter
+            .address()
+            .ok_or_else(|| HarnessError::infra(format!("{label}: setup recorded no address")))?;
         addrs.insert(label.to_string(), addr);
         model.insert(label.to_string(), 0u64);
     }

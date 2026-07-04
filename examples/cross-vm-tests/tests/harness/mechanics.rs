@@ -103,6 +103,7 @@ impl Bank {
 }
 
 impl Harness for Bank {
+    type Ctx = Ctx;
     type World = World;
     type Operation = Op;
     type Invariant = Inv;
@@ -115,9 +116,7 @@ impl Harness for Bank {
 
         if let Behavior::InfraPattern(pattern) = &self.behavior {
             if pattern[call_idx % pattern.len()] {
-                return Err(HarnessError::Infra(CrossVmError::wallet(
-                    "infra pattern hit",
-                )));
+                return Err(HarnessError::infra("infra pattern hit"));
             }
             // `false`: falls through to the same application the `Good` behavior takes below,
             // since `InfraPattern` matches none of the `matches!` guards in that match.
@@ -194,6 +193,11 @@ impl Harness for Bank {
 
     fn invariants(&self) -> Vec<Inv> {
         vec![Inv::ModelMatches, Inv::Bounded, Inv::Untriggered]
+    }
+
+    async fn advance(&self, ctx: &mut Ctx, blocks: u64) -> Result<(), HarnessError> {
+        ctx.advance_all(blocks).await;
+        Ok(())
     }
 
     async fn check(&self, _ctx: &mut Ctx, w: &World, inv: &Inv) -> CheckOutcome {
@@ -547,7 +551,7 @@ async fn setup_failure_surfaces_as_infra_err() {
     // Setup now runs in the test body before the runner drives anything, so a build failure is the
     // setup fn's `Err` (the caller `.expect()`s or `?`s it) rather than a step-zero RunReport.
     async fn failing_env() -> Result<(Ctx, World), HarnessError> {
-        Err(HarnessError::Infra(CrossVmError::wallet("setup boom")))
+        Err(HarnessError::infra("setup boom"))
     }
     match failing_env().await {
         Ok(_) => panic!("expected setup to fail"),
