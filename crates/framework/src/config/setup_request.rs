@@ -25,7 +25,7 @@ impl From<cross_vm_config::TargetStr> for Target {
 }
 
 /// One resolved `[[chain]]` declaration: owned strings, parsed enums, target and defaults
-/// already resolved by [`crate::config::resolve::resolve_profile`]. This is the framework's
+/// already resolved by [`harness_cli::resolve_profile`]. This is the framework's
 /// input to [`crate::config::build_chain::build_chain`].
 ///
 /// Per-kind fields (`bech32_prefix`, `native_denom`, `gas_price`, `spec_id`, `ws_url`,
