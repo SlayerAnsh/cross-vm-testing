@@ -1,9 +1,7 @@
 //! End-to-end proof that harness-core drives a plain function with `Ctx = ()`:
 //! a saturating u8 counter (the SUT) checked against an i32 shadow model.
 
-use harness_core::{
-    CheckOutcome, EnduranceConfig, Harness, HarnessError, Prng, Runner, Verdict,
-};
+use harness_core::{CheckOutcome, EnduranceConfig, Harness, HarnessError, Prng, Runner, Verdict};
 use std::time::Duration;
 
 /// The system under test: a u8 counter with saturating add and a (deliberately correct)
@@ -135,10 +133,9 @@ impl Harness for CounterHarness {
     ) -> CheckOutcome {
         match inv {
             Inv::MatchesModel if world.sut.value as i32 == world.model => CheckOutcome::Held,
-            Inv::MatchesModel => CheckOutcome::violated(format!(
-                "sut {} != model {}",
-                world.sut.value, world.model
-            )),
+            Inv::MatchesModel => {
+                CheckOutcome::violated(format!("sut {} != model {}", world.sut.value, world.model))
+            }
             Inv::NeverExceedsMax => CheckOutcome::Held, // u8 cannot exceed its own max
         }
     }
@@ -179,7 +176,10 @@ async fn scenario_verdicts_and_expectations_with_unit_ctx() {
     // A legitimate rejection (underflow) is not a failure under run_scenario's Expectation::Any.
     let ops = vec![Op::Add(1), Op::Add(2), Op::Sub(200), Op::Add(3)];
     let report = r.run_scenario(ops).await;
-    assert!(report.passed(), "Sub(200) is a legitimate rejection, not a failure");
+    assert!(
+        report.passed(),
+        "Sub(200) is a legitimate rejection, not a failure"
+    );
 
     // The same op under Expectation::Accepted fails as a Bug (expectation mismatch).
     use harness_core::{Expectation, ScenarioStep};
@@ -188,7 +188,10 @@ async fn scenario_verdicts_and_expectations_with_unit_ctx() {
         ..ScenarioStep::new(Op::Sub(200))
     }];
     let report = r.run_steps(steps, 1).await;
-    assert!(!report.passed(), "expected the expectation mismatch to fail");
+    assert!(
+        !report.passed(),
+        "expected the expectation mismatch to fail"
+    );
 }
 
 #[tokio::test]

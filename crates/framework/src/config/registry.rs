@@ -2222,7 +2222,11 @@ mod tests {
             .unwrap();
         let value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value, serde_json::json!(16), "10 stashed + 5 patched + 1 Ping");
+        assert_eq!(
+            value,
+            serde_json::json!(16),
+            "10 stashed + 5 patched + 1 Ping"
+        );
         std::fs::remove_file(&path).ok();
     }
 

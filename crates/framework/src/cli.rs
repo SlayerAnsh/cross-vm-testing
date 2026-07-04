@@ -611,7 +611,10 @@ fn select_phases(
                 ));
             }
         }
-        return Ok((args.profile.iter().cloned().map(fresh_phase).collect(), false));
+        return Ok((
+            args.profile.iter().cloned().map(fresh_phase).collect(),
+            false,
+        ));
     }
 
     if let Some(env_profile) = env("CROSS_VM_PROFILE") {
@@ -785,7 +788,11 @@ async fn run_selected(
     for (i, plan) in phases.iter().enumerate() {
         // Cooperative ctrl-c is checked between phases only (single-threaded; the endurance runner
         // itself polls `opts.stop` mid-run), so an in-flight op is never severed.
-        if opts.stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
+        if opts
+            .stop
+            .as_ref()
+            .is_some_and(|s| s.load(Ordering::Relaxed))
+        {
             tracing::info!("stop requested; not starting further phases");
             break;
         }
@@ -1346,8 +1353,9 @@ stop_on_failure = true
             vec!["deep".to_string(), "smoke".to_string()]
         );
         // Legacy `--profile` phases are dependency-free and fresh.
-        assert!(phases.iter().all(|p| p.needs.is_empty()
-            && p.world == cross_vm_config::WorldSource::Fresh));
+        assert!(phases
+            .iter()
+            .all(|p| p.needs.is_empty() && p.world == cross_vm_config::WorldSource::Fresh));
         assert!(!stop);
     }
 
