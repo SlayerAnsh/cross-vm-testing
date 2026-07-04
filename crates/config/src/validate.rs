@@ -13,10 +13,143 @@
 //! materialized the per-profile effective env before this stage runs, so no additional merge
 //! logic needs to be duplicated in this module.
 use crate::chain::missing_required_fields;
-use crate::schema::{EnvSpec, Profile};
+use crate::schema::{EnvSpec, Profile, SuitePhase, WorldSource};
 use crate::target::{parse_target_str, resolve_chain_target, TargetOverrides};
 use crate::{ChainDecl, ConfigError, RunConfig};
 use std::collections::HashSet;
+
+/// Loader stage between typed deserialize and structural validation: makes `Suite.phases` the
+/// single source of truth and validates the pipeline structure.
+///
+/// Legacy `profiles = [a, b]` is normalized into fresh, dependency-free phases and cleared. A
+/// suite that sets both `profiles` and `phases` is a hard error. After normalization every phase
+/// rule in Part 3.1 is checked: `needs` may only name earlier phases, phase profiles are unique
+/// per suite, `world = "inherit"` needs exactly one `needs` entry, both ends of an inherit
+/// handoff must be single-setup, and a donor may feed at most one inheriting phase.
+pub fn normalize_suite_phases(cfg: &mut RunConfig) -> Result<(), ConfigError> {
+    // Pass 1: normalize legacy `profiles` into `phases` (mutates suites only).
+    for (suite_name, suite) in &mut cfg.suites {
+        match (suite.profiles.is_empty(), suite.phases.is_empty()) {
+            (false, false) => {
+                return Err(ConfigError::SuiteProfilesAndPhases {
+                    suite: suite_name.clone(),
+                });
+            }
+            (false, true) => {
+                suite.phases = suite
+                    .profiles
+                    .iter()
+                    .map(|profile| SuitePhase {
+                        profile: profile.clone(),
+                        needs: Vec::new(),
+                        world: WorldSource::Fresh,
+                    })
+                    .collect();
+                suite.profiles.clear();
+            }
+            _ => {}
+        }
+    }
+
+    // Pass 2: validate the normalized phases (reads suites and profiles immutably).
+    for (suite_name, suite) in &cfg.suites {
+        validate_suite_phase_structure(suite_name, &suite.phases, cfg)?;
+    }
+    Ok(())
+}
+
+/// Whether a profile builds exactly one starting world (the requirement for either end of a
+/// `world = "inherit"` handoff): `invariant`, `endurance`, `scenario`, or `fuzz` with a single
+/// case. A multi-case fuzz fans out into many independent worlds, so it can neither donate nor
+/// consume a single inherited world.
+fn is_single_setup(profile: &Profile) -> bool {
+    match profile {
+        Profile::Fuzz(f) => f.cases == 1,
+        Profile::Invariant(_) | Profile::Endurance(_) | Profile::Scenario(_) => true,
+    }
+}
+
+fn validate_suite_phase_structure(
+    suite_name: &str,
+    phases: &[SuitePhase],
+    cfg: &RunConfig,
+) -> Result<(), ConfigError> {
+    // Duplicate phase profiles, and the set of profiles declared before each phase.
+    let mut seen: HashSet<&str> = HashSet::new();
+    for phase in phases {
+        if !seen.insert(phase.profile.as_str()) {
+            return Err(ConfigError::DuplicatePhaseProfile {
+                suite: suite_name.to_string(),
+                profile: phase.profile.clone(),
+            });
+        }
+    }
+
+    // `needs` may only reference an earlier phase (declaration order is execution order). This
+    // also rejects self and forward references.
+    let mut earlier: HashSet<&str> = HashSet::new();
+    for phase in phases {
+        for needed in &phase.needs {
+            if !earlier.contains(needed.as_str()) {
+                return Err(ConfigError::PhaseNeedsNotEarlier {
+                    suite: suite_name.to_string(),
+                    phase: phase.profile.clone(),
+                    needed: needed.clone(),
+                });
+            }
+        }
+        earlier.insert(phase.profile.as_str());
+    }
+
+    // `world = "inherit"` arity, single-setup ends, and shared-donor uniqueness.
+    let mut donor_of: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for phase in phases {
+        if phase.world != WorldSource::Inherit {
+            continue;
+        }
+        if phase.needs.len() != 1 {
+            return Err(ConfigError::PhaseInheritArity {
+                suite: suite_name.to_string(),
+                phase: phase.profile.clone(),
+                needs: phase.needs.len(),
+            });
+        }
+        let donor = phase.needs[0].as_str();
+
+        // The inheriting phase must be single-setup. Skip when its profile is unknown; the
+        // unknown-profile check in `validate_suites` reports that first.
+        if let Some(p) = cfg.profiles.get(&phase.profile) {
+            if !is_single_setup(p) {
+                return Err(ConfigError::PhaseWorldNotSingleSetup {
+                    suite: suite_name.to_string(),
+                    phase: phase.profile.clone(),
+                    role: "inheriting phase".to_string(),
+                });
+            }
+        }
+        // The donor must also be single-setup.
+        if let Some(p) = cfg.profiles.get(donor) {
+            if !is_single_setup(p) {
+                return Err(ConfigError::PhaseWorldNotSingleSetup {
+                    suite: suite_name.to_string(),
+                    phase: donor.to_string(),
+                    role: "donor".to_string(),
+                });
+            }
+        }
+
+        // At most one phase may inherit from a given donor.
+        if let Some(first) = donor_of.insert(donor, phase.profile.as_str()) {
+            return Err(ConfigError::SharedDonor {
+                suite: suite_name.to_string(),
+                donor: donor.to_string(),
+                first: first.to_string(),
+                second: phase.profile.clone(),
+            });
+        }
+    }
+    Ok(())
+}
 
 /// Runs every structural check against an already-parsed, merged, and typed [`RunConfig`].
 /// Returns the first violation found as a hard [`ConfigError`].
@@ -80,13 +213,15 @@ fn validate_chain_fields(decl: &ChainDecl) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Every phase must name a profile that exists. Runs after [`normalize_suite_phases`], so
+/// `Suite.phases` is populated (legacy `profiles` has already been folded into it).
 fn validate_suites(cfg: &RunConfig) -> Result<(), ConfigError> {
     for (suite_name, suite) in &cfg.suites {
-        for profile_name in &suite.profiles {
-            if !cfg.profiles.contains_key(profile_name) {
+        for phase in &suite.phases {
+            if !cfg.profiles.contains_key(&phase.profile) {
                 return Err(ConfigError::UnknownSuiteProfile {
                     suite: suite_name.clone(),
-                    profile: profile_name.clone(),
+                    profile: phase.profile.clone(),
                 });
             }
         }

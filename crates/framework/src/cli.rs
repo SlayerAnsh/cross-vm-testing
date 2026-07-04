@@ -335,7 +335,13 @@ impl Cli {
             tracing::info!(profile = %name, mode = mode_label(profile), "profile");
         }
         for (name, suite) in &cfg.suites {
-            tracing::info!(suite = %name, profiles = %suite.profiles.join(", "), "suite");
+            let profiles = suite
+                .phases
+                .iter()
+                .map(|p| p.profile.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::info!(suite = %name, profiles = %profiles, "suite");
         }
         0
     }
@@ -544,7 +550,11 @@ fn select_profile_names(
         let suite = cfg.suites.get(suite_name).ok_or_else(|| {
             unknown_name_message("suite", suite_name, cfg.suites.keys().map(String::as_str))
         })?;
-        return Ok((suite.profiles.clone(), suite.stop_on_failure));
+        // `Suite.phases` is the source of truth after loading (legacy `profiles` is normalized
+        // into it). Phase dependencies and world inheritance are honored by a later task; today
+        // the suite runner executes each phase's profile in declaration order.
+        let profile_names = suite.phases.iter().map(|p| p.profile.clone()).collect();
+        return Ok((profile_names, suite.stop_on_failure));
     }
 
     if !args.profile.is_empty() {
