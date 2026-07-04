@@ -146,6 +146,13 @@ fn build_artifact(
             failure: failure_summary(failure),
             shrunk: failure.map(|f| f.shrunk).unwrap_or(false),
             framework_version: env!("CARGO_PKG_VERSION").to_string(),
+            // Provenance only: an inherited phase's starting world came from an earlier phase, so
+            // replaying this artifact standalone starts from a fresh setup instead. Absent (never
+            // `null`, TOML has none) for a `fresh` phase.
+            world_source: match resolved.world_source {
+                cross_vm_config::WorldSource::Inherit => Some("inherited"),
+                cross_vm_config::WorldSource::Fresh => None,
+            },
         },
         profile: ArtifactProfileWrapper {
             replay: ArtifactReplayProfile {
@@ -268,6 +275,12 @@ struct ArtifactReplayMeta {
     failure: String,
     shrunk: bool,
     framework_version: String,
+    /// `"inherited"` when this artifact was written for a suite phase whose starting world was
+    /// inherited from an earlier phase, else absent. Provenance only, never parsed back: it warns
+    /// a reader that a standalone `cross-vm replay` starts from a fresh setup, not the inherited
+    /// starting state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    world_source: Option<&'static str>,
 }
 
 /// The `[profile]` table wrapper, so the field ends up spelled `[profile.replay]` rather than a

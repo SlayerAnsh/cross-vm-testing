@@ -222,7 +222,7 @@ impl Cli {
         }
 
         let env = std_env_lookup;
-        let (names, stop_on_failure) = match select_profile_names(cfg, args, &env) {
+        let (phases, stop_on_failure) = match select_phases(cfg, args, &env) {
             Ok(v) => v,
             Err(msg) => {
                 tracing::error!("{msg}");
@@ -258,13 +258,13 @@ impl Cli {
         let code = run_selected(
             &self.registry,
             cfg,
-            &names,
+            &phases,
             &opts,
             stop_on_failure,
             &config_path,
         )
         .await;
-        tracing::info!(exit_code = code, profiles = names.len(), "run summary");
+        tracing::info!(exit_code = code, profiles = phases.len(), "run summary");
         code
     }
 
@@ -534,27 +534,66 @@ fn build_run_options(args: &RunArgs, env: &dyn Fn(&str) -> Option<String>) -> Ru
 // Profile / suite selection (spec section 8)
 // ---------------------------------------------------------------------------------------------
 
-/// Resolves which profiles a `run` invocation drives, and whether to stop at the first failure.
+/// One phase of a `run` invocation: the profile to run, the earlier phases that must have passed
+/// before it (dependency gating), and where its starting `(Ctx, World)` comes from.
 ///
-/// Order: `--suite NAME` (its own `profiles` + `stop_on_failure`) beats one-or-more `--profile
+/// The suite path maps `Suite.phases` directly. Every other selection path (`--profile` flags, the
+/// single-profile default, `CROSS_VM_PROFILE`) wraps its names in dependency-free [`WorldSource::Fresh`]
+/// phases, so [`run_selected`] only ever handles one shape.
+///
+/// [`WorldSource::Fresh`]: cross_vm_config::WorldSource::Fresh
+#[derive(Debug, Clone)]
+struct PhasePlan {
+    /// A `[profile.*]` name in the config.
+    profile: String,
+    /// Earlier phases in this invocation that must have passed first; empty for a legacy path.
+    needs: Vec<String>,
+    /// Where this phase's starting world comes from; `Fresh` for a legacy path.
+    world: cross_vm_config::WorldSource,
+}
+
+/// A dependency-free, fresh-world [`PhasePlan`] for `profile` (the shape every non-suite selection
+/// path produces).
+fn fresh_phase(profile: String) -> PhasePlan {
+    PhasePlan {
+        profile,
+        needs: Vec::new(),
+        world: cross_vm_config::WorldSource::Fresh,
+    }
+}
+
+/// Resolves which phases a `run` invocation drives, and whether to stop at the first failure.
+///
+/// Order: `--suite NAME` (its own `phases` + `stop_on_failure`) beats one-or-more `--profile
 /// NAME` (run in order, `stop_on_failure = false`) beats `CROSS_VM_PROFILE` (single profile) beats
 /// "exactly one profile exists in the config" (auto-select). Otherwise: a usage error listing the
 /// available names. An unknown `--suite`/`--profile`/`CROSS_VM_PROFILE` name is also a usage
 /// error listing the available names.
-fn select_profile_names(
+///
+/// The suite path carries each phase's `needs`/`world` through verbatim (honored by
+/// [`run_selected`]); every other path emits [`fresh_phase`]s.
+fn select_phases(
     cfg: &cross_vm_config::RunConfig,
     args: &RunArgs,
     env: &dyn Fn(&str) -> Option<String>,
-) -> Result<(Vec<String>, bool), String> {
+) -> Result<(Vec<PhasePlan>, bool), String> {
     if let Some(suite_name) = &args.suite {
         let suite = cfg.suites.get(suite_name).ok_or_else(|| {
             unknown_name_message("suite", suite_name, cfg.suites.keys().map(String::as_str))
         })?;
         // `Suite.phases` is the source of truth after loading (legacy `profiles` is normalized
-        // into it). Phase dependencies and world inheritance are honored by a later task; today
-        // the suite runner executes each phase's profile in declaration order.
-        let profile_names = suite.phases.iter().map(|p| p.profile.clone()).collect();
-        return Ok((profile_names, suite.stop_on_failure));
+        // into it, as dependency-free fresh phases). Dependency gating and world inheritance are
+        // honored by `run_selected`; here we just carry each phase's shape through.
+        let phases = suite
+            .phases
+            .iter()
+            .map(|p| PhasePlan {
+                profile: p.profile.clone(),
+                needs: p.needs.clone(),
+                world: p.world,
+            })
+            .collect();
+        return Ok((phases, suite.stop_on_failure));
     }
 
     if !args.profile.is_empty() {
@@ -567,7 +606,7 @@ fn select_profile_names(
                 ));
             }
         }
-        return Ok((args.profile.clone(), false));
+        return Ok((args.profile.iter().cloned().map(fresh_phase).collect(), false));
     }
 
     if let Some(env_profile) = env("CROSS_VM_PROFILE") {
@@ -578,7 +617,7 @@ fn select_profile_names(
                 cfg.profiles.keys().map(String::as_str),
             ));
         }
-        return Ok((vec![env_profile], false));
+        return Ok((vec![fresh_phase(env_profile)], false));
     }
 
     if cfg.profiles.len() == 1 {
@@ -588,7 +627,7 @@ fn select_profile_names(
             .next()
             .expect("len == 1 checked above")
             .clone();
-        return Ok((vec![name], false));
+        return Ok((vec![fresh_phase(name)], false));
     }
 
     let mut names: Vec<&str> = cfg.profiles.keys().map(String::as_str).collect();
@@ -686,28 +725,50 @@ fn combine(codes: impl IntoIterator<Item = u8>) -> u8 {
 // Running the selected profiles
 // ---------------------------------------------------------------------------------------------
 
-/// Runs every name in `names` against `cfg`'s harness, in order, combining exit codes per
-/// [`combine`]. When `stop_on_failure` is set, stops after the first profile whose code is
-/// non-zero (whether a config/usage error resolving the profile, a `RunError`, or a failing
-/// report).
+/// How one phase of an invocation ended, for dependency gating and the final summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhaseOutcome {
+    /// The phase ran and its report/run had exit code `0`.
+    Passed,
+    /// The phase ran (or failed to resolve) with a non-zero code.
+    Failed,
+    /// The phase never ran: a `needs` dependency did not pass.
+    Skipped,
+}
+
+/// Runs every phase in `phases` against `cfg`'s harness, in declaration order, combining exit
+/// codes per [`combine`], with dependency gating and world handoff (spec: pipeline suites).
 ///
-/// Accumulates every profile's [`ErasedReport`] into one `Vec`, and — if a JSON report path is
+/// A phase whose any `needs` entry did not [`PhaseOutcome::Passed`] is skipped: it contributes
+/// nothing to the exit code (a skip is not a failure). A phase that runs sets its `world_source`
+/// from the plan and stashes its ending world (`stash_world`) exactly when a later phase inherits
+/// from it, so the registry's session slot hands the `(Ctx, World)` forward. When
+/// `stop_on_failure` is set, stops after the first phase whose code is non-zero (whether a
+/// config/usage error resolving the profile, a `RunError`, or a failing report). The ctrl-c stop
+/// flag (`opts.stop`) is checked between phases only, never mid-run.
+///
+/// Accumulates every ran phase's [`ErasedReport`] into one `Vec`, and — if a JSON report path is
 /// set, either `opts.json_report` (the CLI `--json-report` flag, checked first) or the first
 /// resolved profile's own `json_report` key — writes the whole invocation's envelope exactly
-/// once at the end via [`write_json_report`], never per-profile (spec section 9: one file holds
+/// once at the end via [`write_json_report`], never per-phase (spec section 9: one file holds
 /// every profile of one invocation). `config_path` is the config file path exactly as the user
-/// passed it, `names` is the invocation's selected profile names (recorded in the envelope
-/// regardless of whether `stop_on_failure` cut the run short before every one of them ran).
+/// passed it; the envelope records every selected phase's profile name (regardless of whether
+/// `stop_on_failure` or a skip cut the run short before it ran).
 async fn run_selected(
     registry: &Registry,
     cfg: &cross_vm_config::RunConfig,
-    names: &[String],
+    phases: &[PhasePlan],
     opts: &RunOptions,
     stop_on_failure: bool,
     config_path: &str,
 ) -> u8 {
     let mut code = 0u8;
     let mut reports: Vec<ErasedReport> = Vec::new();
+    // Every phase's outcome, keyed by profile name, both for dependency gating (`needs` must have
+    // `Passed`) and for the final summary (which logs skipped phases too).
+    let mut outcomes: BTreeMap<String, PhaseOutcome> = BTreeMap::new();
+    // The selected phases' profile names, in declaration order, for the JSON envelope.
+    let names: Vec<String> = phases.iter().map(|p| p.profile.clone()).collect();
     // `resolve_profile` already folds `opts.json_report.or(profile.json_report)` into
     // `resolved.json_report`, so checking `opts.json_report` here first is only a fast path that
     // skips resolving the first profile when the CLI flag alone already decides the path; the
@@ -716,11 +777,31 @@ async fn run_selected(
     // written to exactly one file.
     let mut json_report_path = opts.json_report.clone();
 
-    for name in names {
-        let resolved: ResolvedProfile = match resolve_profile(cfg, name, opts) {
+    for (i, plan) in phases.iter().enumerate() {
+        // Cooperative ctrl-c is checked between phases only (single-threaded; the endurance runner
+        // itself polls `opts.stop` mid-run), so an in-flight op is never severed.
+        if opts.stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
+            tracing::info!("stop requested; not starting further phases");
+            break;
+        }
+
+        // Dependency gating: a phase whose any `needs` entry did not pass is skipped entirely and
+        // contributes nothing to the exit code.
+        if let Some(dep) = plan
+            .needs
+            .iter()
+            .find(|dep| outcomes.get(dep.as_str()) != Some(&PhaseOutcome::Passed))
+        {
+            tracing::warn!(phase = %plan.profile, dependency = %dep, "phase skipped: dependency did not pass");
+            outcomes.insert(plan.profile.clone(), PhaseOutcome::Skipped);
+            continue;
+        }
+
+        let mut resolved: ResolvedProfile = match resolve_profile(cfg, &plan.profile, opts) {
             Ok(r) => r,
             Err(e) => {
-                tracing::error!(profile = %name, error = %e, "profile resolution failed (usage/config error)");
+                tracing::error!(profile = %plan.profile, error = %e, "profile resolution failed (usage/config error)");
+                outcomes.insert(plan.profile.clone(), PhaseOutcome::Failed);
                 code = combine([code, 3]);
                 if stop_on_failure {
                     break;
@@ -728,6 +809,16 @@ async fn run_selected(
                 continue;
             }
         };
+
+        // Pipeline handoff wiring: take the plan's starting-world source, and stash this phase's
+        // ending world exactly when a later phase inherits from it (its single `needs` entry names
+        // this phase). For a legacy/fresh phase both stay at their `resolve_profile` defaults
+        // (`Fresh` / `false`), so the run is byte-identical to a non-pipeline one.
+        resolved.world_source = plan.world;
+        resolved.stash_world = phases.iter().skip(i + 1).any(|later| {
+            later.world == cross_vm_config::WorldSource::Inherit
+                && later.needs.first() == Some(&plan.profile)
+        });
 
         if json_report_path.is_none() {
             json_report_path = resolved.json_report.clone();
@@ -748,11 +839,23 @@ async fn run_selected(
                         &resolved,
                         &report,
                     ) {
-                        Ok(path) => tracing::info!(
-                            "wrote replay artifact: {}; reproduce with: cross-vm replay {}",
-                            path.display(),
-                            path.display()
-                        ),
+                        Ok(path) => {
+                            tracing::info!(
+                                "wrote replay artifact: {}; reproduce with: cross-vm replay {}",
+                                path.display(),
+                                path.display()
+                            );
+                            // An inherited phase's starting world came from an earlier phase; a
+                            // standalone replay starts from a fresh setup instead, so the failure
+                            // may not reproduce on its own (the artifact's `[replay]` provenance
+                            // also records `world_source = "inherited"`).
+                            if plan.world == cross_vm_config::WorldSource::Inherit {
+                                tracing::warn!(
+                                    profile = %resolved.name,
+                                    "this phase inherited its starting world from an earlier phase; a standalone replay starts from a fresh setup and may not reproduce"
+                                );
+                            }
+                        }
                         // Non-fatal to the exit code: the run already failed and reported that
                         // failure; a write error here (bad directory, permissions, disk full) is
                         // a secondary concern, logged but never overriding `this_code`.
@@ -766,6 +869,14 @@ async fn run_selected(
 
                 reports.push(report);
 
+                outcomes.insert(
+                    plan.profile.clone(),
+                    if this_code == 0 {
+                        PhaseOutcome::Passed
+                    } else {
+                        PhaseOutcome::Failed
+                    },
+                );
                 code = combine([code, this_code]);
                 if stop_on_failure && this_code != 0 {
                     break;
@@ -773,7 +884,8 @@ async fn run_selected(
             }
             Err(e) => {
                 let this_code = exit_code_for_run_error(&e);
-                tracing::error!(profile = %name, error = %e, "run failed");
+                tracing::error!(profile = %plan.profile, error = %e, "run failed");
+                outcomes.insert(plan.profile.clone(), PhaseOutcome::Failed);
                 code = combine([code, this_code]);
                 if stop_on_failure && this_code != 0 {
                     break;
@@ -782,9 +894,19 @@ async fn run_selected(
         }
     }
 
+    // Final summary: every selected phase's outcome, including phases skipped by gating and phases
+    // never reached because `stop_on_failure`/ctrl-c cut the run short.
+    for plan in phases {
+        let outcome = outcomes
+            .get(&plan.profile)
+            .copied()
+            .unwrap_or(PhaseOutcome::Skipped);
+        tracing::info!(phase = %plan.profile, outcome = ?outcome, "phase outcome");
+    }
+
     if let Some(path) = &json_report_path {
         let overrides = overrides_json(opts);
-        match write_json_report(Path::new(path), config_path, names, &reports, overrides) {
+        match write_json_report(Path::new(path), config_path, &names, &reports, overrides) {
             Ok(()) => tracing::info!(path, "wrote JSON report"),
             Err(e) => {
                 // An IO failure here (bad directory, permissions, disk full) is a property of
@@ -1178,13 +1300,19 @@ profiles = ["smoke", "deep"]
 stop_on_failure = true
 "#;
 
+    /// The profile names of a selection's phases, in order, for the legacy `Vec<String>`-style
+    /// assertions below.
+    fn phase_names(phases: &[PhasePlan]) -> Vec<String> {
+        phases.iter().map(|p| p.profile.clone()).collect()
+    }
+
     #[test]
     fn single_profile_config_auto_selects() {
         let cfg = load(SINGLE_PROFILE);
         let args = RunArgs::default();
         let env = |_: &str| None;
-        let (names, stop) = select_profile_names(&cfg, &args, &env).unwrap();
-        assert_eq!(names, vec!["smoke".to_string()]);
+        let (phases, stop) = select_phases(&cfg, &args, &env).unwrap();
+        assert_eq!(phase_names(&phases), vec!["smoke".to_string()]);
         assert!(!stop);
     }
 
@@ -1193,7 +1321,7 @@ stop_on_failure = true
         let cfg = load(MULTI_PROFILE);
         let args = RunArgs::default();
         let env = |_: &str| None;
-        let err = select_profile_names(&cfg, &args, &env).unwrap_err();
+        let err = select_phases(&cfg, &args, &env).unwrap_err();
         assert!(err.contains("smoke"), "{err}");
         assert!(err.contains("deep"), "{err}");
     }
@@ -1206,8 +1334,14 @@ stop_on_failure = true
             ..Default::default()
         };
         let env = |_: &str| None;
-        let (names, stop) = select_profile_names(&cfg, &args, &env).unwrap();
-        assert_eq!(names, vec!["deep".to_string(), "smoke".to_string()]);
+        let (phases, stop) = select_phases(&cfg, &args, &env).unwrap();
+        assert_eq!(
+            phase_names(&phases),
+            vec!["deep".to_string(), "smoke".to_string()]
+        );
+        // Legacy `--profile` phases are dependency-free and fresh.
+        assert!(phases.iter().all(|p| p.needs.is_empty()
+            && p.world == cross_vm_config::WorldSource::Fresh));
         assert!(!stop);
     }
 
@@ -1219,7 +1353,7 @@ stop_on_failure = true
             ..Default::default()
         };
         let env = |_: &str| None;
-        let err = select_profile_names(&cfg, &args, &env).unwrap_err();
+        let err = select_phases(&cfg, &args, &env).unwrap_err();
         assert!(err.contains("nope"));
         assert!(err.contains("smoke"));
     }
@@ -1232,8 +1366,11 @@ stop_on_failure = true
             ..Default::default()
         };
         let env = |_: &str| None;
-        let (names, stop) = select_profile_names(&cfg, &args, &env).unwrap();
-        assert_eq!(names, vec!["smoke".to_string(), "deep".to_string()]);
+        let (phases, stop) = select_phases(&cfg, &args, &env).unwrap();
+        assert_eq!(
+            phase_names(&phases),
+            vec!["smoke".to_string(), "deep".to_string()]
+        );
         assert!(stop);
     }
 
@@ -1245,7 +1382,7 @@ stop_on_failure = true
             ..Default::default()
         };
         let env = |_: &str| None;
-        let err = select_profile_names(&cfg, &args, &env).unwrap_err();
+        let err = select_phases(&cfg, &args, &env).unwrap_err();
         assert!(err.contains("nope"));
         assert!(err.contains("ci"));
     }
@@ -1261,8 +1398,8 @@ stop_on_failure = true
                 None
             }
         };
-        let (names, stop) = select_profile_names(&cfg, &args, &env).unwrap();
-        assert_eq!(names, vec!["deep".to_string()]);
+        let (phases, stop) = select_phases(&cfg, &args, &env).unwrap();
+        assert_eq!(phase_names(&phases), vec!["deep".to_string()]);
         assert!(!stop);
     }
 
@@ -1806,5 +1943,226 @@ kinds = ["Boom"]
         assert_eq!(code, 1, "the recorded Boom must still reproduce on replay");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Pipeline suites (Phase 3): dependency gating + world handoff through the session slot.
+    // -----------------------------------------------------------------------------------------
+
+    /// A `Cli` whose mock harness is registered persistently, so a scenario profile's
+    /// `export_world` key works and a pipeline phase can stash/inherit a world.
+    fn cli_with_persistent_mock() -> Cli {
+        Cli::new().register_persistent("vault", || MockHarness, mock_setup)
+    }
+
+    /// A fresh, gitignored `export_world` path under `<CARGO_MANIFEST_DIR>/tests_result/`, unique
+    /// per test invocation, so parallel runs never collide and nothing leaks into a source-tree
+    /// `target/` dir. The exporter creates the parent dir.
+    fn temp_export_path(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests_result")
+            .join(format!(
+                "cross-vm-cli-pipeline-export-{}-{}-{label}.json",
+                std::process::id(),
+                n
+            ))
+    }
+
+    #[tokio::test]
+    async fn pipeline_suite_skips_dependents_of_a_failed_phase() {
+        // Phase `boom` (invariant over Boom) fails with a Bug; phase `after` (a scenario that would
+        // export its world) `needs = ["boom"]`, so a failed dependency must skip it entirely. The
+        // export file is our run-count proxy: if `after` had run, it would exist.
+        let export = temp_export_path("skip-dependents");
+        let cfg = load(&format!(
+            r#"
+[harness]
+name = "vault"
+
+[profile.boom]
+mode = "invariant"
+ops = 1
+kinds = ["Boom"]
+
+[profile.after]
+mode = "scenario"
+export_world = "{}"
+[[profile.after.steps]]
+op = "Ping"
+
+[[suite.p.phases]]
+profile = "boom"
+
+[[suite.p.phases]]
+profile = "after"
+needs = ["boom"]
+"#,
+            export.to_str().unwrap()
+        ));
+        let cli = cli_with_persistent_mock();
+        let dir = temp_artifacts_dir("skip-dependents");
+        let args = RunArgs {
+            config: PathBuf::from("vault.cross-vm.toml"),
+            suite: Some("p".to_string()),
+            artifacts_dir: Some(dir.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        // `boom` fails (Bug -> 1); `after` is skipped and contributes nothing.
+        assert_eq!(cli.run_with_config(&cfg, &args).await, 1);
+        assert!(
+            !export.exists(),
+            "`after` depends on the failed `boom`, so it must be skipped and never export a world"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&export).ok();
+    }
+
+    #[tokio::test]
+    async fn pipeline_suite_hands_world_forward_end_to_end() {
+        // Donor (invariant, seed 100, 3 Ping ops) ends with world 100 + 3 = 103 and stashes it;
+        // the inheritor (scenario, 1 Ping) starts from 103 (NOT a fresh setup) and exports 104.
+        let export = temp_export_path("hands-forward");
+        let cfg = load(&format!(
+            r#"
+[harness]
+name = "vault"
+
+[profile.donor]
+mode = "invariant"
+ops = 3
+kinds = ["Ping"]
+seed = 100
+
+[profile.inheritor]
+mode = "scenario"
+export_world = "{}"
+[[profile.inheritor.steps]]
+op = "Ping"
+
+[[suite.p.phases]]
+profile = "donor"
+
+[[suite.p.phases]]
+profile = "inheritor"
+needs = ["donor"]
+world = "inherit"
+"#,
+            export.to_str().unwrap()
+        ));
+        let cli = cli_with_persistent_mock();
+        let args = RunArgs {
+            config: PathBuf::from("vault.cross-vm.toml"),
+            suite: Some("p".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(cli.run_with_config(&cfg, &args).await, 0);
+
+        let raw = std::fs::read_to_string(&export).expect("inheritor exported its world");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+        assert_eq!(
+            value,
+            serde_json::json!(104),
+            "seed 100 + 3 donor Pings + 1 inheritor Ping"
+        );
+
+        std::fs::remove_file(&export).ok();
+    }
+
+    #[tokio::test]
+    async fn independent_phases_still_honor_stop_on_failure() {
+        // Two dependency-free phases with `stop_on_failure`: the first fails, so the second (which
+        // would export its world) must never run.
+        let export = temp_export_path("stop-on-failure");
+        let cfg = load(&format!(
+            r#"
+[harness]
+name = "vault"
+
+[profile.first]
+mode = "invariant"
+ops = 1
+kinds = ["Boom"]
+
+[profile.second]
+mode = "scenario"
+export_world = "{}"
+[[profile.second.steps]]
+op = "Ping"
+
+[suite.p]
+stop_on_failure = true
+
+[[suite.p.phases]]
+profile = "first"
+
+[[suite.p.phases]]
+profile = "second"
+"#,
+            export.to_str().unwrap()
+        ));
+        let cli = cli_with_persistent_mock();
+        let dir = temp_artifacts_dir("stop-on-failure");
+        let args = RunArgs {
+            config: PathBuf::from("vault.cross-vm.toml"),
+            suite: Some("p".to_string()),
+            artifacts_dir: Some(dir.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        assert_eq!(cli.run_with_config(&cfg, &args).await, 1);
+        assert!(
+            !export.exists(),
+            "stop_on_failure must halt the suite before the second phase runs"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&export).ok();
+    }
+
+    #[tokio::test]
+    async fn legacy_profiles_key_still_runs_as_before() {
+        // A suite using the legacy `profiles = [..]` sugar normalizes into fresh, dependency-free
+        // phases: both run, both pass, and the JSON report holds both, exactly as before.
+        let path = temp_json_path("legacy-profiles");
+        let cfg = load(
+            r#"
+[harness]
+name = "vault"
+
+[profile.a]
+mode = "fuzz"
+cases = 1
+ops = 1
+kinds = ["Ping"]
+
+[profile.b]
+mode = "invariant"
+ops = 1
+kinds = ["Ping"]
+
+[suite.legacy]
+profiles = ["a", "b"]
+"#,
+        );
+        let cli = cli_with_mock();
+        let args = RunArgs {
+            config: PathBuf::from("vault.cross-vm.toml"),
+            suite: Some("legacy".to_string()),
+            json_report: Some(path.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        assert_eq!(cli.run_with_config(&cfg, &args).await, 0);
+
+        let raw = std::fs::read_to_string(&path).expect("json report was written");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+        let profiles = value["profiles"].as_array().expect("profiles array");
+        assert_eq!(profiles.len(), 2, "both legacy phases ran");
+        assert_eq!(profiles[0]["profile"], "a");
+        assert_eq!(profiles[1]["profile"], "b");
+
+        std::fs::remove_file(&path).ok();
     }
 }
