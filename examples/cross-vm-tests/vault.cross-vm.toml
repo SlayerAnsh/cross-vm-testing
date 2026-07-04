@@ -122,3 +122,38 @@ weights = { Withdraw = 40, Borrow = 30, Repay = 30 }
   profile = "mixed-after-deposits"
   needs = ["deposit-soak"]
   world = "inherit"
+
+# Staged pipeline mixing modes: fixed scenario scripts seed liquidity, a long random
+# mix runs against that state, then a deep single case fuzz digs further, each phase
+# starting where the previous one stopped.
+[profile.seed-liquidity]
+mode = "scenario"
+steps = [
+  { op = { Deposit = { chain = "eth", user = 0, amount = 500000 } } },
+  { op = { Deposit = { chain = "osmosis", user = 1, amount = 300000 } } },
+  { op = { Borrow = { chain = "eth", user = 0, amount = 100000 } } },
+]
+
+[profile.random-mix]
+mode = "invariant"
+ops = 200
+
+[profile.deep-case]
+mode = "fuzz"
+cases = 1
+ops = 60
+
+[suite.staged]
+
+  [[suite.staged.phases]]
+  profile = "seed-liquidity"
+
+  [[suite.staged.phases]]
+  profile = "random-mix"
+  needs = ["seed-liquidity"]
+  world = "inherit"
+
+  [[suite.staged.phases]]
+  profile = "deep-case"
+  needs = ["random-mix"]
+  world = "inherit"

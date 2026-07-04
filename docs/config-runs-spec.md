@@ -292,6 +292,42 @@ Structural rules, checked at load time (a violation is a hard config error, `cro
 
 A skipped or failed dependency skips the dependent phase entirely; a skip contributes nothing to the suite's combined exit code (only an actual failure does). The legacy `profiles = [a, b]` sugar is normalized into fresh, dependency free phases (`needs = []`, `world = "fresh"`) by the loader, so a config written before this feature keeps behaving exactly as it did.
 
+**Mixed modes.** A phase donates and inherits a world regardless of its own mode: any of the single setup modes (`scenario`, `invariant`, `endurance`, or `fuzz` with `cases == 1`) can be a donor, an inheritor, or both, so a pipeline can freely alternate fixed scripts and random phases. A common shape is a scenario phase that seeds liquidity or sets preconditions with a handful of concrete steps, handing its world to an invariant phase (the long "auto run"), which hands off in turn to a single case fuzz phase that digs further. Each phase can also re-pin state through its own `params` table before it runs (section 6.5). For an "auto run" phase inheriting state, prefer `invariant` mode (one long random sequence, exactly the auto run shape) or `fuzz` with `cases = 1`; a multi case fuzz stays excluded because each of its cases needs a fresh identical starting world, which requires the deferred milestone 2 replay fork. The checked in `staged` suite in `examples/cross-vm-tests/vault.cross-vm.toml` is the worked example:
+
+```toml
+[profile.seed-liquidity]
+mode = "scenario"
+steps = [
+  { op = { Deposit = { chain = "eth", user = 0, amount = 500000 } } },
+  { op = { Deposit = { chain = "osmosis", user = 1, amount = 300000 } } },
+  { op = { Borrow = { chain = "eth", user = 0, amount = 100000 } } },
+]
+
+[profile.random-mix]
+mode = "invariant"
+ops = 200
+
+[profile.deep-case]
+mode = "fuzz"
+cases = 1
+ops = 60
+
+[suite.staged]
+
+  [[suite.staged.phases]]
+  profile = "seed-liquidity"
+
+  [[suite.staged.phases]]
+  profile = "random-mix"
+  needs = ["seed-liquidity"]
+  world = "inherit"
+
+  [[suite.staged.phases]]
+  profile = "deep-case"
+  needs = ["random-mix"]
+  world = "inherit"
+```
+
 ## 5. Loader pipeline: the `cross-vm-config` crate
 
 A new pure data crate at `crates/config`, package name `cross-vm-config`. No framework dependency, no tokio, no chains. This purity is what makes YAML later a one function addition, keeps the loader unit testable with plain string fixtures, and lets the phase 5 macro bridge reuse it verbatim.

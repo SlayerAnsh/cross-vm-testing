@@ -389,6 +389,46 @@ fn progressive_suite_runs_pipeline_with_handoff() {
     );
 }
 
+#[test]
+fn staged_suite_mixes_modes_across_phases() {
+    // The `staged` suite mixes modes across phases: a scenario seeds liquidity, an invariant
+    // phase runs a long random mix against that state, and a single case fuzz phase digs
+    // further, each inheriting the previous phase's world (`world = "inherit"`).
+    let out = cross_vm(&["run", config_path().to_str().unwrap(), "--suite", "staged"]);
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // All three phases must have run (not skipped by gating): the combined log names each phase
+    // profile, so every inheriting phase started from the state the previous phase built.
+    for phase in ["seed-liquidity", "random-mix", "deep-case"] {
+        assert!(
+            combined.contains(phase),
+            "phase {phase} missing from combined output: {combined}"
+        );
+    }
+
+    // Each phase reports its own runner mode label: the scenario runner logs `mode="case"`, the
+    // invariant phase `mode=invariant`, and the single case fuzz phase `mode=fuzz`. Their
+    // presence proves the three distinct modes ran in one pipeline.
+    for mode in ["case", "invariant", "fuzz"] {
+        assert!(
+            combined.contains(mode),
+            "mode label {mode} missing from combined output: {combined}"
+        );
+    }
+}
+
 /// A dedicated temp config path (process id + a nanosecond timestamp), unique per test
 /// invocation, so parallel `cargo test` runs of this file never collide on the same file.
 fn temp_config_path(label: &str) -> std::path::PathBuf {

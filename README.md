@@ -245,7 +245,26 @@ A config file's `[suite.<name>]` can also chain profiles into a dependency gated
   world = "inherit"
 ```
 
-See `docs/config-runs-spec.md` section 4.7 for the phase schema and structural rules, and `examples/cross-vm-tests/vault.cross-vm.toml`'s `progressive` suite for the checked in, runnable version.
+Phases mix modes freely: a scenario phase can seed liquidity or set preconditions with a few concrete steps, hand its world to an invariant phase (a long random "auto run"), which hands off to a single case fuzz phase, each starting where the previous one stopped and optionally re-pinning state through its own `params` table:
+
+```toml
+[suite.staged]
+
+  [[suite.staged.phases]]
+  profile = "seed-liquidity"    # scenario: fixed setup steps
+
+  [[suite.staged.phases]]
+  profile = "random-mix"        # invariant: long random sweep
+  needs = ["seed-liquidity"]
+  world = "inherit"
+
+  [[suite.staged.phases]]
+  profile = "deep-case"         # fuzz, cases = 1: deep single case
+  needs = ["random-mix"]
+  world = "inherit"
+```
+
+See `docs/config-runs-spec.md` section 4.7 for the phase schema and structural rules, and `examples/cross-vm-tests/vault.cross-vm.toml`'s `progressive` and `staged` suites for the checked in, runnable versions.
 
 ## Wallets
 

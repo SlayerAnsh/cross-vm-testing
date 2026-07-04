@@ -2066,6 +2066,120 @@ mod tests {
         assert!(!failure.shrunk, "inherited phase must not shrink");
     }
 
+    #[tokio::test]
+    async fn scenario_donor_hands_world_to_invariant_inheritor() {
+        let mut registry = Registry::new();
+        registry.register_persistent("mock", || MockHarness, mock_setup);
+
+        // Donor: scenario with 2 Ping steps. Fresh setup seeds world 7 (seed fixed at 7),
+        // 2 accepted Pings -> 9 stashed.
+        let donor = resolved_pipeline(
+            scenario_profile(vec![
+                mock_step("Ping", cross_vm_config::ExpectStr::Accepted),
+                mock_step("Ping", cross_vm_config::ExpectStr::Accepted),
+            ]),
+            cross_vm_config::WorldSource::Fresh,
+            true,
+        );
+        let report = registry
+            .run("mock", &donor, &RunOptions::default())
+            .await
+            .unwrap();
+        assert!(report.failure.is_none(), "{:?}", report.failure);
+
+        // Middle: invariant, 3 Ping ops, inheriting the stashed 9, stashing 9 + 3 = 12.
+        let middle = resolved_pipeline(
+            invariant_profile(3, Some(vec!["Ping".to_string()])),
+            cross_vm_config::WorldSource::Inherit,
+            true,
+        );
+        let report = registry
+            .run("mock", &middle, &RunOptions::default())
+            .await
+            .unwrap();
+        assert!(report.failure.is_none(), "{:?}", report.failure);
+
+        // Final: scenario with one Ping, exporting the world inherited from the invariant
+        // phase. 7 fresh + 2 scenario + 3 invariant + 1 scenario = 13.
+        let path = temp_export_path("scenario-to-invariant");
+        let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Accepted)];
+        let inheritor = resolved_pipeline(
+            scenario_profile_with_export(steps, path.to_str().unwrap()),
+            cross_vm_config::WorldSource::Inherit,
+            false,
+        );
+        let report = registry
+            .run("mock", &inheritor, &RunOptions::default())
+            .await
+            .unwrap();
+        assert!(report.failure.is_none(), "{:?}", report.failure);
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!(13),
+            "7 fresh + 2 scenario + 3 invariant + 1 scenario"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn scenario_donor_hands_world_to_single_case_fuzz() {
+        let mut registry = Registry::new();
+        registry.register_persistent("mock", || MockHarness, mock_setup);
+
+        // Donor: scenario 2 Pings, fresh setup seeds world 7 -> 9 stashed.
+        let donor = resolved_pipeline(
+            scenario_profile(vec![
+                mock_step("Ping", cross_vm_config::ExpectStr::Accepted),
+                mock_step("Ping", cross_vm_config::ExpectStr::Accepted),
+            ]),
+            cross_vm_config::WorldSource::Fresh,
+            true,
+        );
+        let report = registry
+            .run("mock", &donor, &RunOptions::default())
+            .await
+            .unwrap();
+        assert!(report.failure.is_none(), "{:?}", report.failure);
+
+        // Middle: fuzz cases = 1, ops = 2, kinds = ["Ping"], inheriting the stashed 9 (NOT a
+        // fresh setup, since world_source = Inherit), 2 accepted ops -> 11 stashed.
+        let middle = resolved_pipeline(
+            fuzz_profile(1, 2, Some(vec!["Ping".to_string()]), None),
+            cross_vm_config::WorldSource::Inherit,
+            true,
+        );
+        let report = registry
+            .run("mock", &middle, &RunOptions::default())
+            .await
+            .unwrap();
+        assert!(report.failure.is_none(), "{:?}", report.failure);
+
+        // Final: scenario with one Ping, exporting the world inherited from the fuzz phase.
+        // 9 stashed + 2 fuzz ops + 1 scenario = 12.
+        let path = temp_export_path("scenario-to-fuzz");
+        let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Accepted)];
+        let inheritor = resolved_pipeline(
+            scenario_profile_with_export(steps, path.to_str().unwrap()),
+            cross_vm_config::WorldSource::Inherit,
+            false,
+        );
+        let report = registry
+            .run("mock", &inheritor, &RunOptions::default())
+            .await
+            .unwrap();
+        assert!(report.failure.is_none(), "{:?}", report.failure);
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!(12),
+            "9 stashed + 2 fuzz ops + 1 scenario"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
     // ----- per-phase world patch (params + registered patch fn) -----
 
     #[tokio::test]
