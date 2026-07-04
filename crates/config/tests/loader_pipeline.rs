@@ -186,6 +186,51 @@ fn replay_block_is_tolerated_and_ignored() {
 }
 
 #[test]
+fn targets_env_key_merges_label_wise_while_other_keys_whole_replace() {
+    // The one behavior that distinguishes `CrossVmExt::merge_env_entry` from the generic
+    // whole-replace `NoExt` default: the `targets` env key merges label-by-label when a profile's
+    // own `env.targets` collides with the top-level `[env].targets`, instead of replacing the
+    // whole map. Top-level declares `eth`, profile `p` declares `osmosis`; both must survive.
+    let cfg = cross_vm_config::from_toml_str(fixture!("good_targets_label_merge.toml"), &no_vars)
+        .expect("good_targets_label_merge.toml should load cleanly");
+
+    let profile = cfg.profiles.get("p").expect("profile `p` must exist");
+    let env = profile
+        .common()
+        .env
+        .as_ref()
+        .expect("profile `p` carries a merged effective env");
+    let spec = cross_vm_config::env_spec(env).expect("merged env must re-type into EnvSpec");
+    let targets = spec.targets.expect("merged env must carry a `targets` map");
+
+    // Label-wise merge: BOTH the top-level `eth` and the profile's `osmosis` are present. Under a
+    // whole-value replace (`*slot = incoming`), the top-level `eth` label would vanish and this
+    // assertion would fail.
+    assert!(
+        targets.contains_key("eth"),
+        "top-level `eth` target label must survive the label-wise merge, got: {targets:?}"
+    );
+    assert!(
+        targets.contains_key("osmosis"),
+        "profile `osmosis` target label must be present after merge, got: {targets:?}"
+    );
+    assert_eq!(targets.get("eth"), Some(&cross_vm_config::TargetStr::Mock));
+    assert_eq!(
+        targets.get("osmosis"),
+        Some(&cross_vm_config::TargetStr::Rpc)
+    );
+
+    // Discriminator: the non-`targets` scalar key `target` is whole-replaced by the profile
+    // override (mock -> rpc), proving the hook special-cases only `targets` and does not
+    // deep-merge every key.
+    assert_eq!(
+        spec.target,
+        Some(cross_vm_config::TargetStr::Rpc),
+        "a non-`targets` env key must be whole-replaced by the profile override"
+    );
+}
+
+#[test]
 fn bad_suite_missing_profile_errors() {
     let err = cross_vm_config::from_toml_str(fixture!("bad_suite_missing_profile.toml"), &no_vars)
         .unwrap_err();

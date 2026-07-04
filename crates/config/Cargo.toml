@@ -12,8 +12,6 @@ harness-config.workspace = true
 serde = { workspace = true, features = ["derive"] }
 toml.workspace = true
 serde_json.workspace = true
-humantime.workspace = true
-thiserror.workspace = true
 
 [lints]
 workspace = true
