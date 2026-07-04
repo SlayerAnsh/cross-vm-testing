@@ -3,12 +3,14 @@
 //! [`CliDomain`] to add domain config sections, CLI flags, and a custom setup
 //! request type; see the cross-vm framework crate for a worked example.
 
+mod artifact;
 mod domain;
 mod erased;
 mod registry;
 mod report;
 mod resolve;
 
+pub use artifact::write_replay_artifact;
 pub use domain::{BasicSetup, CliDomain, GenericDomain, NoArgs, SetupBuildError, SetupFuture};
 pub use erased::{ErasedFailure, ErasedReport};
 pub use registry::{MakeSetup, Registry, RunError, ValidationError};
