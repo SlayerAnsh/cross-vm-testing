@@ -2191,58 +2191,36 @@ mod tests {
 
     #[tokio::test]
     async fn phase_params_patch_a_fresh_single_case_fuzz() {
+        // Pins the no-stash routing: a Fresh, non-stashing (stash_world = false), cases = 1
+        // fuzz phase with phase_params must still take the inline patched path, not the
+        // multi-case loop (which never applies a patch and would silently drop the params).
+        // The patch closure here always errors, so the only way this run can fail with
+        // RunError::Setup is if the patch was actually invoked. Pre-fix, stash_world = false
+        // and phase_params.is_some() alone did not trigger the inline path, so the params
+        // were dropped, the patch was never called, and the run succeeded instead of erroring.
         let mut registry = Registry::new();
-        registry.register_persistent_with_patch(
+        registry.register_with_patch(
             "mock",
             || MockHarness,
             mock_setup,
-            |world: &mut u32, params: &toml::Table| {
-                if let Some(n) = params.get("add").and_then(|v| v.as_integer()) {
-                    *world += n as u32;
-                }
-                Ok(())
-            },
+            |_world: &mut u32, _params: &toml::Table| Err("patched".to_string()),
         );
 
-        // A Fresh single-case fuzz (cases=1, ops=2, kinds=["Ping"]) with phase_params add = 5.
-        // The single case seeds a fresh world at sub_seed(7, 0), the patch adds 5, then two Ping
-        // ops each add 1. stash_world hands that world to the inheritor scenario below, which
-        // exports it after one more Ping.
-        let donor = {
-            let mut d = resolved_pipeline(
-                fuzz_profile(1, 2, Some(vec!["Ping".to_string()]), None),
-                cross_vm_config::WorldSource::Fresh,
-                true,
-            );
-            d.phase_params = Some(toml::toml! { add = 5 });
-            d
-        };
-        let report = registry
-            .run("mock", &donor, &RunOptions::default())
-            .await
-            .unwrap();
-        assert!(report.failure.is_none());
-
-        let path = temp_export_path("fresh-fuzz-patched");
-        let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Accepted)];
-        let inheritor = resolved_pipeline(
-            scenario_profile_with_export(steps, path.to_str().unwrap()),
-            cross_vm_config::WorldSource::Inherit,
+        let mut run = resolved_pipeline(
+            fuzz_profile(1, 2, Some(vec!["Ping".to_string()]), None),
+            cross_vm_config::WorldSource::Fresh,
             false,
         );
-        registry
-            .run("mock", &inheritor, &RunOptions::default())
+        run.phase_params = Some(toml::toml! { add = 5 });
+
+        let err = registry
+            .run("mock", &run, &RunOptions::default())
             .await
-            .unwrap();
-        let expected = sub_seed(7, 0) as u32 + 5 + 2 + 1;
-        let value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(
-            value,
-            serde_json::json!(expected),
-            "fresh seed + 5 patched + 2 fuzz Ping + 1 scenario Ping"
-        );
-        std::fs::remove_file(&path).ok();
+            .unwrap_err();
+        match err {
+            RunError::Setup(msg) => assert!(msg.contains("patched"), "{msg}"),
+            other => panic!("expected RunError::Setup, got {other:?}"),
+        }
     }
 
     #[tokio::test]
