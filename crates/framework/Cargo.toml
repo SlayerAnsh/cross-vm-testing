@@ -40,14 +40,8 @@ clap = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 # `cli`-only: `--json-report` (Task 7) and JSON config input (already in cross-vm-config).
 serde_json = { workspace = true, optional = true }
-# `cli`-only: `.env` secret loading for the CLI binary (Task 7/10).
-dotenvy = { workspace = true, optional = true }
-# `cli`-only: the CLI's tracing-subscriber fmt layer (Task 7).
-tracing-subscriber = { workspace = true, optional = true }
 # `cli`-only: `ChainSpecData::params` and inline config tables.
 toml = { workspace = true, optional = true }
-# `cli`-only: `--duration` humantime string parsing (Task 7's `run` subcommand).
-humantime = { workspace = true, optional = true }
 # EVM/Tron only: `revm::primitives::hardfork::SpecId` is the parsed hardfork type used solely in
 # `build_chain`'s EVM/Tron arms (and `parse_spec_id`). Neither `cross-vm-solidity` nor
 # `cross-vm-tron` re-export the type, so the framework needs its own direct dependency to name it.
@@ -77,15 +71,10 @@ cli = [
     "dep:clap",
     "dep:serde_json",
     "dep:toml",
-    # Kept pending Task 17 (the `cross-vm` binary's own arg parsing / process wiring in
-    # `src/cli.rs`, which still references each of these under `#[cfg(feature = "cli")]`):
-    # `dotenvy` for `.env` loading, `tracing-subscriber` for the fmt layer, `humantime` for
-    # `--duration` parsing, and `tokio/signal` for the endurance ctrl-c stop flag. Task 17
-    # re-evaluates whether any can be dropped once `src/cli.rs` moves onto `harness_cli::Cli`.
-    "dep:dotenvy",
-    "dep:tracing-subscriber",
-    "dep:humantime",
-    "tokio/signal",
+    # `.env` loading, the tracing-subscriber fmt layer, `--duration` humantime parsing, and the
+    # endurance ctrl-c stop flag now all live in `harness-cli` (the `cross-vm` binary is a thin
+    # alias over `harness_cli::Cli`), so the framework no longer names dotenvy, tracing-subscriber,
+    # humantime, or `tokio/signal` directly.
 ]
 
 [dev-dependencies]

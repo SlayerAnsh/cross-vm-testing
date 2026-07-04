@@ -2362,11 +2362,9 @@ dependencies = [
  "cross-vm-solana",
  "cross-vm-solidity",
  "cross-vm-tron",
- "dotenvy",
  "harness-cli",
  "harness-core",
  "harness-core-macros",
- "humantime",
  "rand 0.8.6",
  "revm",
  "serde",
@@ -2376,7 +2374,6 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
