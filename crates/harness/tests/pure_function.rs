@@ -51,6 +51,7 @@ enum Inv {
 struct World {
     sut: SatCounter,
     model: i32,
+    first_op: Option<&'static str>,
 }
 
 struct CounterHarness;
@@ -68,6 +69,12 @@ impl Harness for CounterHarness {
         world: &mut Self::World,
         op: &Self::Operation,
     ) -> Result<Verdict, HarnessError> {
+        if world.first_op.is_none() {
+            world.first_op = Some(match op {
+                Op::Add(_) => "Add",
+                Op::Sub(_) => "Sub",
+            });
+        }
         match op {
             Op::Add(n) => {
                 world.sut.add(*n).map_err(HarnessError::infra)?;
@@ -91,6 +98,21 @@ impl Harness for CounterHarness {
 
     fn op_kinds(&self) -> Vec<Self::OpKind> {
         vec![OpKind::Add, OpKind::Sub]
+    }
+
+    // Sub weighs 0 while the model is empty: an underflow-only op is meaningless on a
+    // zero counter, so it is excluded until the first Add lands.
+    fn weight(&self, _ctx: &(), world: &Self::World, kind: Self::OpKind) -> u32 {
+        match kind {
+            OpKind::Add => 1,
+            OpKind::Sub => {
+                if world.model == 0 {
+                    0
+                } else {
+                    1
+                }
+            }
+        }
     }
 
     fn generate_op(&self, rng: &mut Prng, _world: &Self::World, kind: Self::OpKind) -> Op {
@@ -126,6 +148,7 @@ fn fresh_world() -> World {
     World {
         sut: SatCounter::default(),
         model: 0,
+        first_op: None,
     }
 }
 
@@ -166,4 +189,15 @@ async fn scenario_verdicts_and_expectations_with_unit_ctx() {
     }];
     let report = r.run_steps(steps, 1).await;
     assert!(!report.passed(), "expected the expectation mismatch to fail");
+}
+
+#[tokio::test]
+async fn zero_weight_gates_sub_until_first_add() {
+    let mut r = Runner::fuzz(CounterHarness, 3);
+    r.setup((), fresh_world());
+    let report = r.run(50, None, 1).await;
+    assert!(report.passed(), "{:?}", report.failure);
+    // The model starts at 0, so Sub's weight is 0 at the first draw: op 1 must be an Add.
+    // (Reach the world through the runner after the run.)
+    assert_eq!(r.world().first_op, Some("Add"));
 }
