@@ -5,11 +5,16 @@
 
 mod duration;
 mod interpolate;
+mod schema;
 mod seed;
 mod value;
 
 pub use duration::{humantime_duration, humantime_opt};
 pub use interpolate::interpolate_value;
+pub use schema::{
+    CommonKeys, EnduranceProfile, ExpectStr, FuzzProfile, HarnessRef, InvariantProfile, Profile,
+    ScenarioProfile, ScenarioStepRaw, Suite, SuitePhase, WorldSource,
+};
 pub use seed::SeedSpec;
 pub use value::{Doc, DocMap};
 
