@@ -97,7 +97,10 @@ assert!(report.passed(), "{:?}", report.failure);
 
 The full runnable version, including the endurance and scenario modes over the same harness, lives
 at `crates/harness/tests/pure_function.rs`, the proof that the crate needs no chain, no VM, and no
-`cross-vm-framework` type to be useful.
+`cross-vm-framework` type to be useful. A second worked example, `crates/harness/tests/math.rs`,
+fuzzes a small math library (a checked add, sub, mul, and divide calculator) against an `i64`
+shadow model, shows a divide by zero surfacing as a legitimate rejection, and includes a test that
+injects a bug and confirms the harness catches it.
 
 ## Features
 
