@@ -385,6 +385,23 @@ ops = 1
             "the resolved [env] must be embedded: {text}"
         );
 
+        // The writer's documented contract (module docs): its output is a *valid, loadable*
+        // config, so replaying is just `load` + `run`. Assert the emitted bytes reload through the
+        // real config schema (chain-free `NoExt` oracle), not merely that the TOML shape parses.
+        let reloaded = harness_config::from_toml_str::<NoExt>(&text, &|_| None)
+            .expect("written artifact must reload as a valid config");
+        assert!(
+            reloaded.profiles.contains_key("replay"),
+            "artifact must expose a `replay` profile after loading: {text}"
+        );
+        assert!(
+            matches!(
+                reloaded.profiles["replay"],
+                harness_config::Profile::Scenario(_)
+            ),
+            "the `replay` profile must load as a Scenario profile: {text}"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
