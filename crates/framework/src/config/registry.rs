@@ -27,6 +27,7 @@
 //! scenario run arm (`run_profile`) rejects it again at run time before touching a chain, since
 //! `cross-vm run` does not call `validate` on its own.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::rc::Rc;
@@ -36,8 +37,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::harness::{
-    sub_seed, Endurance, EnduranceConfig, Expectation, Failure, Fuzz, Harness, Invariant, KindMix,
-    RunReport, Runner, Scenario, ScenarioStep, Stats,
+    sub_seed, Ctx, Endurance, EnduranceConfig, Expectation, Failure, Fuzz, Harness, Invariant,
+    KindMix, RunReport, Runner, Scenario, ScenarioStep, Stats,
 };
 
 use super::erased::{erase_report, LocalBoxFuture};
@@ -135,6 +136,14 @@ type RunFn = Box<
 /// all — only the function `register_persistent` points it at does — which is exactly what keeps
 /// `register_inner`'s (and therefore `register`'s) signature free of the bound.
 type WorldExportFn<W> = Rc<dyn Fn(&W, &Path) -> Result<(), RunError>>;
+
+/// The pipeline handoff slot: the typed `(Ctx, World)` a passing donor phase stashes for the
+/// next phase to inherit. One is created per registered harness in `register_inner` and lives for
+/// the registry's lifetime; a `None` slot means no donor world is currently available. It is an
+/// `Rc<RefCell<..>>` because the run closure is called once per phase and each call needs a shared
+/// handle to the same slot; everything here is `!Send` by design (single-threaded), so this costs
+/// nothing the design does not already pay for.
+type SessionSlot<W> = Rc<RefCell<Option<(Ctx, W)>>>;
 
 /// One registered harness: a validate closure and a run closure, both monomorphized over the
 /// harness type at [`Registry::register`] time. Never exposed to callers directly; [`Registry`]'s
@@ -261,6 +270,12 @@ impl Registry {
         let setup = Rc::new(setup);
         let harness_name = name.to_string();
 
+        // The pipeline handoff slot: one per registered harness, alive for the registry's
+        // lifetime, holding the typed `(Ctx, H::World)` a passing donor phase left behind.
+        // Inside this monomorphized closure the pair is fully typed, so no erasure or
+        // serialization is involved; the slot is invisible to the harness and the setup fn.
+        let session: SessionSlot<H::World> = Rc::new(RefCell::new(None));
+
         let run: RunFn = Box::new(
             move |resolved: &ResolvedProfile,
                   opts: &RunOptions|
@@ -269,6 +284,7 @@ impl Registry {
                 let setup = Rc::clone(&setup);
                 let harness_name = harness_name.clone();
                 let export = export.clone();
+                let session = Rc::clone(&session);
                 Box::pin(async move {
                     run_profile::<H, F, S>(
                         &harness,
@@ -277,6 +293,7 @@ impl Registry {
                         resolved,
                         opts,
                         export.as_ref(),
+                        &session,
                     )
                     .await
                 })
@@ -527,6 +544,17 @@ where
     if !resolved.shrink || report.failure.is_none() {
         return (report, false);
     }
+    // A shrink rebuild always starts from a *fresh* setup (see `rebuild` below), so it can never
+    // reproduce the starting state an `Inherit` phase was handed by its donor. Shrinking under a
+    // different starting world would compare apples to oranges, so an inherited phase is forced
+    // to skip shrinking entirely, keeping the raw failing history intact.
+    if resolved.world_source == cross_vm_config::WorldSource::Inherit {
+        tracing::warn!(
+            "shrink disabled: a shrink rebuild starts from a fresh setup and would not \
+             reproduce the inherited starting state"
+        );
+        return (report, false);
+    }
     let failure = report.failure.take().expect("checked is_some above");
     let history = failure.history;
 
@@ -595,8 +623,40 @@ where
     Ok((report, stats, seed_i))
 }
 
+/// Obtains the starting `(Ctx, H::World)` for one generative or scenario phase, honoring the
+/// profile's `world_source` (spec: the pipeline handoff).
+///
+/// `Fresh` builds a brand-new pair from `setup` (mapping any failure to [`RunError::Setup`]).
+/// `Inherit` takes the pair a previous donor phase stashed in `session`, consuming it (the slot
+/// is emptied); an empty slot is [`RunError::Invalid`], since a phase cannot inherit a world no
+/// donor left behind (the donor did not run, did not pass, or its world was already consumed).
+async fn obtain_start_state<H, S>(
+    setup: &S,
+    session: &SessionSlot<H::World>,
+    resolved: &ResolvedProfile,
+    seed: u64,
+) -> Result<(Ctx, H::World), RunError>
+where
+    H: Harness<Ctx = crate::harness::Ctx>,
+    S: Fn(SetupRequest) -> SetupFuture<'static, H::World>,
+{
+    match resolved.world_source {
+        cross_vm_config::WorldSource::Fresh => setup(build_setup_request(resolved, seed))
+            .await
+            .map_err(|e| RunError::Setup(e.to_string())),
+        cross_vm_config::WorldSource::Inherit => session.borrow_mut().take().ok_or_else(|| {
+            RunError::Invalid(
+                "phase inherits a world, but no donor world is available \
+                 (the donor phase did not run, did not pass, or was already consumed)"
+                    .to_string(),
+            )
+        }),
+    }
+}
+
 /// The generic body every registered harness's `run` closure calls into (spec section 7's `run`
 /// bullet list). No `dyn Harness` exists here: `H`, `F`, `S` are all concrete at the call site.
+#[allow(clippy::too_many_arguments)]
 async fn run_profile<H, F, S>(
     make_harness: &F,
     setup: &S,
@@ -604,6 +664,7 @@ async fn run_profile<H, F, S>(
     resolved: &ResolvedProfile,
     opts: &RunOptions,
     export: Option<&WorldExportFn<H::World>>,
+    session: &SessionSlot<H::World>,
 ) -> Result<ErasedReport, RunError>
 where
     H: Harness<Ctx = crate::harness::Ctx>,
@@ -625,6 +686,64 @@ where
                 ));
             }
             let selection = parse_kind_selection::<H>(&p.kinds, &p.weights)?;
+
+            // Pipeline handoff (inherit a donor world, or stash this world for the next phase)
+            // needs a single, well-defined starting/ending world. Fuzz does a *fresh* setup per
+            // case, so a multi-case fuzz phase has neither: reject it here as a run-layer backstop
+            // (the config layer rejects it too). A `cases == 1` fuzz phase does have exactly one,
+            // so it can take part in the handoff.
+            if (resolved.world_source == cross_vm_config::WorldSource::Inherit
+                || resolved.stash_world)
+                && cases != 1
+            {
+                return Err(RunError::Invalid(
+                    "pipeline handoff requires fuzz cases = 1 (fuzz does a fresh setup per case)"
+                        .to_string(),
+                ));
+            }
+
+            // The `cases == 1` handoff path drives the single case inline (rather than through
+            // `run_one_fuzz_case`, which always does a fresh setup and cannot surface the runner
+            // for stashing), so the obtained start state can be inherited and the ending world
+            // stashed. The seed derivation `sub_seed(base_seed, 0)` is identical to case 0 of the
+            // loop, so a stashing single-case run stays byte-identical to a plain one.
+            if resolved.world_source == cross_vm_config::WorldSource::Inherit || resolved.stash_world
+            {
+                let seed_i = sub_seed(base_seed, 0);
+                tracing::info!(case = 0, seed = seed_i, "fuzz case starting");
+
+                let (ctx, world) =
+                    obtain_start_state::<H, S>(setup, session, resolved, seed_i).await?;
+
+                let mut runner = Runner::<H, Fuzz>::fuzz(make_harness(), seed_i);
+                if resolved.stats {
+                    runner.with_stats();
+                }
+                runner.setup(ctx, world);
+                let report = runner
+                    .run_with(ops, selection.as_mix(), resolved.check_every)
+                    .await;
+                let stats = runner.stats().cloned();
+
+                let (report, shrunk) =
+                    maybe_shrink(report, make_harness, setup, resolved, seed_i).await;
+
+                // Hand a passing world to the next phase when the profile opted into stashing.
+                if resolved.stash_world && report.passed() {
+                    let (ctx, world) = runner.into_parts();
+                    *session.borrow_mut() = Some((ctx, world));
+                }
+                return erase_report(
+                    report,
+                    harness_name,
+                    resolved.name.clone(),
+                    "fuzz".to_string(),
+                    stats,
+                    started.elapsed(),
+                    shrunk,
+                )
+                .map_err(|e| RunError::Serialize(e.to_string()));
+            }
 
             // The first failing case ends the profile; if every case passes, the last case's
             // report stands in for the profile (there is no single meaningful "combined" report
@@ -667,9 +786,8 @@ where
             let ops = opts.ops.unwrap_or(p.ops);
             let selection = parse_kind_selection::<H>(&p.kinds, &p.weights)?;
 
-            let (ctx, world) = setup(build_setup_request(resolved, base_seed))
-                .await
-                .map_err(|e| RunError::Setup(e.to_string()))?;
+            let (ctx, world) =
+                obtain_start_state::<H, S>(setup, session, resolved, base_seed).await?;
 
             let mut runner = Runner::<H, Invariant>::invariant(make_harness(), base_seed);
             if resolved.stats {
@@ -683,6 +801,12 @@ where
 
             let (report, shrunk) =
                 maybe_shrink(report, make_harness, setup, resolved, base_seed).await;
+
+            // Hand a passing world to the next phase when the profile opted into stashing.
+            if resolved.stash_world && report.passed() {
+                let (ctx, world) = runner.into_parts();
+                *session.borrow_mut() = Some((ctx, world));
+            }
             erase_report(
                 report,
                 harness_name,
@@ -697,9 +821,8 @@ where
         cross_vm_config::Profile::Endurance(p) => {
             let selection = parse_kind_selection::<H>(&p.kinds, &p.weights)?;
 
-            let (ctx, world) = setup(build_setup_request(resolved, base_seed))
-                .await
-                .map_err(|e| RunError::Setup(e.to_string()))?;
+            let (ctx, world) =
+                obtain_start_state::<H, S>(setup, session, resolved, base_seed).await?;
 
             // The loader's structural validation (`validate::validate`) guarantees a profile
             // sets `duration` and/or `max_ops`; when only `max_ops` is set, a long-but-safe
@@ -740,6 +863,12 @@ where
             // shrinks when a profile opted in explicitly.
             let (report, shrunk) =
                 maybe_shrink(report, make_harness, setup, resolved, base_seed).await;
+
+            // Hand a passing world to the next phase when the profile opted into stashing.
+            if resolved.stash_world && report.passed() {
+                let (ctx, world) = runner.into_parts();
+                *session.borrow_mut() = Some((ctx, world));
+            }
             erase_report(
                 report,
                 harness_name,
@@ -764,9 +893,8 @@ where
                 ));
             }
 
-            let (ctx, world) = setup(build_setup_request(resolved, base_seed))
-                .await
-                .map_err(|e| RunError::Setup(e.to_string()))?;
+            let (ctx, world) =
+                obtain_start_state::<H, S>(setup, session, resolved, base_seed).await?;
 
             let steps = p
                 .steps
@@ -795,15 +923,25 @@ where
             let report = runner.run_steps(steps, resolved.check_every).await;
             let stats = runner.stats().cloned();
 
-            // Serialize the final World *after* the run, whether it passed or failed, so the
-            // exported file always reflects the state the run actually reached. Only reachable
-            // when `export_world` is set (checked above), which in turn only holds when `export`
-            // is `Some` (checked above too).
-            if let Some(path) = &p.export_world {
-                let exporter =
-                    export.expect("checked above: export_world implies register_persistent");
-                let (_ctx, world) = runner.into_parts();
-                (exporter.as_ref())(&world, Path::new(path))?;
+            // Take the final `(Ctx, World)` out of the runner exactly once: export borrows
+            // `&world` first, then the pair is handed to the next phase when the profile opted
+            // into stashing (a passing run only). `into_parts` is only called when at least one
+            // of the two actually needs the pair, leaving the no-op path untouched.
+            let stash = resolved.stash_world && report.passed();
+            if p.export_world.is_some() || stash {
+                let (ctx, world) = runner.into_parts();
+                // Serialize the final World *after* the run, whether it passed or failed, so the
+                // exported file always reflects the state the run actually reached. Only
+                // reachable when `export_world` is set (checked above), which in turn only holds
+                // when `export` is `Some` (checked above too).
+                if let Some(path) = &p.export_world {
+                    let exporter =
+                        export.expect("checked above: export_world implies register_persistent");
+                    (exporter.as_ref())(&world, Path::new(path))?;
+                }
+                if stash {
+                    *session.borrow_mut() = Some((ctx, world));
+                }
             }
 
             // Scenario never shrinks: its steps are concrete, not generative, so there is nothing
@@ -1627,5 +1765,208 @@ mod tests {
         let failure = report.failure.expect("must fail");
         assert!(failure.shrunk);
         assert_eq!(failure.history.as_array().expect("array").len(), 1);
+    }
+
+    // ----- pipeline handoff (session slot) -----
+
+    /// [`resolved`] with `world_source` / `stash_world` overridden; every other field matches.
+    fn resolved_pipeline(
+        profile: Profile,
+        world_source: cross_vm_config::WorldSource,
+        stash_world: bool,
+    ) -> ResolvedProfile {
+        ResolvedProfile {
+            world_source,
+            stash_world,
+            ..resolved(profile)
+        }
+    }
+
+    #[tokio::test]
+    async fn passing_donor_stashes_and_inheritor_continues_from_it() {
+        let mut registry = Registry::new();
+        registry.register_persistent("mock", || MockHarness, mock_setup);
+
+        // Donor: invariant, 3 Ping ops, seed fixed at 7 by `resolved` -> world 7 + 3 = 10.
+        let donor = resolved_pipeline(
+            invariant_profile(3, Some(vec!["Ping".to_string()])),
+            cross_vm_config::WorldSource::Fresh,
+            true,
+        );
+        let report = registry
+            .run("mock", &donor, &RunOptions::default())
+            .await
+            .unwrap();
+        assert!(report.failure.is_none());
+
+        // Inheritor: scenario with one Ping, exporting the final world. Starting from the
+        // stashed 10 (NOT from a fresh setup's seed), the export must be 11.
+        let path = temp_export_path("inherited");
+        let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Accepted)];
+        let inheritor = resolved_pipeline(
+            scenario_profile_with_export(steps, path.to_str().unwrap()),
+            cross_vm_config::WorldSource::Inherit,
+            false,
+        );
+        let report = registry
+            .run("mock", &inheritor, &RunOptions::default())
+            .await
+            .unwrap();
+        assert!(report.failure.is_none());
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value, serde_json::json!(11), "10 stashed by donor, +1 Ping");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn inherit_with_empty_slot_is_invalid() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+        let inheritor = resolved_pipeline(
+            invariant_profile(1, Some(vec!["Ping".to_string()])),
+            cross_vm_config::WorldSource::Inherit,
+            false,
+        );
+        let err = registry
+            .run("mock", &inheritor, &RunOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Invalid(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn failing_donor_stashes_nothing() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        // Donor: invariant over Boom (always a Bug). stash_world = true, but the run fails, so
+        // nothing is stashed.
+        let donor = resolved_pipeline(
+            invariant_profile(1, Some(vec!["Boom".to_string()])),
+            cross_vm_config::WorldSource::Fresh,
+            true,
+        );
+        let report = registry
+            .run("mock", &donor, &RunOptions::default())
+            .await
+            .unwrap();
+        assert!(report.failure.is_some());
+
+        // The inheritor must get RunError::Invalid because the slot stayed empty.
+        let inheritor = resolved_pipeline(
+            invariant_profile(1, Some(vec!["Ping".to_string()])),
+            cross_vm_config::WorldSource::Inherit,
+            false,
+        );
+        let err = registry
+            .run("mock", &inheritor, &RunOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Invalid(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn multi_case_fuzz_cannot_inherit_or_stash() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        // fuzz cases=5 with world_source=Inherit -> RunError::Invalid
+        let inheriting = resolved_pipeline(
+            fuzz_profile(5, 1, Some(vec!["Ping".to_string()]), None),
+            cross_vm_config::WorldSource::Inherit,
+            false,
+        );
+        let err = registry
+            .run("mock", &inheriting, &RunOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Invalid(_)), "{err:?}");
+
+        // fuzz cases=5 with stash_world=true -> RunError::Invalid
+        let stashing = resolved_pipeline(
+            fuzz_profile(5, 1, Some(vec!["Ping".to_string()]), None),
+            cross_vm_config::WorldSource::Fresh,
+            true,
+        );
+        let err = registry
+            .run("mock", &stashing, &RunOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Invalid(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn single_case_fuzz_participates_in_handoff() {
+        let mut registry = Registry::new();
+        registry.register_persistent("mock", || MockHarness, mock_setup);
+
+        // fuzz cases=1, ops=2, kinds=["Ping"], stash_world=true. The single case does a fresh
+        // setup at sub_seed(7, 0), so world = sub_seed(7, 0) as u32 + 2 accepted ops.
+        let donor = resolved_pipeline(
+            fuzz_profile(1, 2, Some(vec!["Ping".to_string()]), None),
+            cross_vm_config::WorldSource::Fresh,
+            true,
+        );
+        let report = registry
+            .run("mock", &donor, &RunOptions::default())
+            .await
+            .unwrap();
+        assert!(report.failure.is_none());
+
+        // Inheritor scenario with one Ping: exported value = donor world + 1.
+        let path = temp_export_path("fuzz-handoff");
+        let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Accepted)];
+        let inheritor = resolved_pipeline(
+            scenario_profile_with_export(steps, path.to_str().unwrap()),
+            cross_vm_config::WorldSource::Inherit,
+            false,
+        );
+        let report = registry
+            .run("mock", &inheritor, &RunOptions::default())
+            .await
+            .unwrap();
+        assert!(report.failure.is_none());
+        let expected = sub_seed(7, 0) as u32 + 2 + 1;
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value, serde_json::json!(expected));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn inherited_phase_forces_shrink_off() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+
+        // Stash a world with a passing donor.
+        let donor = resolved_pipeline(
+            invariant_profile(3, Some(vec!["Ping".to_string()])),
+            cross_vm_config::WorldSource::Fresh,
+            true,
+        );
+        let report = registry
+            .run("mock", &donor, &RunOptions::default())
+            .await
+            .unwrap();
+        assert!(report.failure.is_none());
+
+        // Inheritor invariant over Boom with shrink=true: a shrink rebuild would start from a
+        // fresh setup, not the inherited world, so shrink is forced off. The failure stands but
+        // is not marked shrunk.
+        let inheritor = ResolvedProfile {
+            world_source: cross_vm_config::WorldSource::Inherit,
+            ..resolved_with_shrink(
+                invariant_profile(3, Some(vec!["Boom".to_string()])),
+                true,
+                256,
+            )
+        };
+        let report = registry
+            .run("mock", &inheritor, &RunOptions::default())
+            .await
+            .unwrap();
+        let failure = report.failure.expect("must fail");
+        assert!(!failure.shrunk, "inherited phase must not shrink");
     }
 }
