@@ -1,5 +1,7 @@
 # Spec: TOML driven test runs
 
+The generic, chain-agnostic implementation of this layer now lives in two standalone crates: `harness-config` (the declarative schema and loader) and `harness-cli` (the registry, CLI, run pipeline, JSON report, and replay-artifact writer). This document specifies the **cross-vm variant** built on them: the `[[chain]]` schema, chain resolution, and the `cross-vm` CLI. For the generic machinery underneath, the two extension seams (`ConfigExt` and `CliDomain`), and how to build a different variant on the same crates, see [`docs/extending-harness-cli.md`](extending-harness-cli.md).
+
 Status: proposed, not implemented. This document specifies the declarative run configuration layer, the first piece of the "broader cross VM orchestration layer above `MultiChainEnv`" that `SPEC.md` and the README list as planned.
 
 ## 1. Motivation

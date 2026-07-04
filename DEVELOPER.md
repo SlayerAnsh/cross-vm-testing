@@ -41,9 +41,14 @@ crates/solana         cross-vm-solana       litesvm, granular solana-* crates
 crates/tron           cross-vm-tron         shared revm core + TVM layers (Tron precompiles, energy/bandwidth shim, sun balances)
 crates/harness        harness-core          standalone, VM agnostic property harness: the Harness trait, mode typed Runner, rng, stats, outcome types. No dependency on any crate in this workspace
 crates/harness-macros harness-core-macros   proc-macros (syn/quote) for harness-core: fuzz_runner, invariant_runner, endurance_runner
+crates/harness-config harness-config        standalone, chain agnostic declarative run-config schema: the TOML/JSON loader (parse, interpolate, merge, deserialize, validate) producing RunConfig<X>, with the ConfigExt extension seam. Pure data, no harness-core dependency
+crates/harness-cli    harness-cli           standalone, chain agnostic config-driven runner over harness-core + harness-config: the harness registry, the clap CLI, the run pipeline, the JSON report, the replay-artifact writer, with the CliDomain extension seam (GenericDomain runs it raw)
 crates/macros         cross-vm-macros       proc-macros (syn/quote): cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, config_runner
-crates/framework      cross-vm-framework    umbrella over core + all four VM crates + harness-core (adds a chain shaped Ctx and classify)
+crates/config         cross-vm-config       the cross-vm ConfigExt (CrossVmExt: [[chain]] declarations + chain-aware validation) over harness-config
+crates/framework      cross-vm-framework    umbrella over core + all four VM crates + harness-core (adds a chain shaped Ctx and classify); the cross-vm CliDomain (CrossVmDomain) over harness-cli
 ```
+
+To build a variant of the config-driven runner for a non-cross-vm project (your own `ConfigExt` and `CliDomain`), see [`docs/extending-harness-cli.md`](docs/extending-harness-cli.md).
 
 Example contract sources and example test crates live outside the root workspace tree. The `contracts/` sources are excluded from the root workspace (they carry their own build toolchains, and `contracts/solana` is its own Cargo workspace); the example test crates under `examples/` are explicit workspace members:
 
@@ -58,6 +63,7 @@ examples/evm-tests      evm-tests         single-VM Counter example (evm-cli bin
 examples/cosmos-tests   cosmos-tests      single-VM Counter example (cosmos-cli binary)
 examples/solana-tests   solana-tests      single-VM Counter example (solana-cli binary)
 examples/tvm-tests      tvm-tests         single-VM Counter example (tvm-cli binary)
+examples/math-tests     math-tests        raw harness-core + harness-cli example (a Calculator checked against a shadow model), no domain layer, driven through GenericDomain (math-cli binary)
 examples/scripts        deploy_counter    imperative deploy script over the live RPC providers
 ```
 
