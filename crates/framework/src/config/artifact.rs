@@ -153,6 +153,7 @@ fn build_artifact(
                 cross_vm_config::WorldSource::Inherit => Some("inherited"),
                 cross_vm_config::WorldSource::Fresh => None,
             },
+            phase_params: resolved.phase_params.clone(),
         },
         profile: ArtifactProfileWrapper {
             replay: ArtifactReplayProfile {
@@ -281,6 +282,13 @@ struct ArtifactReplayMeta {
     /// starting state.
     #[serde(skip_serializing_if = "Option::is_none")]
     world_source: Option<&'static str>,
+    /// The exact per-phase `params` table this run's world was patched with, when the phase set
+    /// one, else absent. Provenance only (never parsed back): it records the precise world
+    /// mutation a replayed failure ran under. Written last so its `[replay.phase_params]` sub-table
+    /// follows the scalar `[replay]` keys (a TOML table's plain keys cannot follow a nested-table
+    /// header).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase_params: Option<toml::Table>,
 }
 
 /// The `[profile]` table wrapper, so the field ends up spelled `[profile.replay]` rather than a

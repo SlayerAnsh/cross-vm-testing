@@ -108,6 +108,9 @@ pub struct ResolvedProfile {
     /// Whether a later phase inherits from this run: when true and the run passes, the final
     /// `(Ctx, World)` is stashed in the harness's session slot instead of being dropped.
     pub stash_world: bool,
+    /// Per-phase params for the registered world patch fn. Set only by the CLI's pipeline
+    /// driver; `resolve_profile` always emits `None`.
+    pub phase_params: Option<toml::Table>,
 }
 
 /// Per-kind `native_symbol` default (spec section 4.6), applied here when a `[[chain]]`
@@ -303,6 +306,7 @@ pub fn resolve_profile(
         json_report,
         world_source: cross_vm_config::WorldSource::Fresh,
         stash_world: false,
+        phase_params: None,
     })
 }
 

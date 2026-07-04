@@ -550,6 +550,9 @@ struct PhasePlan {
     needs: Vec<String>,
     /// Where this phase's starting world comes from; `Fresh` for a legacy path.
     world: cross_vm_config::WorldSource,
+    /// Optional per-phase `params` table for the harness's registered world patch fn; `None` for
+    /// a legacy path.
+    params: Option<toml::Table>,
 }
 
 /// A dependency-free, fresh-world [`PhasePlan`] for `profile` (the shape every non-suite selection
@@ -559,6 +562,7 @@ fn fresh_phase(profile: String) -> PhasePlan {
         profile,
         needs: Vec::new(),
         world: cross_vm_config::WorldSource::Fresh,
+        params: None,
     }
 }
 
@@ -591,6 +595,7 @@ fn select_phases(
                 profile: p.profile.clone(),
                 needs: p.needs.clone(),
                 world: p.world,
+                params: p.params.clone(),
             })
             .collect();
         return Ok((phases, suite.stop_on_failure));
@@ -819,6 +824,7 @@ async fn run_selected(
             later.world == cross_vm_config::WorldSource::Inherit
                 && later.needs.first() == Some(&plan.profile)
         });
+        resolved.phase_params = plan.params.clone();
 
         if json_report_path.is_none() {
             json_report_path = resolved.json_report.clone();

@@ -80,6 +80,11 @@ pub struct SuitePhase {
     /// Starting-state source. `inherit` requires exactly one `needs` entry.
     #[serde(default)]
     pub world: WorldSource,
+    /// Optional table handed to the harness's registered world patch fn before this phase
+    /// runs (after the starting world is obtained, fresh or inherited). Requires the harness
+    /// to be registered with a patch fn; enforced at run time.
+    #[serde(default)]
+    pub params: Option<toml::Table>,
 }
 
 /// `[suite.<name>]`: an ordered pipeline of phases to run together.

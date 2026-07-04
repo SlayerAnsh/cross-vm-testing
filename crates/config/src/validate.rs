@@ -43,6 +43,7 @@ pub fn normalize_suite_phases(cfg: &mut RunConfig) -> Result<(), ConfigError> {
                         profile: profile.clone(),
                         needs: Vec::new(),
                         world: WorldSource::Fresh,
+                        params: None,
                     })
                     .collect();
                 suite.profiles.clear();

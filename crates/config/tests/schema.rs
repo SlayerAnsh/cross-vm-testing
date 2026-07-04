@@ -482,6 +482,19 @@ world = "inherit"
 }
 
 #[test]
+fn suite_phase_params_parse() {
+    let toml = suite_with_phases(
+        r#"[[suite.p.phases]]
+profile = "a"
+params = { pinned_token = "uosmo" }"#,
+    );
+    let cfg = cross_vm_config::from_toml_str(&toml, &no_vars).expect("loads");
+    let suite = &cfg.suites["p"];
+    let params = suite.phases[0].params.as_ref().expect("params present");
+    assert_eq!(params["pinned_token"].as_str(), Some("uosmo"));
+}
+
+#[test]
 fn suite_profiles_normalize_into_phases() {
     // Legacy sugar: `profiles = ["a", "b"]` becomes two fresh phases with no needs, and the
     // legacy `profiles` field is cleared so `phases` is the single source of truth.

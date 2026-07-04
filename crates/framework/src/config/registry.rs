@@ -137,6 +137,11 @@ type RunFn = Box<
 /// `register_inner`'s (and therefore `register`'s) signature free of the bound.
 type WorldExportFn<W> = Rc<dyn Fn(&W, &Path) -> Result<(), RunError>>;
 
+/// A world-patch closure's shape: mutates the starting `World` from a phase's `params`
+/// table, after the world is obtained (fresh or inherited) and before the run. The `Err`
+/// string surfaces as `RunError::Setup`.
+type WorldPatchFn<W> = Rc<dyn Fn(&mut W, &toml::Table) -> Result<(), String>>;
+
 /// The pipeline handoff slot: the typed `(Ctx, World)` a passing donor phase stashes for the
 /// next phase to inherit. One is created per registered harness in `register_inner` and lives for
 /// the registry's lifetime; a `None` slot means no donor world is currently available. It is an
@@ -198,7 +203,7 @@ impl Registry {
         F: Fn() -> H + 'static,
         S: Fn(SetupRequest) -> SetupFuture<'static, H::World> + 'static,
     {
-        self.register_inner::<H, F, S>(name, harness, setup, None)
+        self.register_inner::<H, F, S>(name, harness, setup, None, None)
     }
 
     /// Like [`register`](Registry::register), plus one additional bound: `H::World: Serialize`.
@@ -227,7 +232,57 @@ impl Registry {
         S: Fn(SetupRequest) -> SetupFuture<'static, H::World> + 'static,
     {
         let export: WorldExportFn<H::World> = Rc::new(export_world_json::<H::World>);
-        self.register_inner::<H, F, S>(name, harness, setup, Some(export))
+        self.register_inner::<H, F, S>(name, harness, setup, Some(export), None)
+    }
+
+    /// Like [`register`](Registry::register), plus a world patch fn: when a pipeline phase
+    /// sets `params`, the patch runs against the phase's starting world (fresh or inherited)
+    /// before the run. A phase with `params` on a harness registered without a patch fn is
+    /// rejected as [`RunError::Invalid`]. A patch closure that returns `Err` surfaces as
+    /// [`RunError::Setup`]. The patch mutates `World` only, never `Ctx`: letting a config table
+    /// poke a live chain would bypass `apply` and break the model/chain correspondence.
+    pub fn register_with_patch<H, F, S, P>(
+        &mut self,
+        name: &str,
+        harness: F,
+        setup: S,
+        patch: P,
+    ) -> &mut Self
+    where
+        H: Harness<Ctx = crate::harness::Ctx> + 'static,
+        H::Operation: serde::Serialize + DeserializeOwned + 'static,
+        H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
+        F: Fn() -> H + 'static,
+        S: Fn(SetupRequest) -> SetupFuture<'static, H::World> + 'static,
+        P: Fn(&mut H::World, &toml::Table) -> Result<(), String> + 'static,
+    {
+        self.register_inner::<H, F, S>(name, harness, setup, None, Some(Rc::new(patch)))
+    }
+
+    /// Like [`register_persistent`](Registry::register_persistent), plus a world patch fn: the
+    /// harness both exports its final `World` (a scenario `export_world` key) and accepts a
+    /// per-phase `params` patch against its starting world. Combines the two opt-ins;
+    /// otherwise identical to [`register_with_patch`](Registry::register_with_patch) (a phase
+    /// with `params` on a harness registered without a patch fn is [`RunError::Invalid`]; a
+    /// failing patch is [`RunError::Setup`]). The patch mutates `World` only, never `Ctx`.
+    pub fn register_persistent_with_patch<H, F, S, P>(
+        &mut self,
+        name: &str,
+        harness: F,
+        setup: S,
+        patch: P,
+    ) -> &mut Self
+    where
+        H: Harness<Ctx = crate::harness::Ctx> + 'static,
+        H::Operation: serde::Serialize + DeserializeOwned + 'static,
+        H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
+        H::World: serde::Serialize + 'static,
+        F: Fn() -> H + 'static,
+        S: Fn(SetupRequest) -> SetupFuture<'static, H::World> + 'static,
+        P: Fn(&mut H::World, &toml::Table) -> Result<(), String> + 'static,
+    {
+        let export: WorldExportFn<H::World> = Rc::new(export_world_json::<H::World>);
+        self.register_inner::<H, F, S>(name, harness, setup, Some(export), Some(Rc::new(patch)))
     }
 
     /// The shared body of [`register`](Registry::register) and
@@ -245,6 +300,7 @@ impl Registry {
         harness: F,
         setup: S,
         export: Option<WorldExportFn<H::World>>,
+        patch: Option<WorldPatchFn<H::World>>,
     ) -> &mut Self
     where
         H: Harness<Ctx = crate::harness::Ctx> + 'static,
@@ -284,6 +340,7 @@ impl Registry {
                 let setup = Rc::clone(&setup);
                 let harness_name = harness_name.clone();
                 let export = export.clone();
+                let patch = patch.clone();
                 let session = Rc::clone(&session);
                 Box::pin(async move {
                     run_profile::<H, F, S>(
@@ -293,6 +350,7 @@ impl Registry {
                         resolved,
                         opts,
                         export.as_ref(),
+                        patch.as_ref(),
                         &session,
                     )
                     .await
@@ -654,6 +712,32 @@ where
     }
 }
 
+/// Applies the phase's `params` patch to the just-obtained starting `world`, when the resolved
+/// profile carries `phase_params` (spec: the per-phase world patch). The patch mutates `World`
+/// only, never `Ctx`: letting a config table poke a live chain would bypass `apply` and break the
+/// model/chain correspondence invariants rely on.
+///
+/// A profile with `phase_params` set against a harness registered without a patch fn is
+/// [`RunError::Invalid`]; a patch closure that returns `Err` is [`RunError::Setup`]. A profile
+/// with no `phase_params` (the default) is a no-op, so a non-pipeline run is untouched.
+fn apply_phase_patch<W>(
+    world: &mut W,
+    resolved: &ResolvedProfile,
+    patch: Option<&WorldPatchFn<W>>,
+) -> Result<(), RunError> {
+    if let Some(params) = &resolved.phase_params {
+        let patch = patch.ok_or_else(|| {
+            RunError::Invalid(
+                "phase sets params, but this harness was registered without a world \
+                 patch fn (use register_with_patch)"
+                    .to_string(),
+            )
+        })?;
+        patch(world, params).map_err(|e| RunError::Setup(format!("world patch failed: {e}")))?;
+    }
+    Ok(())
+}
+
 /// The generic body every registered harness's `run` closure calls into (spec section 7's `run`
 /// bullet list). No `dyn Harness` exists here: `H`, `F`, `S` are all concrete at the call site.
 #[allow(clippy::too_many_arguments)]
@@ -664,6 +748,7 @@ async fn run_profile<H, F, S>(
     resolved: &ResolvedProfile,
     opts: &RunOptions,
     export: Option<&WorldExportFn<H::World>>,
+    patch: Option<&WorldPatchFn<H::World>>,
     session: &SessionSlot<H::World>,
 ) -> Result<ErasedReport, RunError>
 where
@@ -712,8 +797,9 @@ where
                 let seed_i = sub_seed(base_seed, 0);
                 tracing::info!(case = 0, seed = seed_i, "fuzz case starting");
 
-                let (ctx, world) =
+                let (ctx, mut world) =
                     obtain_start_state::<H, S>(setup, session, resolved, seed_i).await?;
+                apply_phase_patch(&mut world, resolved, patch)?;
 
                 let mut runner = Runner::<H, Fuzz>::fuzz(make_harness(), seed_i);
                 if resolved.stats {
@@ -786,8 +872,9 @@ where
             let ops = opts.ops.unwrap_or(p.ops);
             let selection = parse_kind_selection::<H>(&p.kinds, &p.weights)?;
 
-            let (ctx, world) =
+            let (ctx, mut world) =
                 obtain_start_state::<H, S>(setup, session, resolved, base_seed).await?;
+            apply_phase_patch(&mut world, resolved, patch)?;
 
             let mut runner = Runner::<H, Invariant>::invariant(make_harness(), base_seed);
             if resolved.stats {
@@ -821,8 +908,9 @@ where
         cross_vm_config::Profile::Endurance(p) => {
             let selection = parse_kind_selection::<H>(&p.kinds, &p.weights)?;
 
-            let (ctx, world) =
+            let (ctx, mut world) =
                 obtain_start_state::<H, S>(setup, session, resolved, base_seed).await?;
+            apply_phase_patch(&mut world, resolved, patch)?;
 
             // The loader's structural validation (`validate::validate`) guarantees a profile
             // sets `duration` and/or `max_ops`; when only `max_ops` is set, a long-but-safe
@@ -893,8 +981,9 @@ where
                 ));
             }
 
-            let (ctx, world) =
+            let (ctx, mut world) =
                 obtain_start_state::<H, S>(setup, session, resolved, base_seed).await?;
+            apply_phase_patch(&mut world, resolved, patch)?;
 
             let steps = p
                 .steps
@@ -1112,6 +1201,7 @@ mod tests {
             json_report: None,
             world_source: cross_vm_config::WorldSource::Fresh,
             stash_world: false,
+            phase_params: None,
         }
     }
 
@@ -1968,5 +2058,128 @@ mod tests {
             .unwrap();
         let failure = report.failure.expect("must fail");
         assert!(!failure.shrunk, "inherited phase must not shrink");
+    }
+
+    // ----- per-phase world patch (params + registered patch fn) -----
+
+    #[tokio::test]
+    async fn phase_params_patch_the_inherited_world() {
+        let mut registry = Registry::new();
+        registry.register_persistent_with_patch(
+            "mock",
+            || MockHarness,
+            mock_setup,
+            |world: &mut u32, params: &toml::Table| {
+                if let Some(n) = params.get("add").and_then(|v| v.as_integer()) {
+                    *world += n as u32;
+                }
+                Ok(())
+            },
+        );
+        // Donor: invariant, 3 Ping ops, seed 7 -> world 10, stashed.
+        let donor = resolved_pipeline(
+            invariant_profile(3, Some(vec!["Ping".to_string()])),
+            cross_vm_config::WorldSource::Fresh,
+            true,
+        );
+        registry
+            .run("mock", &donor, &RunOptions::default())
+            .await
+            .unwrap();
+
+        // Inheritor: params add = 5 patch the stashed 10 to 15 before one Ping lands: 16.
+        let path = temp_export_path("patched");
+        let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Accepted)];
+        let mut inheritor = resolved_pipeline(
+            scenario_profile_with_export(steps, path.to_str().unwrap()),
+            cross_vm_config::WorldSource::Inherit,
+            false,
+        );
+        inheritor.phase_params = Some(toml::toml! { add = 5 });
+        registry
+            .run("mock", &inheritor, &RunOptions::default())
+            .await
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value, serde_json::json!(16), "10 stashed + 5 patched + 1 Ping");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn phase_params_also_patch_a_fresh_world() {
+        let mut registry = Registry::new();
+        registry.register_persistent_with_patch(
+            "mock",
+            || MockHarness,
+            mock_setup,
+            |world: &mut u32, params: &toml::Table| {
+                if let Some(n) = params.get("add").and_then(|v| v.as_integer()) {
+                    *world += n as u32;
+                }
+                Ok(())
+            },
+        );
+
+        // A Fresh scenario (one Ping) with phase_params add = 5: fresh setup seeds world 7 (the
+        // profile's fixed seed), the patch makes 12, one Ping makes 13. Observed via export.
+        let path = temp_export_path("fresh-patched");
+        let steps = vec![mock_step("Ping", cross_vm_config::ExpectStr::Accepted)];
+        let mut run = resolved_pipeline(
+            scenario_profile_with_export(steps, path.to_str().unwrap()),
+            cross_vm_config::WorldSource::Fresh,
+            false,
+        );
+        run.phase_params = Some(toml::toml! { add = 5 });
+        registry
+            .run("mock", &run, &RunOptions::default())
+            .await
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value, serde_json::json!(13), "7 fresh + 5 patched + 1 Ping");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn phase_params_without_a_patch_fn_are_invalid() {
+        let mut registry = Registry::new();
+        registry.register("mock", || MockHarness, mock_setup);
+        let mut run = resolved_pipeline(
+            invariant_profile(1, Some(vec!["Ping".to_string()])),
+            cross_vm_config::WorldSource::Fresh,
+            false,
+        );
+        run.phase_params = Some(toml::toml! { add = 5 });
+        let err = registry
+            .run("mock", &run, &RunOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Invalid(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn failing_patch_is_a_setup_error() {
+        let mut registry = Registry::new();
+        registry.register_with_patch(
+            "mock",
+            || MockHarness,
+            mock_setup,
+            |_world: &mut u32, _params: &toml::Table| Err("bad params".to_string()),
+        );
+        let mut run = resolved_pipeline(
+            invariant_profile(1, Some(vec!["Ping".to_string()])),
+            cross_vm_config::WorldSource::Fresh,
+            false,
+        );
+        run.phase_params = Some(toml::toml! { add = 5 });
+        let err = registry
+            .run("mock", &run, &RunOptions::default())
+            .await
+            .unwrap_err();
+        match err {
+            RunError::Setup(msg) => assert!(msg.contains("bad params"), "{msg}"),
+            other => panic!("expected RunError::Setup, got {other:?}"),
+        }
     }
 }
