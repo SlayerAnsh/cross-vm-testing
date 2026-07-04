@@ -2365,6 +2365,7 @@ dependencies = [
  "cross-vm-tron",
  "dotenvy",
  "harness-core",
+ "harness-core-macros",
  "humantime",
  "rand 0.8.6",
  "revm",
@@ -3426,12 +3427,22 @@ name = "harness-core"
 version = "0.1.0"
 dependencies = [
  "arbitrary",
+ "harness-core-macros",
  "rand 0.8.6",
  "rand_chacha 0.3.1",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "harness-core-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]

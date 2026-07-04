@@ -4,12 +4,6 @@
 
 use cross_vm_framework::prelude::*;
 #[cfg(feature = "endurance")]
-use cross_vm_macros::endurance_runner;
-#[cfg(feature = "fuzz")]
-use cross_vm_macros::fuzz_runner;
-#[cfg(feature = "invariant")]
-use cross_vm_macros::invariant_runner;
-#[cfg(feature = "endurance")]
 use std::time::Duration;
 
 use solana_tests::counter::{counter_setup, CounterHarness, CounterOp};

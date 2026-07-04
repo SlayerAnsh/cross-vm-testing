@@ -9,6 +9,7 @@ members = [
     "crates/solana",
     "crates/tron",
     "crates/harness",
+    "crates/harness-macros",
     "crates/framework",
     "crates/macros",
     # Reusable contract bindings (mocks) + shared test helpers for the example test crates.
@@ -65,6 +66,7 @@ cross-vm-solidity = { path = "crates/solidity", version = "0.1.0" }
 cross-vm-solana = { path = "crates/solana", version = "0.1.0" }
 cross-vm-tron = { path = "crates/tron", version = "0.1.0" }
 harness-core = { path = "crates/harness", version = "0.1.0" }
+harness-core-macros = { path = "crates/harness-macros", version = "0.1.0" }
 
 # Proc-macro toolkit
 syn = { version = "2", features = ["full"] }

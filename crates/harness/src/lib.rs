@@ -44,6 +44,8 @@ pub use runner::{
     DEFAULT_SHRINK_LIMIT,
 };
 pub use stats::{op_label, OpStat, Stats};
+#[cfg(feature = "macros")]
+pub use harness_core_macros::{endurance_runner, fuzz_runner, invariant_runner};
 
 /// A developer-defined property-test subject. One implementation drives fuzz, invariant,
 /// endurance, and rstest-matrix runs.

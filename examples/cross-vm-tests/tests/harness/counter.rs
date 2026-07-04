@@ -17,12 +17,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use cross_vm_framework::prelude::*;
-#[cfg(feature = "endurance")]
-use cross_vm_macros::endurance_runner;
-#[cfg(feature = "fuzz")]
-use cross_vm_macros::fuzz_runner;
-#[cfg(feature = "invariant")]
-use cross_vm_macros::invariant_runner;
 #[cfg(feature = "rpc-endurance")]
 use cross_vm_solidity::chains::BASE_SEPOLIA;
 

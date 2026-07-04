@@ -34,12 +34,6 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use cross_vm_framework::prelude::*;
-#[cfg(feature = "endurance")]
-use cross_vm_macros::endurance_runner;
-#[cfg(feature = "fuzz")]
-use cross_vm_macros::fuzz_runner;
-#[cfg(feature = "invariant")]
-use cross_vm_macros::invariant_runner;
 
 use crate::support::{
     fund_alice, parse_packets, test_wallets, Bridge, BridgeLedger, PacketKind, PingPong,

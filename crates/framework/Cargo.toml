@@ -13,6 +13,9 @@ cross-vm-macros.workspace = true
 # The standalone property harness: the `Harness` trait, the mode-typed `Runner`, rng, per-op
 # stats, and outcome types. Re-exported through `crate::harness` and pinned to the cross-VM `Ctx`.
 harness-core.workspace = true
+# Per-mode runner attribute macros (`#[fuzz_runner]` / `#[invariant_runner]` / `#[endurance_runner]`),
+# re-exported from the prelude alongside the contract/roster macros above.
+harness-core-macros.workspace = true
 cross-vm-cosmwasm = { workspace = true, optional = true }
 cross-vm-solidity = { workspace = true, optional = true }
 cross-vm-solana = { workspace = true, optional = true }
