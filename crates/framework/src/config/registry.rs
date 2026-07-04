@@ -602,14 +602,18 @@ where
     if !resolved.shrink || report.failure.is_none() {
         return (report, false);
     }
-    // A shrink rebuild always starts from a *fresh* setup (see `rebuild` below), so it can never
-    // reproduce the starting state an `Inherit` phase was handed by its donor. Shrinking under a
-    // different starting world would compare apples to oranges, so an inherited phase is forced
-    // to skip shrinking entirely, keeping the raw failing history intact.
-    if resolved.world_source == cross_vm_config::WorldSource::Inherit {
+    // A shrink rebuild always starts from a *fresh, unpatched* setup (see `rebuild` below), so it
+    // can never reproduce the starting state an `Inherit` phase was handed by its donor, nor the
+    // starting state a fresh phase reached after its `params` patch ran. Shrinking under a
+    // different starting world would compare apples to oranges, so both an inherited phase and a
+    // params-patched fresh phase are forced to skip shrinking entirely, keeping the raw failing
+    // history intact.
+    if resolved.world_source == cross_vm_config::WorldSource::Inherit
+        || resolved.phase_params.is_some()
+    {
         tracing::warn!(
-            "shrink disabled: a shrink rebuild starts from a fresh setup and would not \
-             reproduce the inherited starting state"
+            "shrink disabled: a shrink rebuild starts from a fresh unpatched setup and would not \
+             reproduce the inherited or params-patched starting state"
         );
         return (report, false);
     }
@@ -2064,6 +2068,50 @@ mod tests {
             .unwrap();
         let failure = report.failure.expect("must fail");
         assert!(!failure.shrunk, "inherited phase must not shrink");
+    }
+
+    #[tokio::test]
+    async fn params_patched_fresh_phase_forces_shrink_off() {
+        // A FRESH phase whose `params` patch mutates its starting world must not shrink: the
+        // shrink `rebuild` does a fresh, unpatched setup and never re-applies the patch, so a
+        // "still fails" verdict would be judged against a different starting world than the one
+        // the failure surfaced under (the same apples-to-oranges hazard the Inherit guard
+        // prevents). Boom always fails regardless of the world value, so pre-fix this run would
+        // have shrunk happily and marked `shrunk = true`; the guard is what keeps it false, so
+        // the assertion genuinely discriminates.
+        let mut registry = Registry::new();
+        registry.register_with_patch(
+            "mock",
+            || MockHarness,
+            mock_setup,
+            |world: &mut u32, params: &toml::Table| {
+                if let Some(n) = params.get("add").and_then(|v| v.as_integer()) {
+                    *world += n as u32;
+                }
+                Ok(())
+            },
+        );
+
+        // Fresh invariant over Boom with shrink = true and phase_params add = 5: the fresh world
+        // is patched before the run, so shrink is forced off. The failure stands, unshrunk.
+        let mut run = ResolvedProfile {
+            world_source: cross_vm_config::WorldSource::Fresh,
+            ..resolved_with_shrink(
+                invariant_profile(3, Some(vec!["Boom".to_string()])),
+                true,
+                256,
+            )
+        };
+        run.phase_params = Some(toml::toml! { add = 5 });
+        let report = registry
+            .run("mock", &run, &RunOptions::default())
+            .await
+            .unwrap();
+        let failure = report.failure.expect("must fail");
+        assert!(
+            !failure.shrunk,
+            "params-patched fresh phase must not shrink"
+        );
     }
 
     #[tokio::test]
