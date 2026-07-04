@@ -2,7 +2,7 @@
 
 use cross_vm_core::ChainKind;
 
-use crate::harness::{Ctx, HarnessError};
+use crate::harness::Ctx;
 
 /// Mock vs. RPC target for a chain, or the profile default. Framework-side counterpart of
 /// [`cross_vm_config::TargetStr`] (that type stays in the pure config crate; this one is what
@@ -91,8 +91,7 @@ pub struct SetupRequest {
     pub seed: u64,
 }
 
-/// A boxed, pinned future returning the `(Ctx, World)` pair a config-driven setup fn builds.
-/// The lifetime lets the future borrow from the closure that produced it (e.g. a captured
-/// `SetupRequest`).
-pub type SetupFuture<'a, W> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(Ctx, W), HarnessError>> + 'a>>;
+/// A boxed, pinned future returning the `(Ctx, World)` pair a config-driven
+/// setup fn builds. Alias over the generic harness-cli shape with the
+/// framework's [`Ctx`] fixed.
+pub type SetupFuture<'a, W> = harness_cli::SetupFuture<'a, Ctx, W>;

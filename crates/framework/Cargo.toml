@@ -27,6 +27,9 @@ tracing.workspace = true
 # `cli`-only helper: draws a fresh `u64` base seed for a `Random` seed spec (`resolve_base_seed`).
 # The deterministic run RNG (ChaCha) now lives entirely in `harness-core`.
 rand.workspace = true
+# `cli`-only: the generic config-driven CLI, harness registry, and run pipeline the `config`
+# module builds the cross-vm domain adapter (`CrossVmDomain`) over.
+harness-cli = { workspace = true, optional = true }
 # `cli`-only: the declarative run-config schema the `config` module bridges into framework types.
 cross-vm-config = { workspace = true, optional = true }
 # `cli`-only: CLI argument parsing (Task 7).
@@ -69,16 +72,19 @@ serde = ["dep:serde", "harness-core/serde"]
 # later tasks) the registry and the `cross-vm` binary's argument parsing.
 cli = [
     "serde",
+    "dep:harness-cli",
     "dep:cross-vm-config",
     "dep:clap",
     "dep:serde_json",
+    "dep:toml",
+    # Kept pending Task 17 (the `cross-vm` binary's own arg parsing / process wiring in
+    # `src/cli.rs`, which still references each of these under `#[cfg(feature = "cli")]`):
+    # `dotenvy` for `.env` loading, `tracing-subscriber` for the fmt layer, `humantime` for
+    # `--duration` parsing, and `tokio/signal` for the endurance ctrl-c stop flag. Task 17
+    # re-evaluates whether any can be dropped once `src/cli.rs` moves onto `harness_cli::Cli`.
     "dep:dotenvy",
     "dep:tracing-subscriber",
-    "dep:toml",
     "dep:humantime",
-    # ctrl-c handling for the endurance runner's cooperative stop flag (Task 10); tokio is a
-    # mandatory workspace dep with a fixed feature set, so `cli` adds the extra feature to the
-    # existing dependency rather than redeclaring it.
     "tokio/signal",
 ]
 
