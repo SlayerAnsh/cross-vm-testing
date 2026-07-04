@@ -1,0 +1,7 @@
+# Scenario `steps` must be non-empty.
+[harness]
+name = "h"
+
+[profile.p]
+mode = "scenario"
+steps = []
