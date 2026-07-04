@@ -328,12 +328,13 @@ impl Registry {
 /// its parsed kinds so the borrow `run_with` takes on a `&[K]` / `&[(K, u32)]` outlives the call
 /// (spec section 7.1: weighted pair order is the sorted kind-name / `BTreeMap` iteration order).
 pub(super) enum KindSelection<K> {
-    /// Neither `kinds` nor `weights` was set: draw from every kind via `Harness::generate` (a
-    /// harness `generate` override still applies).
+    /// Neither `kinds` nor `weights` was set: draw from every kind, weighted per draw by
+    /// `Harness::weight` (uniform under the default weight of 1).
     All,
-    /// `kinds` was set: uniform draw over this subset.
+    /// `kinds` was set: draw over this subset, weighted per draw by `Harness::weight`.
     Restricted(Vec<K>),
-    /// `weights` was set: draw over these `(kind, weight)` pairs, in sorted-kind-name order.
+    /// `weights` was set: static per-kind weights, in sorted-kind-name order, multiplied per
+    /// draw by `Harness::weight`.
     Weighted(Vec<(K, u32)>),
 }
 
@@ -348,8 +349,9 @@ impl<K> KindSelection<K> {
 }
 
 /// Parses one profile's `kinds`/`weights` against `H::OpKind`. Precedence matches spec section
-/// 6.1 (`weights` beats `kinds` beats the harness default); `cross-vm-config`'s structural
-/// validation already rejects a profile that sets both, so this is belt and suspenders.
+/// 6.1 (`weights` beats `kinds`; both compose with the harness's dynamic `Harness::weight`
+/// (static times dynamic)); `cross-vm-config`'s structural validation already rejects a profile
+/// that sets both, so this is belt and suspenders.
 pub(super) fn parse_kind_selection<H: Harness<Ctx = crate::harness::Ctx>>(
     kinds: &Option<Vec<String>>,
     weights: &Option<BTreeMap<String, u32>>,

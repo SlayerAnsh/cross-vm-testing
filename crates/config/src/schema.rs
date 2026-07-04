@@ -204,7 +204,8 @@ pub struct FuzzProfile {
     pub ops: usize,
     /// Restricted uniform draw over these kind names; `None` means all kinds.
     pub kinds: Option<Vec<String>>,
-    /// Weighted draw over kind name to integer weight; mutually exclusive with `kinds`.
+    /// Static weighted draw over kind name to integer weight, multiplied at each draw by the
+    /// harness's dynamic `weight(ctx, world, kind)`; mutually exclusive with `kinds`.
     pub weights: Option<BTreeMap<String, u32>>,
 }
 
@@ -255,7 +256,8 @@ pub struct InvariantProfile {
     pub ops: usize,
     /// Restricted uniform draw over these kind names; `None` means all kinds.
     pub kinds: Option<Vec<String>>,
-    /// Weighted draw over kind name to integer weight; mutually exclusive with `kinds`.
+    /// Static weighted draw over kind name to integer weight, multiplied at each draw by the
+    /// harness's dynamic `weight(ctx, world, kind)`; mutually exclusive with `kinds`.
     pub weights: Option<BTreeMap<String, u32>>,
 }
 
@@ -336,7 +338,8 @@ pub struct EnduranceProfile {
     pub heartbeat: Duration,
     /// Restricted uniform draw over these kind names; `None` means all kinds.
     pub kinds: Option<Vec<String>>,
-    /// Weighted draw over kind name to integer weight; mutually exclusive with `kinds`.
+    /// Static weighted draw over kind name to integer weight, multiplied at each draw by the
+    /// harness's dynamic `weight(ctx, world, kind)`; mutually exclusive with `kinds`.
     pub weights: Option<BTreeMap<String, u32>>,
 }
 
