@@ -30,9 +30,7 @@
 
 mod ctx;
 mod outcome;
-mod rng;
 mod runner;
-mod stats;
 
 pub use ctx::Ctx;
 pub use outcome::{
@@ -40,14 +38,13 @@ pub use outcome::{
     Verdict, Violation,
 };
 #[cfg(feature = "fuzz")]
-pub use rng::sample_arbitrary;
-pub use rng::{random_seed, sub_seed, Prng};
+pub use harness_core::sample_arbitrary;
+pub use harness_core::{op_label, random_seed, sub_seed, OpStat, Prng, Stats};
 pub use runner::{
     Endurance, EnduranceConfig, EnduranceRunner, Expectation, Fuzz, FuzzRunner, Invariant,
     InvariantRunner, KindMix, RunMode, Runner, Scenario, ScenarioRunner, ScenarioStep, Sequential,
     DEFAULT_SHRINK_LIMIT,
 };
-pub use stats::{op_label, OpStat, Stats};
 
 /// A developer-defined property-test subject. One implementation drives fuzz, invariant,
 /// endurance, and rstest-matrix runs.

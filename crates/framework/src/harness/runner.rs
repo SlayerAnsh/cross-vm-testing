@@ -23,7 +23,7 @@ use super::ctx::Ctx;
 use super::outcome::{
     CheckOutcome, Coverage, Failure, FailureKind, HarnessError, RunReport, Verdict,
 };
-use super::stats::{op_label, OpOutcome, Stats};
+use harness_core::{op_label, OpOutcome, Stats};
 use super::{Harness, Prng};
 
 /// A run-mode marker. The unit type parameter `M` on [`Runner`] selects which driver method is

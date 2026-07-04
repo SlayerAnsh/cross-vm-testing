@@ -10,6 +10,9 @@ description = "Cross-VM testing framework: hold and drive CosmWasm, EVM, Solana,
 [dependencies]
 cross-vm-core.workspace = true
 cross-vm-macros.workspace = true
+# The dependency-free half of the property harness (rng + per-op stats); the rest lands here in
+# later tasks.
+harness-core.workspace = true
 cross-vm-cosmwasm = { workspace = true, optional = true }
 cross-vm-solidity = { workspace = true, optional = true }
 cross-vm-solana = { workspace = true, optional = true }
@@ -21,8 +24,6 @@ tracing.workspace = true
 # Property testing: portable, seedable RNG (ChaCha) for deterministic, replayable runs.
 rand.workspace = true
 rand_chacha.workspace = true
-# Optional zero-boilerplate stateless operation generation.
-arbitrary = { workspace = true, optional = true }
 # `cli`-only: the declarative run-config schema the `config` module bridges into framework types.
 cross-vm-config = { workspace = true, optional = true }
 # `cli`-only: CLI argument parsing (Task 7).
@@ -58,9 +59,9 @@ evm = ["dep:cross-vm-solidity", "dep:revm"]
 solana = ["dep:cross-vm-solana"]
 tron = ["dep:cross-vm-tron", "dep:revm"]
 # Enables `sample_arbitrary` + the `arbitrary` derive path for stateless op generation.
-fuzz = ["dep:arbitrary"]
+fuzz = ["harness-core/fuzz"]
 # Adds `Serialize` reachability for outcome/stats types (the derives themselves land in Task 11).
-serde = ["dep:serde"]
+serde = ["dep:serde", "harness-core/serde"]
 # The config-driven CLI: TOML/JSON run configs, chain construction, profile resolution, and (in
 # later tasks) the registry and the `cross-vm` binary's argument parsing.
 cli = [
