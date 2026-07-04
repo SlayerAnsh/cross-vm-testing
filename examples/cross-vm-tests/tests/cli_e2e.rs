@@ -418,10 +418,11 @@ fn staged_suite_mixes_modes_across_phases() {
         );
     }
 
-    // Each phase reports its own runner mode label: the scenario runner logs `mode="case"`, the
-    // invariant phase `mode=invariant`, and the single case fuzz phase `mode=fuzz`. Their
-    // presence proves the three distinct modes ran in one pipeline.
-    for mode in ["case", "invariant", "fuzz"] {
+    // Each phase reports its own runner mode label: the scenario phase logs `mode=scenario`
+    // (erase_report's scenario arm sets `ErasedReport.mode = "scenario"`, logged verbatim by
+    // `log_profile_result`), the invariant phase `mode=invariant`, and the single case fuzz
+    // phase `mode=fuzz`. Their presence proves the three distinct modes ran in one pipeline.
+    for mode in ["scenario", "invariant", "fuzz"] {
         assert!(
             combined.contains(mode),
             "mode label {mode} missing from combined output: {combined}"
