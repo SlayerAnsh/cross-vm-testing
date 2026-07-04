@@ -23,6 +23,8 @@ members = [
     "examples/tvm-tests",
     # Multi-chain integration & example tests, co-located with the contract artifacts they embed.
     "examples/cross-vm-tests",
+    # Raw generic example: harness-core + harness-cli with no domain layer (developer docs).
+    "examples/math-tests",
 ]
 # Example contracts (now under `contracts/`) are standalone crates (their own workspaces / build
 # toolchains); they are consumed by tests via path dependencies but must not be workspace members.
