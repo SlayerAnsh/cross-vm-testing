@@ -2313,6 +2313,7 @@ dependencies = [
 name = "cross-vm-config"
 version = "0.1.0"
 dependencies = [
+ "harness-config",
  "humantime",
  "serde",
  "serde_json",

@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Declarative TOML/JSON run-config schema for cross-vm-testing (pure data, no framework/tokio/chain deps)"
 
 [dependencies]
+harness-config.workspace = true
 serde = { workspace = true, features = ["derive"] }
 toml.workspace = true
 serde_json.workspace = true

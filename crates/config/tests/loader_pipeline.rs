@@ -23,7 +23,7 @@ fn good_full_loads_successfully_with_no_warnings() {
     let cfg = cross_vm_config::from_toml_str(fixture!("good_full.toml"), &no_vars)
         .expect("good_full.toml should load cleanly");
     assert_eq!(cfg.harness.name, "vault");
-    assert_eq!(cfg.chains.len(), 3);
+    assert_eq!(cfg.ext.chain.len(), 3);
     assert_eq!(cfg.profiles.len(), 5);
     assert!(cfg.suites.contains_key("nightly"));
     assert!(
@@ -33,7 +33,7 @@ fn good_full_loads_successfully_with_no_warnings() {
     );
 
     // Interpolation with a `:-default` fallback resolved for the eth chain's rpc_url.
-    let eth = cfg.chains.iter().find(|c| c.label == "eth").unwrap();
+    let eth = cfg.ext.chain.iter().find(|c| c.label == "eth").unwrap();
     assert_eq!(eth.rpc_url.as_deref(), Some("https://eth.llamarpc.com"));
 }
 
@@ -50,8 +50,9 @@ fn warn_defaults_stripped_loads_with_a_strip_warning() {
 fn bad_duplicate_label_errors() {
     let err =
         cross_vm_config::from_toml_str(fixture!("bad_duplicate_label.toml"), &no_vars).unwrap_err();
+    assert!(matches!(err, ConfigError::Domain(_)), "unexpected: {err}");
     assert!(
-        matches!(err, ConfigError::DuplicateChainLabel { ref label } if label == "eth"),
+        err.to_string().contains("duplicate chain label `eth`"),
         "unexpected error: {err}"
     );
 }
@@ -60,13 +61,13 @@ fn bad_duplicate_label_errors() {
 fn bad_missing_cosmwasm_field_errors() {
     let err = cross_vm_config::from_toml_str(fixture!("bad_missing_cosmwasm_field.toml"), &no_vars)
         .unwrap_err();
+    assert!(matches!(err, ConfigError::Domain(_)), "unexpected: {err}");
+    let message = err.to_string();
     assert!(
-        matches!(err, ConfigError::MissingChainFields { ref label, .. } if label == "osmosis"),
+        message.contains("chain `osmosis`") && message.contains("missing required field(s)"),
         "unexpected error: {err}"
     );
-    if let ConfigError::MissingChainFields { fields, .. } = &err {
-        assert!(fields.iter().any(|f| f == "bech32_prefix"));
-    }
+    assert!(message.contains("bech32_prefix"), "unexpected error: {err}");
 }
 
 #[test]
@@ -74,8 +75,10 @@ fn bad_unknown_selection_label_errors() {
     let err =
         cross_vm_config::from_toml_str(fixture!("bad_unknown_selection_label.toml"), &no_vars)
             .unwrap_err();
+    assert!(matches!(err, ConfigError::Domain(_)), "unexpected: {err}");
     assert!(
-        matches!(err, ConfigError::UnknownChainSelection { ref label, .. } if label == "osmosis"),
+        err.to_string()
+            .contains("env.chains references unknown chain label `osmosis`"),
         "unexpected error: {err}"
     );
 }
@@ -84,8 +87,10 @@ fn bad_unknown_selection_label_errors() {
 fn bad_unknown_target_label_errors() {
     let err = cross_vm_config::from_toml_str(fixture!("bad_unknown_target_label.toml"), &no_vars)
         .unwrap_err();
+    assert!(matches!(err, ConfigError::Domain(_)), "unexpected: {err}");
     assert!(
-        matches!(err, ConfigError::UnknownTargetLabel { ref label, .. } if label == "osmosis"),
+        err.to_string()
+            .contains("env.targets references unknown chain label `osmosis`"),
         "unexpected error: {err}"
     );
 }
@@ -94,8 +99,10 @@ fn bad_unknown_target_label_errors() {
 fn bad_rpc_without_url_errors() {
     let err =
         cross_vm_config::from_toml_str(fixture!("bad_rpc_without_url.toml"), &no_vars).unwrap_err();
+    assert!(matches!(err, ConfigError::Domain(_)), "unexpected: {err}");
     assert!(
-        matches!(err, ConfigError::MissingRpcUrl { ref label, .. } if label == "eth"),
+        err.to_string()
+            .contains("chain `eth` resolves to target `rpc` but has no `rpc_url`"),
         "unexpected error: {err}"
     );
 }
@@ -145,8 +152,10 @@ fn bad_kinds_weights_errors() {
 fn bad_empty_chain_kind_errors() {
     let err = cross_vm_config::from_toml_str(fixture!("bad_empty_chain_kind.toml"), &no_vars)
         .unwrap_err();
+    assert!(matches!(err, ConfigError::Domain(_)), "unexpected: {err}");
     assert!(
-        matches!(err, ConfigError::EmptyChainKind { ref label } if label == "eth"),
+        err.to_string()
+            .contains("chain `eth`: `kind` must not be empty"),
         "unexpected error: {err}"
     );
 }

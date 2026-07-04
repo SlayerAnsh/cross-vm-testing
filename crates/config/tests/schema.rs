@@ -119,9 +119,9 @@ fn full_example_parses_top_level_shape() {
 
     assert_eq!(cfg.harness.name, "vault");
     assert_eq!(cfg.harness.setup, "default");
-    assert_eq!(cfg.chains.len(), 3);
-    assert_eq!(cfg.chains[0].kind, "cosmwasm");
-    assert_eq!(cfg.chains[0].label, "osmosis");
+    assert_eq!(cfg.ext.chain.len(), 3);
+    assert_eq!(cfg.ext.chain[0].kind, "cosmwasm");
+    assert_eq!(cfg.ext.chain[0].label, "osmosis");
 
     let smoke = cfg.profiles.get("smoke").expect("smoke profile present");
     match smoke {
@@ -426,9 +426,16 @@ const PARITY_JSON: &str = r#"
 
 #[test]
 fn json_input_parses_to_an_equal_run_config() {
+    // `RunConfig` (the generic `harness_config::RunConfig<CrossVmExt>`) is not `PartialEq`, so
+    // compare the loaded parts field-wise; TOML and JSON inputs must produce equal contents.
     let from_toml = cross_vm_config::from_toml_str(PARITY_TOML, &no_vars).unwrap();
     let from_json = cross_vm_config::from_json_str(PARITY_JSON, &no_vars).unwrap();
-    assert_eq!(from_toml, from_json);
+    assert_eq!(from_toml.harness, from_json.harness);
+    assert_eq!(from_toml.ext.chain, from_json.ext.chain);
+    assert_eq!(from_toml.env, from_json.env);
+    assert_eq!(from_toml.profiles, from_json.profiles);
+    assert_eq!(from_toml.suites, from_json.suites);
+    assert_eq!(from_toml.warnings, from_json.warnings);
 }
 
 // --- Phase 3.1: pipeline `phases` and `WorldSource` ---
