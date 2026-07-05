@@ -1,7 +1,7 @@
 //! [`ErasedReport`]/[`ErasedFailure`]: the mode-agnostic outcome the registry hands back to the
 //! CLI, plus [`erase_report`], the conversion from a monomorphized [`RunReport`].
 //!
-//! The registry's `run` closure (`crate::config::registry`) is generic over the registered
+//! The registry's `run` closure (`crate::registry`) is generic over the registered
 //! [`Harness`](harness_core::Harness), so no `dyn Harness` ever exists inside it; `ErasedReport`
 //! is the one place a run's outcome crosses from "generic over `H::Operation`" into
 //! "harness-agnostic data the CLI can print or serialize as JSON" (spec section 7).
@@ -69,7 +69,7 @@ pub struct ErasedFailure {
     pub history: serde_json::Value,
     /// Whether `history` above is the auto-shrunk sequence (`resolved.shrink` was `true` and the
     /// run failed) or the raw, unshrunk history. Set by `erase_report`'s caller
-    /// (`crate::config::registry`), never derived here.
+    /// (`crate::registry`), never derived here.
     pub shrunk: bool,
 }
 
@@ -83,7 +83,7 @@ pub struct ErasedFailure {
 /// Errors only if `Op`'s `Serialize` impl fails on the failure history (an out-of-range integer,
 /// a non-string map key, ...); a well-behaved op enum never hits this.
 ///
-/// `shrunk` is the caller's own determination (`crate::config::registry`'s `maybe_shrink`): `true`
+/// `shrunk` is the caller's own determination (`crate::registry`'s `maybe_shrink`): `true`
 /// when `report.failure.history` is already the auto-shrunk sequence, `false` when it is the raw
 /// history (shrink disabled, or this profile's mode never shrinks). This function does not shrink
 /// anything itself; it only stamps the flag onto the erased failure.
