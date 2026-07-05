@@ -9,6 +9,7 @@
 use core::fmt;
 use core::future::Future;
 use core::pin::Pin;
+use std::collections::BTreeMap;
 
 use crate::{CheckOutcome, HarnessError, Prng, Verdict};
 
@@ -117,5 +118,68 @@ impl<C: 'static, W: 'static> OpDef<C, W> {
     /// The kind's dynamic weight for the current state (calls the stored weight fn).
     pub fn weight(&self, ctx: &C, world: &W) -> u32 {
         (self.weight)(ctx, world)
+    }
+}
+
+/// Advance hook for [`OpSetHarness::with_advance`]: progress time/blocks between endurance
+/// operations (mirrors [`Harness::advance`](crate::Harness::advance)). Unset means no-op.
+pub type AdvanceFn<C> = for<'a> fn(&'a mut C, u64) -> OpFuture<'a, Result<(), HarnessError>>;
+
+/// A [`Harness`](crate::Harness) assembled from registered [`OpDef`]s instead of a
+/// hand-written enum: `apply` dispatches to the op itself, `generate_op` and `weight` look
+/// the kind up in the registry, so adding an op touches exactly one [`OpDef`].
+///
+/// Kinds live in a `BTreeMap`, so `op_kinds` yields sorted name order on every run: the same
+/// seed draws the same op stream regardless of registration order. Register at least one op
+/// before loading the harness into a runner; a run over an empty registry fails at the first
+/// draw.
+pub struct OpSetHarness<C: 'static, W: 'static> {
+    ops: BTreeMap<&'static str, OpDef<C, W>>,
+    invariants: Vec<Box<dyn DynInvariant<C, W>>>,
+    advance: Option<AdvanceFn<C>>,
+}
+
+impl<C: 'static, W: 'static> OpSetHarness<C, W> {
+    /// An empty registry: no ops, no invariants, no advance hook.
+    pub fn new() -> Self {
+        Self {
+            ops: BTreeMap::new(),
+            invariants: Vec::new(),
+            advance: None,
+        }
+    }
+
+    /// Register one operation kind.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a def with the same name is already registered: the registry replaces a
+    /// compile-time exhaustive enum, so a name collision is a construction bug, not a
+    /// runtime condition.
+    pub fn register(mut self, def: OpDef<C, W>) -> Self {
+        let name = def.name();
+        if self.ops.insert(name, def).is_some() {
+            panic!("OpSetHarness: duplicate op kind {name:?}");
+        }
+        self
+    }
+
+    /// Attach one invariant, checked by the runner per its `check_every` cadence.
+    pub fn invariant(mut self, inv: Box<dyn DynInvariant<C, W>>) -> Self {
+        self.invariants.push(inv);
+        self
+    }
+
+    /// Set the endurance advance hook (progress time/blocks between operations). Without it,
+    /// advance is a no-op, which is right for a pure-function `Ctx`.
+    pub fn with_advance(mut self, advance: AdvanceFn<C>) -> Self {
+        self.advance = Some(advance);
+        self
+    }
+}
+
+impl<C: 'static, W: 'static> Default for OpSetHarness<C, W> {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -3,7 +3,7 @@
 //! instead of a hand-written enum harness.
 
 use harness_core::{
-    CheckOutcome, DynInvariant, DynOp, HarnessError, OpDef, OpFuture, Prng, Verdict,
+    CheckOutcome, DynInvariant, DynOp, HarnessError, OpDef, OpFuture, OpSetHarness, Prng, Verdict,
 };
 
 /// The system under test: a u8 counter with saturating add and a subtract that
@@ -158,4 +158,77 @@ fn opdef_default_weight_is_one_and_overridable() {
 
     let gated = OpDef::new("add", gen_add).with_weight(zero_weight);
     assert_eq!(gated.weight(&(), &world), 0);
+}
+
+/// Subtract `n`, expecting rejection on underflow: the op that produces both verdicts.
+#[derive(Debug, Clone)]
+struct Sub {
+    n: u8,
+}
+
+impl DynOp<(), World> for Sub {
+    fn apply<'a>(
+        &'a self,
+        _ctx: &'a mut (),
+        world: &'a mut World,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            if world.first_op.is_none() {
+                world.first_op = Some("Sub");
+            }
+            let expected_ok = world.model >= self.n as i32;
+            match (world.sut.sub(self.n), expected_ok) {
+                (Ok(()), true) => {
+                    world.model -= self.n as i32;
+                    Ok(Verdict::Accepted)
+                }
+                (Ok(()), false) => Err(HarnessError::bug("underflow was accepted")),
+                (Err(reason), false) => Ok(Verdict::Rejected { reason }),
+                (Err(e), true) => Err(HarnessError::bug(format!("valid sub rejected: {e}"))),
+            }
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<(), World>> {
+        Box::new(self.clone())
+    }
+}
+
+fn gen_sub(rng: &mut Prng, _world: &World) -> Box<dyn DynOp<(), World>> {
+    Box::new(Sub {
+        n: rng.below(300) as u8,
+    })
+}
+
+/// Sub weighs 0 while the model is empty: an underflow-only op is meaningless on a zero
+/// counter, so it is excluded until the first Add lands.
+fn sub_weight(_ctx: &(), world: &World) -> u32 {
+    if world.model == 0 {
+        0
+    } else {
+        1
+    }
+}
+
+/// The full registry harness. `"sub"` is registered first on purpose: the BTreeMap must
+/// still yield kinds in sorted name order for seed determinism.
+fn build_harness() -> OpSetHarness<(), World> {
+    OpSetHarness::new()
+        .register(OpDef::new("sub", gen_sub).with_weight(sub_weight))
+        .register(OpDef::new("add", gen_add))
+        .invariant(Box::new(MatchesModel))
+}
+
+#[test]
+#[should_panic(expected = "duplicate op kind")]
+fn duplicate_op_name_panics() {
+    let _ = OpSetHarness::<(), World>::new()
+        .register(OpDef::new("add", gen_add))
+        .register(OpDef::new("add", gen_add));
+}
+
+#[test]
+fn empty_registry_constructs_via_default() {
+    let _h: OpSetHarness<(), World> = OpSetHarness::default();
+    let _h = build_harness();
 }
