@@ -26,6 +26,7 @@
 //! The same `apply` is reused by every mode: no test logic is written twice. An invariant whose
 //! precondition has not occurred yet returns [`CheckOutcome::Skipped`] instead of failing.
 
+mod opset;
 mod outcome;
 mod rng;
 mod runner;
@@ -33,6 +34,7 @@ mod stats;
 
 #[cfg(feature = "macros")]
 pub use harness_core_macros::{endurance_runner, fuzz_runner, invariant_runner};
+pub use opset::{DynOp, OpFuture};
 pub use outcome::{
     CheckOutcome, Coverage, Failure, FailureKind, HarnessError, InvCoverage, RunReport, Verdict,
     Violation,
