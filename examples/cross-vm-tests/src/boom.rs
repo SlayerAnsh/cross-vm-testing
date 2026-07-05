@@ -46,6 +46,7 @@ pub enum BoomInvariant {
 pub struct BoomHarness;
 
 impl Harness for BoomHarness {
+    type Ctx = Ctx;
     type World = ();
     type Operation = BoomOp;
     type Invariant = BoomInvariant;
@@ -80,6 +81,11 @@ impl Harness for BoomHarness {
         vec![BoomInvariant::AlwaysHolds]
     }
 
+    async fn advance(&self, ctx: &mut Ctx, blocks: u64) -> Result<(), HarnessError> {
+        ctx.advance_all(blocks).await;
+        Ok(())
+    }
+
     async fn check(&self, _ctx: &mut Ctx, _world: &(), _inv: &BoomInvariant) -> CheckOutcome {
         CheckOutcome::Held
     }
@@ -90,7 +96,7 @@ impl Harness for BoomHarness {
 pub fn boom_setup(_req: SetupRequest) -> SetupFuture<'static, ()> {
     Box::pin(async move {
         let wallets = std::rc::Rc::new(
-            WalletFactory::from_roster(EmptyWallets::SPECS).map_err(HarnessError::Infra)?,
+            WalletFactory::from_roster(EmptyWallets::SPECS).map_err(HarnessError::infra)?,
         );
         let env = MultiChainEnv::new("boom-harness", wallets);
         let ctx = Ctx::new(env.start().await?);

@@ -2,18 +2,21 @@
 //!
 //! [`Stats`] answers "what did the fuzzer actually exercise?" — the failure mode where 80% of
 //! generated swaps revert and the run tested almost nothing. It is **off by default**: a run only
-//! collects it when the test opts in with [`Runner::with_stats`](crate::harness::Runner::with_stats),
+//! collects it when the test opts in with [`Runner::with_stats`](crate::Runner::with_stats),
 //! so the zero-config path pays nothing.
 //!
 //! Operations are grouped by **variant name** (the leading token of their `Debug` rendering, e.g.
 //! `Deposit { .. }` -> `"Deposit"`), so a bucket aggregates one op kind rather than one exact input.
-//! This needs no naming method on [`Harness`](crate::harness::Harness): the derived `Debug` is
+//! This needs no naming method on `Harness`: the derived `Debug` is
 //! enough.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// What `apply` did with one operation, as observed by the runner.
+///
+/// Implementation detail, not part of the stable surface: crate-private, named only by the
+/// in-crate [`runner`](crate::Runner) when it records a [`Stats`] entry.
 pub(crate) enum OpOutcome<'a> {
     /// The op was accepted (a legitimate success).
     Accepted,
@@ -136,7 +139,7 @@ impl serde::Serialize for OpStat {
 ///
 /// Serializes (behind `serde`) as `{"ops": {"Deposit": {...}, "Withdraw": {...}}}`: the single
 /// private `ops` field derives like any other (visibility does not change what a derive emits),
-/// and is left un-flattened (unlike [`crate::harness::Coverage`]'s `#[serde(transparent)]`) so a
+/// and is left un-flattened (unlike `Coverage`'s `#[serde(transparent)]`) so a
 /// `Stats` value nests as a `stats` key with an unambiguous shape inside `ErasedReport` rather
 /// than colliding with a future top-level field of the same name.
 #[derive(Debug, Clone, Default)]
@@ -147,6 +150,9 @@ pub struct Stats {
 
 impl Stats {
     /// Record one `apply` call: its op `label`, wall-clock `elapsed`, and `outcome`.
+    ///
+    /// Implementation detail, not part of the stable surface: crate-private, driven only by the
+    /// in-crate [`runner`](crate::Runner).
     pub(crate) fn record(&mut self, label: &str, elapsed: Duration, outcome: OpOutcome<'_>) {
         let stat = self.ops.entry(label.to_string()).or_default();
         let ns = elapsed.as_nanos();
@@ -283,12 +289,12 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------------------
-    // serde (spec section 9): OpStat/Stats shapes. Gated on `cli` (not just `serde`) for the
-    // same reason as `outcome.rs`'s equivalent module: `serde_json`, used here to assert JSON
-    // shape, is only pulled in by `cli`.
+    // serde (spec section 9): OpStat/Stats shapes. Gated on `serde`, which enables the
+    // hand-written `Serialize` impl these assert against. `serde_json` is an unconditional
+    // dev-dependency of this crate, so the shape check needs nothing beyond `serde`.
     // -------------------------------------------------------------------------------------
 
-    #[cfg(feature = "cli")]
+    #[cfg(feature = "serde")]
     mod serde_shapes {
         use super::*;
 

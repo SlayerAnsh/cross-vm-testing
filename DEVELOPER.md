@@ -33,14 +33,16 @@ same reason.
 This is a Cargo workspace with one crate per VM plus a shared core crate. Dependency trees are isolated per crate, so building or testing one VM does not pull the others.
 
 ```
-crates/core         cross-vm-core         no VM dependencies
-crates/revm-common  cross-vm-revm-common  shared revm mock core (RevmCore) for the EVM-derived providers
-crates/cosmwasm     cross-vm-cosmwasm     cw-multi-test, cosmwasm-std
-crates/solidity     cross-vm-solidity     revm via the shared core (alloy for the test bindings)
-crates/solana       cross-vm-solana       litesvm, granular solana-* crates
-crates/tron         cross-vm-tron         shared revm core + TVM layers (Tron precompiles, energy/bandwidth shim, sun balances)
-crates/macros       cross-vm-macros       proc-macros (syn/quote): cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, fuzz/invariant/endurance runners, config_runner
-crates/framework    cross-vm-framework    umbrella over core + all four VM crates
+crates/core           cross-vm-core         no VM dependencies
+crates/revm-common    cross-vm-revm-common  shared revm mock core (RevmCore) for the EVM-derived providers
+crates/cosmwasm       cross-vm-cosmwasm     cw-multi-test, cosmwasm-std
+crates/solidity       cross-vm-solidity     revm via the shared core (alloy for the test bindings)
+crates/solana         cross-vm-solana       litesvm, granular solana-* crates
+crates/tron           cross-vm-tron         shared revm core + TVM layers (Tron precompiles, energy/bandwidth shim, sun balances)
+crates/harness        harness-core          standalone, VM agnostic property harness: the Harness trait, mode typed Runner, rng, stats, outcome types. No dependency on any crate in this workspace
+crates/harness-macros harness-core-macros   proc-macros (syn/quote) for harness-core: fuzz_runner, invariant_runner, endurance_runner
+crates/macros         cross-vm-macros       proc-macros (syn/quote): cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, config_runner
+crates/framework      cross-vm-framework    umbrella over core + all four VM crates + harness-core (adds a chain shaped Ctx and classify)
 ```
 
 Example contract sources and example test crates live outside the root workspace tree. The `contracts/` sources are excluded from the root workspace (they carry their own build toolchains, and `contracts/solana` is its own Cargo workspace); the example test crates under `examples/` are explicit workspace members:
@@ -151,7 +153,7 @@ Each crate has unit tests (chain metadata, account creation, balance set/get, bl
 * `cross-vm-cosmwasm`: `store_code` + `instantiate` an in-test `ContractWrapper` counter, then `execute_contract`, `query_wasm_smart`.
 * `cross-vm-solidity`: `deploy_create` the Solidity `Counter` from `contracts/solidity` (creation bytecode from the forge artifact via `sol!`), then `call` for `increment`/`reset`, read via `static_call`.
 * `cross-vm-solana`: airdrop, System Program transfer through `send_transaction`, balance assertion.
-* `cross-vm-framework`: keeps only framework functionality tests. `src/tests.rs` covers `MultiChainEnv` setup, label/VM error handling, native funding, and the before/after hook mechanics; inline `#[cfg(test)]` mods in `contract/account.rs`, `contract/response.rs`, `harness/rng.rs`, and `harness/outcome.rs` cover their units. The heavy multi-chain integration tests live in their own crate (see below), so the framework build no longer drags the contract-artifact toolchain.
+* `cross-vm-framework`: keeps only framework functionality tests. `src/tests.rs` covers `MultiChainEnv` setup, label/VM error handling, native funding, and the before/after hook mechanics; inline `#[cfg(test)]` mods in `contract/account.rs` and `contract/response.rs` cover their units. The runner mechanics, rng, and outcome types moved to the standalone `harness-core` crate (`crates/harness/src/rng.rs`, `crates/harness/src/outcome.rs`, each with its own inline `#[cfg(test)]` mod); only `harness/ctx.rs` (the chain-shaped `Ctx`) and `harness/classify.rs` (the response classifier) still live in the framework, since both name chain types directly. The heavy multi-chain integration tests live in their own crate (see below), so the framework build no longer drags the contract-artifact toolchain.
 * `cross-vm-tests` (`examples/cross-vm-tests`): the multi-chain integration and example tests, sourcing all their contract bindings from `cross-vm-common`. It is both a library (`src/`) and a test crate (`tests/`). The library holds the DeFi vault harness (`src/vault.rs`: `VaultHarness`, `VaultWorld`, `VaultOp`, `VaultOpKind`, `vault_setup`, `vault_config_setup`) and its support (`src/support/`: the cross-VM `Vault` wrapper, wallet/funding helpers, `init_tracing`), so a `cross-vm` binary (which cannot see `tests/` or dev-dependencies) can register and drive it through the framework's config-driven CLI. Two test binaries sit on top. `tests/harness/` holds the property-testing examples (`counter.rs`, `vault.rs` (test fns only, importing the harness from the library), `ping_pong.rs`, and `mechanics.rs` for the runner mechanics); `tests/cross_vm/` holds the multi-chain tests (`setup.rs`, `counter.rs`, `wallet.rs`, `ping_pong.rs`). Both share `tests/support/`, which is now a thin shim: it declares `counter.rs`/`bridge.rs`/`ping_pong.rs` locally (used only by tests, never by the library or the bin) and re-exports `Vault`/the wallet helpers/`init_tracing` from the library crate (`cross_vm_tests::support::*`), so every existing `use crate::support::{...}` in the test tree keeps compiling unchanged. Each group has a `main.rs` that declares its modules (Cargo treats `tests/<group>/main.rs` as one test target). `tests/cross_vm/counter.rs` runs one rstest over all four VMs (`#[values(ChainKind::CosmWasm, ChainKind::Evm, ChainKind::Svm, ChainKind::Tron)]`, each case building the matching `.mock(wallets)`) driving the single `Counter` wrapper. All four VMs use the canonical contracts from `contracts/`. The EVM, Solana, and Tron bindings read build artifacts at compile time, all git-ignored, so run `make compile` (or the per-ecosystem `compile-solidity` / `compile-solana` / `compile-tron` targets) before `cargo test -p cross-vm-tests`. A fresh checkout will not compile the tests until they exist:
   * CosmWasm: the `contracts/cosmwasm/contracts/counter` crate is consumed as an rlib (no artifact build needed).
   * EVM: `sol!` parses `contracts/solidity/out/Counter.sol/Counter.json` (forge build) for the ABI and creation bytecode.
@@ -188,6 +190,14 @@ cargo run -p cross-vm-tests --bin cross-vm -- list examples/cross-vm-tests/vault
 
 `examples/cross-vm-tests/vault.cross-vm.toml` declares the same three chains (`osmosis`/`eth`/`solana`) `vault_setup` hard codes, plus a `smoke` / `deep` / `invariant-long` / `mixed-targets` profile set; `vault.no-chains.cross-vm.toml` has no `[[chain]]` entries at all, exercising `vault_config_setup`'s backward-compatible fallback (hard code the three mocks, exactly like `vault_setup`) when a config declares none. Exit codes follow the CI contract in spec section 8: `0` every run passed, `1` a run failed with a `Bug`/invariant violation, `2` an `Infra`-only failure, `3` a config or usage error (an unknown profile, an unresolvable `${VAR}`, or `--target-chain LABEL=rpc` on a chain with no `rpc_url`).
 
+## Pipeline suites
+
+A `[suite.<name>]` can declare `[[suite.<name>.phases]]` instead of the legacy flat `profiles` list (spec `docs/config-runs-spec.md` section 4.7), so a later phase can require an earlier one to have passed (`needs`) and, when it sets `world = "inherit"`, continue from the exact `(Ctx, World)` its single named donor phase ended with instead of paying a fresh setup again. `vault.cross-vm.toml`'s `progressive` suite is the checked in example: `deposit-soak` (an invariant run that only deposits) feeds `mixed-after-deposits` (withdraws, borrows, and repays against the state the first phase built), run with `cargo run -p cross-vm-tests --bin cross-vm -- run vault.cross-vm.toml --suite progressive`.
+
+What inherits and what does not: the donor's ending `Ctx` and `World` move into the next phase verbatim (deployed contracts, funded wallets, the harness model all carry over); each phase still resolves its own seed, produces its own report, and tallies its own invariant coverage, so a pipeline reads as two runs, not one merged one. A phase whose `needs` dependency did not pass is skipped entirely, contributing nothing to the suite's combined exit code (only an actual failure does), and both ends of an `inherit` handoff must be single setup (`invariant`, `endurance`, `scenario`, or `fuzz` with `cases == 1`); a multi case fuzz fans out into many independent worlds and cannot donate or consume a single inherited one. A donor may feed at most one inheriting phase; two phases inheriting from the same donor is a hard load error today (state forking across siblings is a separate, later design).
+
+Two caveats to keep in mind when an inherited phase fails: shrink is disabled for it (a shrink rebuild always starts from a fresh setup, which cannot reproduce a donor handed state, so the raw unshrunk history is what gets written), and the resulting replay artifact records `world_source = "inherited"` in its `[replay]` provenance, since a standalone `cross-vm replay` of that artifact starts from a fresh setup and may not reproduce the same failure the pipeline run saw.
+
 ## The failure to replay loop
 
 Any fuzz, invariant, or endurance profile that fails writes a self contained artifact under its `artifacts_dir` (default `target/cross-vm`, overridable with `--artifacts-dir`): `<harness>-<profile>-<seed>-<timestamp>.replay.toml`. The artifact is itself a valid config file, so closing the loop needs no bespoke tooling.
@@ -212,6 +222,8 @@ When a profile's failing history contains an amount too large for TOML's signed 
 Shrinking is what usually makes an artifact worth reading: `shrink = true` (the default for fuzz and invariant profiles, `false` for endurance unless set explicitly) re-drives the failing sequence on a fresh setup for each candidate, dropping windows of ops and then single ops, keeping a candidate only when it still fails the exact same way. `shrink_limit` (default 256) bounds how many replay attempts that costs; a tiny limit still returns a reproducing sequence, just not necessarily a minimal one.
 
 ## Property-testing harness diagnostics
+
+Where the harness lives: the `Harness` trait, the mode typed `Runner`, the rng, per-op stats, and the outcome types (`Verdict`, `HarnessError`, `CheckOutcome`, `RunReport`, `Coverage`) are all defined in the standalone `harness-core` crate (`crates/harness`), which has no dependency on this workspace's chain types. `cross-vm-framework::harness` (`crates/framework/src/harness`) re-exports every one of those unchanged and adds only the two pieces that must know about chains: `Ctx` (the started `MultiChainEnv` a cross-VM harness's `type Ctx` points at) and `classify` (the four-way `(expected, result)` match that turns a chain response into a `Verdict`). A `harness-core` consumer with no chain in the picture never touches the framework crate at all; see `crates/harness/README.md` and `crates/harness/tests/pure_function.rs` for that path.
 
 The `Runner` that drives a `Harness` (fuzz, invariant, endurance, scenario) exposes three diagnostics on top of the minimal API.
 

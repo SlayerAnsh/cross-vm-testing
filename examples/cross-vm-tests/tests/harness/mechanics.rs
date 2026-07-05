@@ -75,11 +75,25 @@ enum Behavior {
 struct World {
     chain: Vec<u128>,
     model: Vec<u128>,
+    /// Count of accepted deposits, so a dynamic-weight test can gate on "any deposit yet".
+    deposits: usize,
+}
+
+/// How the test bank weights kinds, exercising the dynamic-weight paths.
+#[derive(Clone)]
+enum Weighting {
+    /// Default trait behavior: weight 1 for every kind (uniform).
+    Uniform,
+    /// `Withdraw` weighs 0 until any deposit was accepted, then 3 (deposit stays 1).
+    GateWithdraw,
+    /// Every kind weighs 0: the first draw must fail the run as `Infra`.
+    AllZero,
 }
 
 struct Bank {
     users: usize,
     behavior: Behavior,
+    weighting: Weighting,
     /// Records every applied op so a test can assert what ran (e.g. per-op fuzz runs one kind).
     log: Rc<RefCell<Vec<Op>>>,
     /// Applied-op counter: indexes into `Behavior::InfraPattern`'s pattern, and marks the op
@@ -94,15 +108,27 @@ impl Bank {
             Self {
                 users,
                 behavior,
+                weighting: Weighting::Uniform,
                 log: log.clone(),
                 op_calls: Cell::new(0),
             },
             log,
         )
     }
+
+    fn with_weighting(
+        users: usize,
+        behavior: Behavior,
+        weighting: Weighting,
+    ) -> (Self, Rc<RefCell<Vec<Op>>>) {
+        let (mut bank, log) = Self::new(users, behavior);
+        bank.weighting = weighting;
+        (bank, log)
+    }
 }
 
 impl Harness for Bank {
+    type Ctx = Ctx;
     type World = World;
     type Operation = Op;
     type Invariant = Inv;
@@ -115,9 +141,7 @@ impl Harness for Bank {
 
         if let Behavior::InfraPattern(pattern) = &self.behavior {
             if pattern[call_idx % pattern.len()] {
-                return Err(HarnessError::Infra(CrossVmError::wallet(
-                    "infra pattern hit",
-                )));
+                return Err(HarnessError::infra("infra pattern hit"));
             }
             // `false`: falls through to the same application the `Good` behavior takes below,
             // since `InfraPattern` matches none of the `matches!` guards in that match.
@@ -138,6 +162,7 @@ impl Harness for Bank {
                 }
                 w.chain[user] += amount;
                 w.model[user] += amount;
+                w.deposits += 1;
                 if let Behavior::BugAtBalance(bomb) = &self.behavior {
                     if w.chain[user] == *bomb {
                         return Err(HarnessError::Bug("balance bomb".into()));
@@ -168,6 +193,21 @@ impl Harness for Bank {
         vec![OpKind::Deposit, OpKind::Withdraw]
     }
 
+    fn weight(&self, _ctx: &Ctx, w: &World, kind: OpKind) -> u32 {
+        match (&self.weighting, kind) {
+            (Weighting::Uniform, _) => 1,
+            (Weighting::GateWithdraw, OpKind::Deposit) => 1,
+            (Weighting::GateWithdraw, OpKind::Withdraw) => {
+                if w.deposits == 0 {
+                    0
+                } else {
+                    3
+                }
+            }
+            (Weighting::AllZero, _) => 0,
+        }
+    }
+
     fn generate_op(&self, rng: &mut Prng, w: &World, kind: OpKind) -> Op {
         let user = rng.index(self.users);
         match kind {
@@ -183,17 +223,13 @@ impl Harness for Bank {
         }
     }
 
-    fn generate(&self, rng: &mut Prng, w: &World) -> Op {
-        let kind = if rng.weighted(&[1, 1]) == 0 {
-            OpKind::Deposit
-        } else {
-            OpKind::Withdraw
-        };
-        self.generate_op(rng, w, kind)
-    }
-
     fn invariants(&self) -> Vec<Inv> {
         vec![Inv::ModelMatches, Inv::Bounded, Inv::Untriggered]
+    }
+
+    async fn advance(&self, ctx: &mut Ctx, blocks: u64) -> Result<(), HarnessError> {
+        ctx.advance_all(blocks).await;
+        Ok(())
     }
 
     async fn check(&self, _ctx: &mut Ctx, w: &World, inv: &Inv) -> CheckOutcome {
@@ -217,6 +253,7 @@ async fn bank_env(users: usize) -> Result<(Ctx, World), HarnessError> {
         World {
             chain: vec![1_000; users],
             model: vec![1_000; users],
+            deposits: 0,
         },
     ))
 }
@@ -547,7 +584,7 @@ async fn setup_failure_surfaces_as_infra_err() {
     // Setup now runs in the test body before the runner drives anything, so a build failure is the
     // setup fn's `Err` (the caller `.expect()`s or `?`s it) rather than a step-zero RunReport.
     async fn failing_env() -> Result<(Ctx, World), HarnessError> {
-        Err(HarnessError::Infra(CrossVmError::wallet("setup boom")))
+        Err(HarnessError::infra("setup boom"))
     }
     match failing_env().await {
         Ok(_) => panic!("expected setup to fail"),
@@ -1162,5 +1199,82 @@ async fn weighted_all_zero_weights_is_an_infra_failure() {
     let rep = r.run_with(10, mix, 1).await;
     assert_eq!(rep.steps, 0, "nothing can run without a kind to draw");
     let f = rep.failure.expect("reported as a failure");
+    assert!(matches!(f.kind, FailureKind::Infra(_)), "{:?}", f.kind);
+}
+
+/// Dynamic gating: a kind whose weight is 0 for the current world is never drawn, and starts
+/// being drawn once the world unlocks it. With `GateWithdraw`, op 1 can only be a Deposit, and
+/// every Withdraw in the log must come after at least one Deposit.
+#[tokio::test]
+async fn zero_weight_kind_is_not_drawn_until_world_unlocks_it() {
+    let (bank, log) = Bank::with_weighting(2, Behavior::Good, Weighting::GateWithdraw);
+    let (ctx, world) = bank_env(2).await.unwrap();
+    let mut r = Runner::fuzz(bank, 7);
+    r.setup(ctx, world);
+    let rep = r.run(20, None, 1).await;
+    assert!(rep.passed(), "{:?}", rep.failure);
+    let ops = log.borrow();
+    assert!(
+        matches!(ops[0], Op::Deposit { .. }),
+        "withdraw weighs 0 before any deposit, so the first op must be a deposit: {:?}",
+        ops[0]
+    );
+    // With weight 3 after unlock, 19 follow-up draws virtually guarantee a withdraw; if this
+    // seed happens to produce none, bump the op count rather than weakening the assert.
+    assert!(
+        ops.iter().any(|o| matches!(o, Op::Withdraw { .. })),
+        "unlocked withdraw (weight 3) never drawn in {} ops",
+        ops.len()
+    );
+}
+
+/// Every kind dynamically weighing 0 is a harness/state bug surfaced as `Infra` at that draw,
+/// not a stall or a silent pass.
+#[tokio::test]
+async fn all_zero_dynamic_weights_fail_as_infra() {
+    let (bank, _log) = Bank::with_weighting(1, Behavior::Good, Weighting::AllZero);
+    let (ctx, world) = bank_env(1).await.unwrap();
+    let mut r = Runner::fuzz(bank, 0);
+    r.setup(ctx, world);
+    let rep = r.run(10, None, 1).await;
+    assert_eq!(rep.steps, 0, "no op can be drawn");
+    let f = rep.failure.expect("reported as a failure");
+    assert!(
+        matches!(&f.kind, FailureKind::Infra(m) if m.contains("weight")),
+        "{:?}",
+        f.kind
+    );
+}
+
+/// Static config weights multiply dynamic weights: a nonzero static weight cannot resurrect a
+/// kind whose dynamic weight is 0.
+#[tokio::test]
+async fn static_weight_cannot_override_dynamic_zero() {
+    let (bank, log) = Bank::with_weighting(2, Behavior::Good, Weighting::GateWithdraw);
+    let (ctx, world) = bank_env(2).await.unwrap();
+    let mut r = Runner::fuzz(bank, 7);
+    r.setup(ctx, world);
+    let mix = KindMix::Weighted(&[(OpKind::Deposit, 1), (OpKind::Withdraw, 1_000_000)]);
+    let rep = r.run_with(12, mix, 1).await;
+    assert!(rep.passed(), "{:?}", rep.failure);
+    let ops = log.borrow();
+    assert!(
+        matches!(ops[0], Op::Deposit { .. }),
+        "dynamic 0 must win over static 1_000_000: {:?}",
+        ops[0]
+    );
+}
+
+/// Endurance draws through the same weighted source: an `AllZero` bank fails as `Infra`
+/// immediately (max_consecutive_infra is 0 by default).
+#[tokio::test]
+async fn endurance_respects_dynamic_weights() {
+    let (bank, _log) = Bank::with_weighting(1, Behavior::Good, Weighting::AllZero);
+    let (ctx, world) = bank_env(1).await.unwrap();
+    let mut r = Runner::endurance(bank, 0);
+    r.setup(ctx, world);
+    let cfg = EnduranceConfig::new(Duration::from_secs(5)).max_ops(10);
+    let rep = r.run(cfg).await;
+    let f = rep.failure.expect("all-zero weights must fail the run");
     assert!(matches!(f.kind, FailureKind::Infra(_)), "{:?}", f.kind);
 }

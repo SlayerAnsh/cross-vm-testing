@@ -101,6 +101,16 @@ pub struct ResolvedProfile {
     pub artifacts_dir: String,
     /// JSON report output path, `RunOptions.json_report` over the profile's own key.
     pub json_report: Option<String>,
+    /// Where this run's starting `(Ctx, World)` comes from. `Fresh` (the default) calls the
+    /// registered setup fn; `Inherit` takes the pair a donor phase stashed. Set only by the
+    /// CLI's pipeline driver; `resolve_profile` always emits `Fresh`.
+    pub world_source: cross_vm_config::WorldSource,
+    /// Whether a later phase inherits from this run: when true and the run passes, the final
+    /// `(Ctx, World)` is stashed in the harness's session slot instead of being dropped.
+    pub stash_world: bool,
+    /// Per-phase params for the registered world patch fn. Set only by the CLI's pipeline
+    /// driver; `resolve_profile` always emits `None`.
+    pub phase_params: Option<toml::Table>,
 }
 
 /// Per-kind `native_symbol` default (spec section 4.6), applied here when a `[[chain]]`
@@ -143,7 +153,7 @@ pub fn resolve_profile(
         } else {
             names.join(", ")
         };
-        HarnessError::Infra(CrossVmError::Other {
+        HarnessError::infra(CrossVmError::Other {
             kind: ChainKind::Evm,
             reason: format!("unknown profile \"{name}\": available profiles: {available}"),
         })
@@ -171,7 +181,7 @@ pub fn resolve_profile(
     let mut chain_specs = Vec::new();
     for decl in selected {
         let kind: ChainKind = decl.kind.parse().map_err(|e| {
-            HarnessError::Infra(CrossVmError::Other {
+            HarnessError::infra(CrossVmError::Other {
                 kind: ChainKind::Evm,
                 reason: format!("chain `{}`: {e}", decl.label),
             })
@@ -183,7 +193,7 @@ pub fn resolve_profile(
             .map(cross_vm_config::parse_target_str)
             .transpose()
             .map_err(|e| {
-                HarnessError::Infra(CrossVmError::Other {
+                HarnessError::infra(CrossVmError::Other {
                     kind,
                     reason: format!("chain `{}`: {e}", decl.label),
                 })
@@ -208,7 +218,7 @@ pub fn resolve_profile(
 
         let rpc_url = decl.rpc_url.clone();
         if target == Target::Rpc && rpc_url.is_none() {
-            return Err(HarnessError::Infra(CrossVmError::Other {
+            return Err(HarnessError::infra(CrossVmError::Other {
                 kind,
                 reason: format!(
                     "chain `{}` resolves to target `rpc` but has no rpc_url",
@@ -294,6 +304,9 @@ pub fn resolve_profile(
         shrink_limit,
         artifacts_dir,
         json_report,
+        world_source: cross_vm_config::WorldSource::Fresh,
+        stash_world: false,
+        phase_params: None,
     })
 }
 

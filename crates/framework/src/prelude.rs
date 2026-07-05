@@ -18,10 +18,10 @@ pub use cross_vm_core::{
     WalletSpec,
 };
 
-// Wallet roster macro, contract wrapper macro, and the per-mode runner attribute macros.
-pub use cross_vm_macros::{
-    cross_vm_contract, define_wallet_roster, endurance_runner, fuzz_runner, invariant_runner,
-};
+// Wallet roster macro and contract wrapper macro.
+pub use cross_vm_macros::{cross_vm_contract, define_wallet_roster};
+// Per-mode runner attribute macros (from the standalone harness crate).
+pub use harness_core_macros::{endurance_runner, fuzz_runner, invariant_runner};
 
 // CosmWasm
 #[cfg(feature = "cw")]

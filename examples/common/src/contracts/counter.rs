@@ -317,6 +317,7 @@ impl CounterHarness {
 }
 
 impl Harness for CounterHarness {
+    type Ctx = Ctx;
     type World = CounterWorld;
     type Operation = CounterOp;
     type Invariant = CounterInv;
@@ -337,7 +338,7 @@ impl Harness for CounterHarness {
             counter
                 .increment(SIGNER)
                 .await
-                .map_err(HarnessError::Infra)?;
+                .map_err(HarnessError::infra)?;
             w.model += 1;
         }
         w.any_incremented = true;
@@ -355,18 +356,21 @@ impl Harness for CounterHarness {
         }
     }
 
-    // Bias toward single increments (25% double).
-    fn generate(&self, rng: &mut Prng, w: &CounterWorld) -> CounterOp {
-        let kind = if rng.chance(0.25) {
-            CounterOpKind::IncrementTwice
-        } else {
-            CounterOpKind::Increment
-        };
-        self.generate_op(rng, w, kind)
+    // Bias toward single increments (double increments drawn 1 in 4).
+    fn weight(&self, _ctx: &Ctx, _w: &CounterWorld, kind: CounterOpKind) -> u32 {
+        match kind {
+            CounterOpKind::Increment => 3,
+            CounterOpKind::IncrementTwice => 1,
+        }
     }
 
     fn invariants(&self) -> Vec<CounterInv> {
         vec![CounterInv::CountMatchesModel]
+    }
+
+    async fn advance(&self, ctx: &mut Ctx, blocks: u64) -> Result<(), HarnessError> {
+        ctx.advance_all(blocks).await;
+        Ok(())
     }
 
     async fn check(&self, ctx: &mut Ctx, w: &CounterWorld, inv: &CounterInv) -> CheckOutcome {
@@ -395,12 +399,10 @@ async fn deploy_and_prime(ctx: &Ctx, label: &str) -> Result<CounterWorld, Harnes
     let mut chain = ctx.chain(label)?;
     fund_user(&mut chain, WalletLabel::wrap(SIGNER)).await;
     let counter = Counter::new(chain);
-    counter.setup(SIGNER).await.map_err(HarnessError::Infra)?;
-    let addr = counter.address().ok_or_else(|| {
-        HarnessError::Infra(CrossVmError::wallet(format!(
-            "{label}: setup recorded no address"
-        )))
-    })?;
+    counter.setup(SIGNER).await.map_err(HarnessError::infra)?;
+    let addr = counter
+        .address()
+        .ok_or_else(|| HarnessError::infra(format!("{label}: setup recorded no address")))?;
     Ok(CounterWorld {
         label: label.to_string(),
         addr,

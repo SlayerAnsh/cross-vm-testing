@@ -3,18 +3,13 @@
 //!
 //! This file keeps only the test fns: the runner-macro tests (which call `vault_setup` directly
 //! in their body — the macros only inject the seeded `Runner` shell, see
-//! `crates/macros/src/runner_macros.rs`) plus the rstest matrix and the two plain `#[tokio::test]`s.
+//! `crates/harness-macros/src/runner_macros.rs`) plus the rstest matrix and the two plain
+//! `#[tokio::test]`s.
 
 #[cfg(feature = "endurance")]
 use std::time::Duration;
 
 use cross_vm_framework::prelude::*;
-#[cfg(feature = "endurance")]
-use cross_vm_macros::endurance_runner;
-#[cfg(feature = "fuzz")]
-use cross_vm_macros::fuzz_runner;
-#[cfg(feature = "invariant")]
-use cross_vm_macros::invariant_runner;
 
 #[cfg(feature = "fuzz")]
 use cross_vm_tests::vault::VaultOpKind;

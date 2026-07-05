@@ -1,8 +1,8 @@
 //! Drives a [`Harness`] over an injected, already-live `(Ctx, World)`.
 //!
-//! The run *shape* is encoded in the runner's type via a phantom [`RunMode`] marker, mirroring the
-//! [`MultiChainEnv<S>`](crate::MultiChainEnv) phase typestate: [`FuzzRunner`], [`InvariantRunner`],
-//! [`EnduranceRunner`], and [`ScenarioRunner`] each expose only the driver method that mode needs.
+//! The run *shape* is encoded in the runner's type via a phantom [`RunMode`] marker, a phase
+//! typestate: [`FuzzRunner`], [`InvariantRunner`], [`EnduranceRunner`], and [`ScenarioRunner`]
+//! each expose only the driver method that mode needs.
 //!
 //! Construction is two-phase. A constructor ([`Runner::fuzz`], [`Runner::endurance`], ...) builds a
 //! *shell* (harness + seed + seeded rng + mode); the developer then builds the live env+world
@@ -19,12 +19,11 @@ use std::time::Duration;
 
 use tokio::time::{sleep, Instant};
 
-use super::ctx::Ctx;
-use super::outcome::{
+use crate::outcome::{
     CheckOutcome, Coverage, Failure, FailureKind, HarnessError, RunReport, Verdict,
 };
-use super::stats::{op_label, OpOutcome, Stats};
-use super::{Harness, Prng};
+use crate::stats::{op_label, OpOutcome, Stats};
+use crate::{Harness, Prng};
 
 /// A run-mode marker. The unit type parameter `M` on [`Runner`] selects which driver method is
 /// available and labels the [`RunReport`].
@@ -175,7 +174,7 @@ impl EnduranceConfig {
 /// state with [`setup`](Runner::setup), then call the mode's driver.
 pub struct Runner<H: Harness, M: RunMode = Fuzz> {
     harness: H,
-    ctx: Option<Ctx>,
+    ctx: Option<H::Ctx>,
     world: Option<H::World>,
     seed: u64,
     rng: Prng,
@@ -224,7 +223,7 @@ impl<H: Harness, M: RunMode> Runner<H, M> {
 
     /// Load the live env and primed world. The one call a macro-driven test must add; returns
     /// `&mut Self` so it can chain into a driver (`runner.setup(ctx, world).run(..)`).
-    pub fn setup(&mut self, ctx: Ctx, world: H::World) -> &mut Self {
+    pub fn setup(&mut self, ctx: H::Ctx, world: H::World) -> &mut Self {
         self.ctx = Some(ctx);
         self.world = Some(world);
         self
@@ -251,14 +250,14 @@ impl<H: Harness, M: RunMode> Runner<H, M> {
         self.world.as_ref().expect(NOT_SET_UP)
     }
 
-    /// Mutably borrow the loaded env, e.g. to poke a chain directly. Panics if not set up.
-    pub fn ctx_mut(&mut self) -> &mut Ctx {
+    /// Mutably borrow the loaded ctx, e.g. to poke the system directly. Panics if not set up.
+    pub fn ctx_mut(&mut self) -> &mut H::Ctx {
         self.ctx.as_mut().expect(NOT_SET_UP)
     }
 
     /// Recover the live env + world after a run (e.g. to hand off or chain a second run). Panics if
     /// [`setup`](Runner::setup) has not been called.
-    pub fn into_parts(self) -> (Ctx, H::World) {
+    pub fn into_parts(self) -> (H::Ctx, H::World) {
         (self.ctx.expect(NOT_SET_UP), self.world.expect(NOT_SET_UP))
     }
 }
@@ -294,44 +293,73 @@ impl<H: Harness> Runner<H, Scenario> {
 
 // ----- random-sequence driver (Fuzz + Invariant) -----
 
-/// How a [`run_with`](Runner::run_with) sequence picks each op's kind. [`Harness`] and
-/// [`Restricted`](KindMix::Restricted) are the two shapes [`Runner::run`] has always exposed
-/// (`kinds = None` and `kinds = Some(ks)` respectively, kept as sugar over this enum);
-/// [`Weighted`](KindMix::Weighted) adds explicit per-kind mixing on top.
+/// How a [`run_with`](Runner::run_with) sequence picks each op's kind. Every shape draws through
+/// the same weighted pipeline: candidate kinds get a static weight (below), each draw multiplies
+/// it by the harness's dynamic [`weight`](Harness::weight) for the current state, and
+/// `rng.weighted` picks the kind before [`Harness::generate_op`] fills in the op's data.
 pub enum KindMix<'a, K> {
-    /// Harness-defined: calls [`Harness::generate`] (a harness `generate` override still applies).
-    /// The config loader emits this when neither `kinds` nor `weights` is set.
+    /// Every kind from [`Harness::op_kinds`], static weight 1 each (the mix is then purely the
+    /// harness's dynamic weights; with the default `weight` this is a uniform draw). The config
+    /// loader emits this when neither `kinds` nor `weights` is set.
     Harness,
-    /// Uniform over a subset: `rng.index` picks among `kinds`, then [`Harness::generate_op`] fills
-    /// in the op's data. The shape [`Runner::run`]'s `Some(kinds)` has always used.
+    /// A subset of kinds, static weight 1 each (uniform up to dynamic weights).
     Restricted(&'a [K]),
-    /// Config-supplied weights: `rng.weighted` picks among the `(kind, weight)` pairs, then
-    /// [`Harness::generate_op`] fills in the op's data. Pair order is significant, since it is the
+    /// Config-supplied static weights per kind. Pair order is significant, since it is the
     /// order `rng.weighted` indexes into, and is used verbatim; when sourced from config the
     /// loader hands weights as a `BTreeMap` (sorted kind-name order), so the same config file
     /// always yields the same op stream.
     Weighted(&'a [(K, u32)]),
 }
 
-/// The `Infra` failure a [`KindMix`] that can generate nothing produces: an empty
-/// [`KindMix::Restricted`] slice, an empty [`KindMix::Weighted`] pair list, or a
-/// [`KindMix::Weighted`] mix whose weights all sum to zero. One shared exit for all three shapes
-/// so they fail identically instead of diverging or panicking inside the rng.
+/// The `Infra` failure a statically empty [`KindMix`] produces: no candidate kinds (an empty
+/// [`KindMix::Restricted`] slice, an empty [`KindMix::Weighted`] pair list, or an empty
+/// [`Harness::op_kinds`]), or a [`KindMix::Weighted`] mix whose static weights all sum to zero.
+/// One shared exit so every shape fails identically instead of diverging or panicking inside
+/// the rng. (A mix that is only *dynamically* empty, every `Harness::weight` returning 0 for
+/// the current state, fails later, at the draw that hits it: see [`OpSource::next`].)
 fn empty_mix_report<Op: Clone>(builder: ReportBuilder<Op>) -> RunReport<Op> {
     builder.fail(
         0,
         None,
         FailureKind::Infra(
-            "empty op-kind mix: no kind can be drawn (use KindMix::Harness / pass None to draw \
-             from every kind)"
+            "empty op-kind mix: no kind can ever be drawn (empty kind list or all static \
+             weights zero)"
                 .into(),
         ),
     )
 }
 
+/// Resolve a [`KindMix`] into the owned candidate kinds + static weights a
+/// [`OpSource::Generated`] draws over. `Err(())` means the mix is statically empty (no
+/// candidate kinds, or every static weight is 0) and can never generate anything; callers turn
+/// that into [`empty_mix_report`].
+fn resolve_mix<H: Harness>(
+    harness: &H,
+    mix: KindMix<'_, H::OpKind>,
+    remaining: usize,
+) -> Result<OpSource<H>, ()> {
+    let (kinds, statics): (Vec<H::OpKind>, Vec<u32>) = match mix {
+        KindMix::Harness => {
+            let kinds = harness.op_kinds();
+            let statics = vec![1; kinds.len()];
+            (kinds, statics)
+        }
+        KindMix::Restricted(ks) => (ks.to_vec(), vec![1; ks.len()]),
+        KindMix::Weighted(pairs) => pairs.iter().copied().unzip(),
+    };
+    if kinds.is_empty() || statics.iter().all(|&w| w == 0) {
+        return Err(());
+    }
+    Ok(OpSource::Generated {
+        kinds,
+        statics,
+        remaining,
+    })
+}
+
 impl<H: Harness, M: Sequential> Runner<H, M> {
     /// Drive one random sequence of `ops` operations over the loaded env+world, drawing from
-    /// `kinds` (or every kind via [`Harness::generate`] when `None`) and checking invariants per
+    /// `kinds` (or every kind from [`Harness::op_kinds`] when `None`) and checking invariants per
     /// `check_every` (`0` = never mid-run). The report is labeled by the mode ([`RunMode::LABEL`]).
     /// Sugar over [`run_with`](Runner::run_with): `None` becomes [`KindMix::Harness`], `Some(ks)`
     /// becomes [`KindMix::Restricted(ks)`](KindMix::Restricted). Reach for `run_with` directly to
@@ -375,38 +403,12 @@ impl<H: Harness, M: Sequential> Runner<H, M> {
         }
         let builder = ReportBuilder::new(*seed, M::LABEL, harness);
 
-        let source = match mix {
-            KindMix::Harness => OpSource::Generated {
-                kinds: None,
-                remaining: ops,
-            },
-            // An empty kind slice can generate nothing: surface an infra failure instead of
-            // panicking inside the rng (`None` is the "draw from every kind" spelling).
-            KindMix::Restricted([]) => {
+        let source = match resolve_mix(harness, mix, ops) {
+            Ok(s) => s,
+            Err(()) => {
                 let report = empty_mix_report(builder);
                 log_summary(&report, stats.as_ref());
                 return report;
-            }
-            KindMix::Restricted(ks) => OpSource::Generated {
-                kinds: Some(ks),
-                remaining: ops,
-            },
-            // Same guard, same failure, for the weighted shape: empty pairs or an all-zero weight
-            // total can likewise generate nothing.
-            KindMix::Weighted(pairs)
-                if pairs.is_empty() || pairs.iter().map(|&(_, w)| w as u64).sum::<u64>() == 0 =>
-            {
-                let report = empty_mix_report(builder);
-                log_summary(&report, stats.as_ref());
-                return report;
-            }
-            KindMix::Weighted(pairs) => {
-                let (kinds, weights) = pairs.iter().copied().unzip();
-                OpSource::Weighted {
-                    kinds,
-                    weights,
-                    remaining: ops,
-                }
             }
         };
         let report = drive(
@@ -430,28 +432,22 @@ impl<H: Harness, M: Sequential> Runner<H, M> {
 impl<H: Harness> Runner<H, Endurance> {
     /// Apply random operations at random delays until `cfg.duration` and/or `cfg.max_ops` is hit,
     /// optionally advancing blocks between ops, then run a final invariant sweep that catches
-    /// drift since the last mid-run check. Draws every op via [`Harness::generate`] (a harness
-    /// `generate` override still applies). Sugar over [`run_with`](Runner::run_with):
-    /// `self.run_with(cfg, KindMix::Harness).await`, which is also what keeps this method's op
-    /// stream byte-identical to every release before `run_with` existed (see `run_with`'s docs).
+    /// drift since the last mid-run check. Draws every op from the full [`Harness::op_kinds`]
+    /// pool, weighted per draw by [`Harness::weight`]. Sugar over
+    /// [`run_with`](Runner::run_with): `self.run_with(cfg, KindMix::Harness).await`.
     pub async fn run(&mut self, cfg: EnduranceConfig) -> RunReport<H::Operation> {
         self.run_with(cfg, KindMix::Harness).await
     }
 
     /// Apply operations at random delays, drawing each op's kind (and then its data) according to
-    /// `mix`, until `cfg.duration` and/or `cfg.max_ops` is hit, optionally advancing blocks
-    /// between ops, then run a final invariant sweep that catches drift since the last mid-run
-    /// check.
+    /// `mix` (static weights multiplied per draw by [`Harness::weight`]), until `cfg.duration`
+    /// and/or `cfg.max_ops` is hit, optionally advancing blocks between ops, then run a final
+    /// invariant sweep that catches drift since the last mid-run check.
     ///
-    /// **Compatibility**: [`KindMix::Harness`] routes through the crate-private `OpSource`'s
-    /// `Generated { kinds: None, .. }` shape, whose `next()` calls `harness.generate(rng, world)`
-    /// — the exact draw [`run`](Runner::run) has always made. The per-iteration rng draw order is
-    /// also unchanged: op draw (`source.next`), then block-advance jitter (`rng.below`), then
-    /// delay jitter (`rng.below`); `apply`/`check` never touch the rng (it is only ever drawn
-    /// from `OpSource::next`/`Harness::generate`). So for `KindMix::Harness` with `cfg.max_ops =
-    /// None`, a recorded seed reproduces exactly the sequence it always has — `max_ops` only adds
-    /// a second, independent stop condition (`remaining = cfg.max_ops.unwrap_or(usize::MAX)` on
-    /// the same `OpSource` fuzz/invariant already use) and does not perturb the draw itself.
+    /// The per-iteration rng draw order is: op draw (`OpSource::next`, kind index then op data),
+    /// then block-advance jitter (`rng.below`), then delay jitter (`rng.below`); `apply`/`check`
+    /// and [`Harness::weight`] never touch the rng, so a recorded seed reproduces its sequence
+    /// as long as the harness's weights are deterministic in the world.
     ///
     /// A [`FailureKind::Infra`] is tolerated (the op still counts, block-advance and the inter-op
     /// delay still run, and the loop continues) while the consecutive-Infra streak stays below
@@ -478,6 +474,12 @@ impl<H: Harness> Runner<H, Endurance> {
             heartbeat,
             stop,
         } = cfg;
+        if advance_blocks.is_some() {
+            tracing::debug!(
+                "advance_blocks is set: ensure this harness overrides `Harness::advance` \
+                 (the default is a no-op)"
+            );
+        }
         let Self {
             harness,
             ctx,
@@ -497,39 +499,12 @@ impl<H: Harness> Runner<H, Endurance> {
         let mut builder = ReportBuilder::new(seed, Endurance::LABEL, harness);
 
         let remaining = max_ops.unwrap_or(usize::MAX);
-        let mut source = match mix {
-            // `kinds: None` is the exact shape `Runner::run` has always built; `next()` calls
-            // `harness.generate` directly, so the draw stream is unchanged (see this method's
-            // doc comment).
-            KindMix::Harness => OpSource::Generated {
-                kinds: None,
-                remaining,
-            },
-            // Same empty-mix guard fuzz/invariant use: surface an infra failure instead of
-            // panicking inside the rng.
-            KindMix::Restricted([]) => {
+        let mut source = match resolve_mix(harness, mix, remaining) {
+            Ok(s) => s,
+            Err(()) => {
                 let report = empty_mix_report(builder);
                 log_summary(&report, stats.as_ref());
                 return report;
-            }
-            KindMix::Restricted(ks) => OpSource::Generated {
-                kinds: Some(ks),
-                remaining,
-            },
-            KindMix::Weighted(pairs)
-                if pairs.is_empty() || pairs.iter().map(|&(_, w)| w as u64).sum::<u64>() == 0 =>
-            {
-                let report = empty_mix_report(builder);
-                log_summary(&report, stats.as_ref());
-                return report;
-            }
-            KindMix::Weighted(pairs) => {
-                let (kinds, weights) = pairs.iter().copied().unzip();
-                OpSource::Weighted {
-                    kinds,
-                    weights,
-                    remaining,
-                }
             }
         };
 
@@ -553,9 +528,15 @@ impl<H: Harness> Runner<H, Endurance> {
                     break;
                 }
                 // `max_ops` bound: `source` starts with `remaining = max_ops.unwrap_or(MAX)` and
-                // yields `None` once exhausted.
-                let Some(op) = source.next(harness, rng, world) else {
-                    break;
+                // yields `Ok(None)` once exhausted. `Err` = every effective kind weight is 0 for
+                // the current state, which fails the run like any other driver.
+                let op = match source.next(harness, ctx, rng, world) {
+                    Ok(Some(op)) => op,
+                    Ok(None) => break,
+                    Err(kind) => {
+                        let last = builder.history.last().cloned();
+                        break 'run builder.fail(steps, last, kind);
+                    }
                 };
                 builder.history.push(op.clone());
                 steps += 1;
@@ -795,7 +776,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> Vec<H::Operation>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         self.shrink_with(failing, 1, rebuild).await
     }
@@ -838,7 +819,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> Vec<H::Operation>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         self.shrink_with_limit(failing, check_every, DEFAULT_SHRINK_LIMIT, rebuild)
             .await
@@ -862,7 +843,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> Vec<H::Operation>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         // Park stats for the whole shrink: replays are throwaway diagnostics-wise, and the caller's
         // tallies must keep describing the run they came from.
@@ -883,7 +864,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> Vec<H::Operation>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         // Establish the reference failure the shrink must preserve.
         let (ctx, world) = rebuild().await;
@@ -978,7 +959,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> Option<bool>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         if *budget == 0 {
             tracing::warn!(
@@ -1011,7 +992,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> RunReport<H::Operation>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         self.run_and_shrink_with(ops, 1, rebuild).await
     }
@@ -1027,7 +1008,7 @@ impl<H: Harness> Runner<H, Scenario> {
     ) -> RunReport<H::Operation>
     where
         F: Fn() -> Fut,
-        Fut: core::future::Future<Output = (Ctx, H::World)>,
+        Fut: core::future::Future<Output = (H::Ctx, H::World)>,
     {
         let report = self.run_fixed(ops, Scenario::LABEL, check_every).await;
         if report.passed() {
@@ -1142,59 +1123,62 @@ impl<Op: Clone> ReportBuilder<Op> {
     }
 }
 
-/// Where a driver's next operation comes from: freshly generated (fuzz / invariant), a fixed list
-/// (scenario / replay / shrink candidates), or a weighted generated mix. Generated and Weighted
-/// draws preserve the exact rng order the modes have always used (kind choice first, then op
-/// data), which is what keeps recorded seeds reproducing across releases (pinned by the
-/// golden-seed tests in mechanics.rs: `golden_seed_sequence_is_stable` for `Generated` and
-/// `weighted_golden_seed_sequence_is_stable` for `Weighted`).
-enum OpSource<'a, H: Harness> {
+/// Where a driver's next operation comes from: freshly generated (fuzz / invariant / endurance)
+/// or a fixed list (scenario / replay / shrink candidates). Generated draws preserve the exact
+/// rng order the modes have always used (kind choice first, then op data), which is what keeps
+/// recorded seeds reproducing across releases (pinned by the golden-seed tests in mechanics.rs).
+/// Weights never draw from the rng: the effective weight vector is recomputed from
+/// `(statics, Harness::weight)` before each kind draw, so a weight that shifts with the world
+/// changes *which* kind is likely, not *how many* rng values a draw consumes.
+enum OpSource<H: Harness> {
+    /// Weighted generated draws over a fixed candidate list. `statics` is parallel to `kinds`
+    /// ([`resolve_mix`] guarantees equal length and a nonzero static total).
     Generated {
-        kinds: Option<&'a [H::OpKind]>,
+        kinds: Vec<H::OpKind>,
+        statics: Vec<u32>,
         remaining: usize,
     },
     Fixed(std::vec::IntoIter<H::Operation>),
-    /// Owns its kinds/weights (rather than borrowing) so [`Runner::run_with`] can split a
-    /// `&[(K, u32)]` into the two `Vec`s without fighting `drive`'s borrow of the source.
-    Weighted {
-        kinds: Vec<H::OpKind>,
-        weights: Vec<u32>,
-        remaining: usize,
-    },
 }
 
-impl<H: Harness> OpSource<'_, H> {
-    fn next(&mut self, harness: &H, rng: &mut Prng, world: &H::World) -> Option<H::Operation> {
+impl<H: Harness> OpSource<H> {
+    /// `Ok(Some(op))` = next operation; `Ok(None)` = source exhausted (op budget or fixed list
+    /// done); `Err` = no kind is currently drawable (every effective weight is 0 for this
+    /// state), which fails the run at this step.
+    fn next(
+        &mut self,
+        harness: &H,
+        ctx: &H::Ctx,
+        rng: &mut Prng,
+        world: &H::World,
+    ) -> Result<Option<H::Operation>, FailureKind> {
         match self {
-            OpSource::Generated { kinds, remaining } => {
-                if *remaining == 0 {
-                    return None;
-                }
-                *remaining -= 1;
-                Some(match kinds {
-                    None => harness.generate(rng, world),
-                    Some(ks) => {
-                        let kind = ks[rng.index(ks.len())];
-                        harness.generate_op(rng, world, kind)
-                    }
-                })
-            }
-            OpSource::Fixed(iter) => iter.next(),
-            OpSource::Weighted {
+            OpSource::Generated {
                 kinds,
-                weights,
+                statics,
                 remaining,
             } => {
                 if *remaining == 0 {
-                    return None;
+                    return Ok(None);
+                }
+                let weights: Vec<u32> = kinds
+                    .iter()
+                    .zip(statics.iter())
+                    .map(|(&k, &s)| s.saturating_mul(harness.weight(ctx, world, k)))
+                    .collect();
+                if weights.iter().all(|&w| w == 0) {
+                    return Err(FailureKind::Infra(
+                        "no operation kind is currently drawable: every effective weight \
+                         (static * Harness::weight) is 0 for the current world"
+                            .into(),
+                    ));
                 }
                 *remaining -= 1;
-                // Pinned draw order: weighted index first, then op data (mirrors the Restricted
-                // arm above).
-                let idx = rng.weighted(weights);
-                let kind = kinds[idx];
-                Some(harness.generate_op(rng, world, kind))
+                // Pinned draw order: weighted kind index first, then op data.
+                let idx = rng.weighted(&weights);
+                Ok(Some(harness.generate_op(rng, world, kinds[idx])))
             }
+            OpSource::Fixed(iter) => Ok(iter.next()),
         }
     }
 }
@@ -1206,16 +1190,24 @@ impl<H: Harness> OpSource<'_, H> {
 #[allow(clippy::too_many_arguments)]
 async fn drive<H: Harness>(
     harness: &H,
-    ctx: &mut Ctx,
+    ctx: &mut H::Ctx,
     world: &mut H::World,
     rng: &mut Prng,
-    mut source: OpSource<'_, H>,
+    mut source: OpSource<H>,
     check_every: usize,
     mut builder: ReportBuilder<H::Operation>,
     mut stats: Option<&mut Stats>,
 ) -> RunReport<H::Operation> {
     let mut steps = 0usize;
-    while let Some(op) = source.next(harness, rng, world) {
+    loop {
+        let op = match source.next(harness, ctx, rng, world) {
+            Ok(Some(op)) => op,
+            Ok(None) => break,
+            Err(kind) => {
+                let last = builder.history.last().cloned();
+                return builder.fail(steps, last, kind);
+            }
+        };
         builder.history.push(op.clone());
         steps += 1;
         let do_check = check_every > 0 && steps.is_multiple_of(check_every);
@@ -1241,7 +1233,7 @@ async fn drive<H: Harness>(
 /// final sweep.
 async fn sweep<H: Harness>(
     harness: &H,
-    ctx: &mut Ctx,
+    ctx: &mut H::Ctx,
     world: &mut H::World,
     coverage: &mut Coverage,
 ) -> Result<(), FailureKind> {
@@ -1273,16 +1265,16 @@ async fn sweep<H: Harness>(
 
 /// Apply one operation, recording its outcome into `stats` (when `Some`) and returning its
 /// [`Verdict`] on success. Maps a [`HarnessError`] into a [`FailureKind`]. Golden-safe: the rng is
-/// never touched here (or in [`step`]/[`sweep`]) — it is only drawn in [`OpSource::next`] /
-/// [`Harness::generate`], so exposing the verdict to callers (the scenario driver) changes no
-/// fuzz/invariant/endurance op stream.
+/// never touched here (or in [`step`]/[`sweep`]): it is only drawn in [`OpSource::next`], so
+/// exposing the verdict to callers (the scenario driver) changes no fuzz/invariant/endurance op
+/// stream.
 ///
 /// A free function (not a method) so it borrows the harness disjointly from the runner's `ctx` and
 /// `world` fields. Shared by [`step`] (which discards the verdict after an optional sweep) and
 /// [`Runner::run_steps`], which inspects it against a [`ScenarioStep`]'s [`Expectation`].
 async fn apply_op<H: Harness>(
     harness: &H,
-    ctx: &mut Ctx,
+    ctx: &mut H::Ctx,
     world: &mut H::World,
     op: &H::Operation,
     mut stats: Option<&mut Stats>,
@@ -1327,7 +1319,7 @@ async fn apply_op<H: Harness>(
 /// function's behavior before [`apply_op`] was split out.
 async fn step<H: Harness>(
     harness: &H,
-    ctx: &mut Ctx,
+    ctx: &mut H::Ctx,
     world: &mut H::World,
     op: &H::Operation,
     check: bool,

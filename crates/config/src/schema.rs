@@ -54,12 +54,54 @@ pub struct EnvSpec {
     pub params: Option<toml::Table>,
 }
 
-/// `[suite.<name>]`: an ordered list of profile names to run together.
+/// Where a suite phase's starting `(Ctx, World)` comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorldSource {
+    /// Build a fresh environment via the registered setup fn (today's behavior).
+    #[default]
+    Fresh,
+    /// Start from the live environment and world the donor phase (the single `needs` entry)
+    /// finished with. Requires the donor to have passed.
+    Inherit,
+}
+
+/// One phase of a pipeline suite: a profile to run, the phases that must have passed first, and
+/// where its starting world comes from.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuitePhase {
+    /// A `[profile.*]` name in the same config file.
+    pub profile: String,
+    /// Names of earlier phases in this suite that must have passed. A failed or skipped
+    /// dependency skips this phase.
+    #[serde(default)]
+    pub needs: Vec<String>,
+    /// Starting-state source. `inherit` requires exactly one `needs` entry.
+    #[serde(default)]
+    pub world: WorldSource,
+    /// Optional table handed to the harness's registered world patch fn before this phase
+    /// runs (after the starting world is obtained, fresh or inherited). Requires the harness
+    /// to be registered with a patch fn; enforced at run time.
+    #[serde(default)]
+    pub params: Option<toml::Table>,
+}
+
+/// `[suite.<name>]`: an ordered pipeline of phases to run together.
+///
+/// A config may declare phases directly via `[[suite.<name>.phases]]`, or use the legacy
+/// `profiles = [..]` sugar. After loading, [`Suite::phases`] is always the source of truth:
+/// legacy `profiles` are normalized into fresh, dependency-free phases and `profiles` is cleared.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Suite {
-    /// Profile names to run, in order.
+    /// Legacy sugar: profile names to run, in order. Normalized into [`Suite::phases`] by the
+    /// loader and cleared; read `phases` instead.
+    #[serde(default)]
     pub profiles: Vec<String>,
+    /// The pipeline phases, in declaration (execution) order. Always populated after loading.
+    #[serde(default)]
+    pub phases: Vec<SuitePhase>,
     /// Stop the suite at the first failing profile; defaults to `false`.
     #[serde(default)]
     pub stop_on_failure: bool,
@@ -204,7 +246,8 @@ pub struct FuzzProfile {
     pub ops: usize,
     /// Restricted uniform draw over these kind names; `None` means all kinds.
     pub kinds: Option<Vec<String>>,
-    /// Weighted draw over kind name to integer weight; mutually exclusive with `kinds`.
+    /// Static weighted draw over kind name to integer weight, multiplied at each draw by the
+    /// harness's dynamic `weight(ctx, world, kind)`; mutually exclusive with `kinds`.
     pub weights: Option<BTreeMap<String, u32>>,
 }
 
@@ -255,7 +298,8 @@ pub struct InvariantProfile {
     pub ops: usize,
     /// Restricted uniform draw over these kind names; `None` means all kinds.
     pub kinds: Option<Vec<String>>,
-    /// Weighted draw over kind name to integer weight; mutually exclusive with `kinds`.
+    /// Static weighted draw over kind name to integer weight, multiplied at each draw by the
+    /// harness's dynamic `weight(ctx, world, kind)`; mutually exclusive with `kinds`.
     pub weights: Option<BTreeMap<String, u32>>,
 }
 
@@ -336,7 +380,8 @@ pub struct EnduranceProfile {
     pub heartbeat: Duration,
     /// Restricted uniform draw over these kind names; `None` means all kinds.
     pub kinds: Option<Vec<String>>,
-    /// Weighted draw over kind name to integer weight; mutually exclusive with `kinds`.
+    /// Static weighted draw over kind name to integer weight, multiplied at each draw by the
+    /// harness's dynamic `weight(ctx, world, kind)`; mutually exclusive with `kinds`.
     pub weights: Option<BTreeMap<String, u32>>,
 }
 

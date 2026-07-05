@@ -41,7 +41,7 @@ pub use duration::{humantime_duration, humantime_opt};
 pub use interpolate::interpolate_value;
 pub use schema::{
     CommonKeys, EnduranceProfile, EnvSpec, ExpectStr, FuzzProfile, HarnessRef, InvariantProfile,
-    Profile, ScenarioProfile, ScenarioStepRaw, Suite, TargetStr,
+    Profile, ScenarioProfile, ScenarioStepRaw, Suite, SuitePhase, TargetStr, WorldSource,
 };
 pub use seed::SeedSpec;
 pub use target::{parse_target_str, resolve_chain_target, TargetOverrides};
@@ -175,6 +175,70 @@ pub enum ConfigError {
         /// The profile name it referenced that does not exist.
         profile: String,
     },
+    /// A `[suite.<name>]` set both the legacy `profiles` list and `phases`. They are mutually
+    /// exclusive: use `phases` for pipelines, or `profiles` for the flat legacy form.
+    #[error("suite `{suite}`: set either `profiles` or `phases`, not both")]
+    SuiteProfilesAndPhases {
+        /// The suite's name.
+        suite: String,
+    },
+    /// A phase's `needs` entry did not name an earlier phase in the same suite. Declaration order
+    /// is execution order, so a dependency must appear before the phase that needs it (this also
+    /// rejects self references and forward references).
+    #[error("suite `{suite}`: phase `{phase}` needs `{needed}`, which is not an earlier phase in the same suite (needs must name a phase declared before it)")]
+    PhaseNeedsNotEarlier {
+        /// The suite's name.
+        suite: String,
+        /// The phase profile whose `needs` is invalid.
+        phase: String,
+        /// The offending `needs` entry.
+        needed: String,
+    },
+    /// Two phases in one suite ran the same profile. Each phase profile must be unique within a
+    /// suite so `needs` entries name it unambiguously.
+    #[error("suite `{suite}`: phase profile `{profile}` is declared more than once (phase profiles must be unique within a suite)")]
+    DuplicatePhaseProfile {
+        /// The suite's name.
+        suite: String,
+        /// The profile name declared more than once.
+        profile: String,
+    },
+    /// A phase set `world = "inherit"` but did not have exactly one `needs` entry. An inheriting
+    /// phase starts from exactly one donor, so it must name exactly one dependency.
+    #[error("suite `{suite}`: phase `{phase}` sets `world = \"inherit\"` but has {needs} `needs` entries (inherit requires exactly one, the donor)")]
+    PhaseInheritArity {
+        /// The suite's name.
+        suite: String,
+        /// The inheriting phase profile.
+        phase: String,
+        /// How many `needs` entries the phase declared.
+        needs: usize,
+    },
+    /// A phase involved in a `world = "inherit"` handoff is not single-setup. Only single-setup
+    /// modes (`invariant`, `endurance`, `scenario`, or `fuzz` with `cases == 1`) build exactly
+    /// one world, which a handoff can donate or consume.
+    #[error("suite `{suite}`: phase `{phase}` ({role}) is not single-setup (world inherit needs `invariant`, `endurance`, `scenario`, or `fuzz` with `cases == 1`)")]
+    PhaseWorldNotSingleSetup {
+        /// The suite's name.
+        suite: String,
+        /// The offending phase profile.
+        phase: String,
+        /// Whether this phase is the `donor` or the `inheriting phase`.
+        role: String,
+    },
+    /// Two phases declared `world = "inherit"` against the same donor. State forking is not
+    /// implemented: a donor can feed exactly one inheriting phase (replay fork is milestone 2).
+    #[error("suite `{suite}`: donor `{donor}` is inherited by both phase `{first}` and phase `{second}`, but a donor can feed only one inheriting phase (state forking is not implemented; replay fork is milestone 2)")]
+    SharedDonor {
+        /// The suite's name.
+        suite: String,
+        /// The shared donor phase profile.
+        donor: String,
+        /// The first inheriting phase.
+        first: String,
+        /// The second inheriting phase.
+        second: String,
+    },
     /// `env.chains` named a label with no matching `[[chain]]` entry.
     #[error("profile `{profile}`: env.chains references unknown chain label `{label}`")]
     UnknownChainSelection {
@@ -288,6 +352,7 @@ fn load_from_value<V: Doc>(
     interpolate::interpolate_doc(&mut value, vars)?;
     let warnings = merge::merge(&mut value)?;
     let mut cfg = build_run_config(value)?;
+    validate::normalize_suite_phases(&mut cfg)?;
     validate::validate(&cfg)?;
     cfg.warnings = warnings;
     Ok(cfg)

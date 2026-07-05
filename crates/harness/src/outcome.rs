@@ -5,17 +5,13 @@
 //!   more than the balance *should* revert; that is not a bug.
 //! - A discovered **bug** vs a test-**infrastructure** failure ([`HarnessError`]). An over-
 //!   withdraw that the contract *accepted* is a bug; a failed deploy is infrastructure.
-//! - An **invariant** violation ([`Violation`]), surfaced by [`crate::harness::Harness::check`].
+//! - An **invariant** violation ([`Violation`]), surfaced by [`crate::Harness::check`].
 //!
 //! The classification policy lives inside the developer's `apply`, the only place that knows an
-//! operation's semantics. [`classify`] collapses the common four-way match into one call.
+//! operation's semantics. The framework's `classify` helper collapses the common four-way match
+//! into one call.
 
 use std::collections::BTreeMap;
-
-use cross_vm_core::CrossVmError;
-
-use crate::contract::AppResponse;
-use crate::error::EnvError;
 
 /// How the system-under-test responded to an operation the developer judged legitimate to attempt.
 #[derive(Debug, Clone)]
@@ -32,12 +28,22 @@ pub enum Verdict {
 /// An error that ends a run as a failure (as opposed to a legitimate [`Verdict::Rejected`]).
 #[derive(Debug)]
 pub enum HarnessError {
-    /// A confirmed bug in the system-under-test: an operation the model said must succeed was
-    /// rejected, or one that must fail was accepted.
+    /// A confirmed bug in the system-under-test.
     Bug(String),
-    /// A test-infrastructure failure (deploy/RPC/model desync) — usually a harness bug, not a
-    /// SUT bug, so it is reported separately.
-    Infra(CrossVmError),
+    /// A test-infrastructure failure (deploy/RPC/model desync), reported separately.
+    Infra(Box<dyn std::error::Error>),
+}
+
+impl HarnessError {
+    /// Build an [`Infra`](HarnessError::Infra) from any error or message.
+    pub fn infra(e: impl Into<Box<dyn std::error::Error>>) -> Self {
+        HarnessError::Infra(e.into())
+    }
+
+    /// Build a [`Bug`](HarnessError::Bug) from any displayable detail.
+    pub fn bug(detail: impl Into<String>) -> Self {
+        HarnessError::Bug(detail.into())
+    }
 }
 
 impl core::fmt::Display for HarnessError {
@@ -49,23 +55,16 @@ impl core::fmt::Display for HarnessError {
     }
 }
 
-impl std::error::Error for HarnessError {}
-
-impl From<CrossVmError> for HarnessError {
-    fn from(e: CrossVmError) -> Self {
-        HarnessError::Infra(e)
+/// Any concrete error lifts to [`Infra`](HarnessError::Infra) via `?` (the anyhow pattern). This is
+/// why `HarnessError` itself must not implement [`std::error::Error`]: the blanket impl would
+/// collide with the reflexive `From<T> for T`.
+impl<E: std::error::Error + 'static> From<E> for HarnessError {
+    fn from(e: E) -> Self {
+        HarnessError::Infra(Box::new(e))
     }
 }
 
-impl From<EnvError> for HarnessError {
-    /// An environment build/drive failure (inject/fund/start, or an unknown-chain lookup) is
-    /// test infrastructure, not a SUT bug, so it maps to [`HarnessError::Infra`].
-    fn from(e: EnvError) -> Self {
-        HarnessError::Infra(CrossVmError::wallet(e.to_string()))
-    }
-}
-
-/// A broken invariant, returned by [`crate::harness::Harness::check`].
+/// A broken invariant, returned by [`crate::Harness::check`].
 #[derive(Debug, Clone)]
 pub struct Violation {
     /// Human-readable detail of how the invariant was broken.
@@ -124,7 +123,7 @@ impl From<Result<(), Violation>> for CheckOutcome {
 /// Externally tagged when serialized (serde's default enum representation): `Bug(String)` ->
 /// `{"Bug": "..."}`, `Invariant { name, detail }` -> `{"Invariant": {"name": ..., "detail":
 /// ...}}`, `Infra(String)` -> `{"Infra": "..."}`. That tag is also the value stored in
-/// [`crate::config::ErasedFailure::kind`], so a JSON report reader can `match` on the same key a
+/// `crate::config::ErasedFailure::kind`, so a JSON report reader can `match` on the same key a
 /// Rust caller would.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -150,9 +149,8 @@ pub struct Failure<Op> {
     pub step: usize,
     /// The operation that triggered the failure. `None` for a pre-operation failure.
     pub op: Option<Op>,
-    /// The full operation history up to and including the failing op, for [`replay`].
-    ///
-    /// [`replay`]: crate::harness::Runner::replay
+    /// The full operation history up to and including the failing op, for
+    /// [`Runner::replay`](crate::Runner::replay).
     pub history: Vec<Op>,
     /// What went wrong.
     pub kind: FailureKind,
@@ -183,7 +181,7 @@ impl InvCoverage {
 /// Per-invariant coverage over a whole run, keyed by the invariant's `Debug` name (the same key
 /// used for [`FailureKind::Invariant::name`]).
 ///
-/// Seeded with every invariant [`Harness::invariants`](crate::harness::Harness::invariants) reports
+/// Seeded with every invariant [`Harness::invariants`](crate::Harness::invariants) reports
 /// at run start, so an invariant that is never checked (e.g. `check_every` skipped it, or the run
 /// was too short) still appears with an all-zero tally instead of vanishing.
 ///
@@ -273,112 +271,17 @@ impl<Op> RunReport<Op> {
     }
 }
 
-/// Collapse the four-way (expected, result) match into one call.
-///
-/// `expected_ok` is the model's prediction for whether this operation should be accepted.
-/// `on_ok` mutates the model after a confirmed acceptance. Only [`CrossVmError::Execute`]
-/// counts as a legitimate revert; any other error is treated as infrastructure.
-///
-/// ```ignore
-/// let ok = world.model.can_withdraw(user, amount);
-/// let res = world.vault.withdraw(who, amount).await;
-/// classify(ok, res, || world.model.apply_withdraw(user, amount),
-///          "over-withdraw was accepted", "valid withdraw reverted")
-/// ```
-pub fn classify<T>(
-    expected_ok: bool,
-    res: Result<AppResponse<T>, CrossVmError>,
-    on_ok: impl FnOnce(),
-    bug_if_accepted: &str,
-    bug_if_reverted: &str,
-) -> Result<Verdict, HarnessError> {
-    match res {
-        Ok(_) if expected_ok => {
-            on_ok();
-            Ok(Verdict::Accepted)
-        }
-        // Succeeded when the model said it must fail: a bug.
-        Ok(_) => Err(HarnessError::Bug(bug_if_accepted.into())),
-        // Only a revert (`Execute`) is a legitimate rejection.
-        Err(CrossVmError::Execute { reason, .. }) if !expected_ok => {
-            Ok(Verdict::Rejected { reason })
-        }
-        // Reverted when the model said it must succeed: a bug.
-        Err(CrossVmError::Execute { reason, .. }) => {
-            Err(HarnessError::Bug(format!("{bug_if_reverted}: {reason}")))
-        }
-        // Any non-revert error is infrastructure, regardless of the model's prediction.
-        Err(e) => Err(HarnessError::Infra(e)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cross_vm_core::ChainKind;
-
-    fn revert() -> CrossVmError {
-        CrossVmError::Execute {
-            kind: ChainKind::Evm,
-            reason: "insufficient balance".into(),
-        }
-    }
-
-    #[test]
-    fn accepted_runs_on_ok() {
-        let mut applied = false;
-        let v = classify::<()>(
-            true,
-            Ok(AppResponse::evm((), Default::default(), vec![])),
-            || applied = true,
-            "a",
-            "b",
-        )
-        .unwrap();
-        assert!(matches!(v, Verdict::Accepted));
-        assert!(applied);
-    }
-
-    #[test]
-    fn expected_revert_is_rejected_not_bug() {
-        let v = classify::<()>(false, Err(revert()), || {}, "a", "b").unwrap();
-        assert!(matches!(v, Verdict::Rejected { .. }));
-    }
-
-    #[test]
-    fn unexpected_accept_is_bug() {
-        let e = classify::<()>(
-            false,
-            Ok(AppResponse::evm((), Default::default(), vec![])),
-            || {},
-            "over-accept",
-            "b",
-        )
-        .unwrap_err();
-        assert!(matches!(e, HarnessError::Bug(m) if m.contains("over-accept")));
-    }
-
-    #[test]
-    fn unexpected_revert_is_bug() {
-        let e = classify::<()>(true, Err(revert()), || {}, "a", "valid reverted").unwrap_err();
-        assert!(matches!(e, HarnessError::Bug(m) if m.contains("valid reverted")));
-    }
-
-    #[test]
-    fn non_execute_error_is_infra() {
-        let e =
-            classify::<()>(true, Err(CrossVmError::wallet("boom")), || {}, "a", "b").unwrap_err();
-        assert!(matches!(e, HarnessError::Infra(_)));
-    }
 
     // -------------------------------------------------------------------------------------
-    // serde (spec section 9): Coverage/InvCoverage/FailureKind shapes. Gated on `cli` rather
-    // than the narrower `serde` feature purely because `serde_json` (used here to assert the
-    // JSON shape) is only pulled in by `cli`; the `Serialize` derives themselves are gated on
-    // `serde` alone in the non-test code above.
+    // serde (spec section 9): Coverage/InvCoverage/FailureKind shapes. Gated on `serde`, the
+    // feature that pulls in the `Serialize` derives; `serde_json` (used here to assert the JSON
+    // shape) is a dev-dependency of this crate.
     // -------------------------------------------------------------------------------------
 
-    #[cfg(feature = "cli")]
+    #[cfg(feature = "serde")]
     mod serde_shapes {
         use super::*;
 

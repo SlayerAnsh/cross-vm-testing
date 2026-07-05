@@ -24,7 +24,7 @@ Both come from the current code and shape everything below.
 
 **The stack is single threaded and `!Send` by construction.** `WalletFactory` is shared as `Rc`, and the existing script binary runs on `#[tokio::main(flavor = "current_thread")]`. Every erased future in the registry is therefore a non `Send` local boxed future (`Pin<Box<dyn Future<Output = T> + 'a>>`). No `futures` crate dependency is needed, and parallel workers inside one process are off the table (see section 12).
 
-**Recorded seeds must keep reproducing across releases.** The comment on `OpSource` in `crates/framework/src/harness/runner.rs` pins the rng draw order, guarded by the golden seed test in `mechanics.rs`. Config supplied weights are a new code path (a new `OpSource` arm), never a change to the existing `Generated` or `Fixed` arms.
+**Recorded seeds must keep reproducing across releases.** The comment on `OpSource` in `crates/harness/src/runner.rs` (the standalone `harness-core` crate) pins the rng draw order (weighted kind index first, then op data), guarded by the golden seed tests in `mechanics.rs`. `Harness::weight` never draws from the rng, so dynamic weights change which kind is likely, never how many rng values a draw consumes.
 
 ## 4. Config file schema
 
@@ -141,7 +141,7 @@ stop_on_failure = false
 | `[env]` | no | default environment request for every profile (section 6.2) |
 | `[defaults]` | no | table shallow merged under every profile, profile keys win |
 | `[profile.<name>]` | at least one | one runnable configuration |
-| `[suite.<name>]` | no | ordered list of profile names plus `stop_on_failure` (bool, default false) |
+| `[suite.<name>]` | no | ordered pipeline of phases (`[[suite.<name>.phases]]`, section 4.7) plus `stop_on_failure` (bool, default false). The legacy `profiles = [...]` list is sugar for dependency free, fresh world phases (updated: see 4.7) |
 | `[replay]` | no | provenance metadata written by the artifact writer, ignored by the run schema (section 10) |
 
 There is no `single` mode. A scenario with one step is the same thing.
@@ -256,6 +256,78 @@ Each `[[chain]]` entry declares one chain the framework builds via `build_chain`
 
 **Compiled VM boundary.** `kind` must be one of the four backends compiled into the framework. Config cannot introduce a new VM; that requires a new crate with a `ChainProvider` implementation, `WalletDeriver`, and an `AnyChain` variant.
 
+### 4.7 Pipeline suites: `[[suite.<name>.phases]]`
+
+A suite can express an ordered pipeline of phases instead of (or in place of) the legacy flat `profiles` list, so a later phase can require an earlier one to have passed, and optionally continue from the exact `(Ctx, World)` the earlier phase ended with, rather than paying a fresh setup again.
+
+```toml
+[suite.progressive]
+
+  [[suite.progressive.phases]]
+  profile = "deposit-soak"
+
+  [[suite.progressive.phases]]
+  profile = "mixed-after-deposits"
+  needs = ["deposit-soak"]
+  world = "inherit"
+```
+
+Per phase keys:
+
+| key | type | default | meaning |
+|---|---|---|---|
+| `profile` | string | required | a `[profile.<name>]` in the same config file |
+| `needs` | array of phase profile names | empty | earlier phases in this suite that must have passed; a failed or skipped dependency skips this phase |
+| `world` | `"fresh"` \| `"inherit"` | `"fresh"` | `"fresh"` builds a new environment via the registered setup fn (today's behavior); `"inherit"` starts from the live environment and world the donor phase (the single `needs` entry) finished with |
+
+Structural rules, checked at load time (a violation is a hard config error, `cross-vm validate` exit code 3):
+
+| rule | detail |
+|---|---|
+| declaration order is execution order | `needs` may only name a phase declared earlier in the same suite; a self reference or a forward reference is rejected |
+| unique phase profiles | a profile may appear as at most one phase within a suite, so `needs` entries name it unambiguously |
+| `world = "inherit"` arity | requires exactly one `needs` entry, the donor |
+| single setup ends | both the donor and the inheriting phase must build exactly one starting world: `invariant`, `endurance`, `scenario`, or `fuzz` with `cases == 1`. A multi case fuzz fans out into many independent worlds, so it can neither donate nor consume a single inherited world |
+| one inheritor per donor | a donor may feed at most one inheriting phase; two phases inheriting from the same donor is a hard error (state forking is not implemented in this milestone; a later replay based fork is tracked separately) |
+
+A skipped or failed dependency skips the dependent phase entirely; a skip contributes nothing to the suite's combined exit code (only an actual failure does). The legacy `profiles = [a, b]` sugar is normalized into fresh, dependency free phases (`needs = []`, `world = "fresh"`) by the loader, so a config written before this feature keeps behaving exactly as it did.
+
+**Mixed modes.** A phase donates and inherits a world regardless of its own mode: any of the single setup modes (`scenario`, `invariant`, `endurance`, or `fuzz` with `cases == 1`) can be a donor, an inheritor, or both, so a pipeline can freely alternate fixed scripts and random phases. A common shape is a scenario phase that seeds liquidity or sets preconditions with a handful of concrete steps, handing its world to an invariant phase (the long "auto run"), which hands off in turn to a single case fuzz phase that digs further. Each phase can also re-pin state through its own `params` table before it runs (section 6.5). For an "auto run" phase inheriting state, prefer `invariant` mode (one long random sequence, exactly the auto run shape) or `fuzz` with `cases = 1`; a multi case fuzz stays excluded because each of its cases needs a fresh identical starting world, which requires the deferred milestone 2 replay fork. The checked in `staged` suite in `examples/cross-vm-tests/vault.cross-vm.toml` is the worked example:
+
+```toml
+[profile.seed-liquidity]
+mode = "scenario"
+steps = [
+  { op = { Deposit = { chain = "eth", user = 0, amount = 500000 } } },
+  { op = { Deposit = { chain = "osmosis", user = 1, amount = 300000 } } },
+  { op = { Borrow = { chain = "eth", user = 0, amount = 100000 } } },
+]
+
+[profile.random-mix]
+mode = "invariant"
+ops = 200
+
+[profile.deep-case]
+mode = "fuzz"
+cases = 1
+ops = 60
+
+[suite.staged]
+
+  [[suite.staged.phases]]
+  profile = "seed-liquidity"
+
+  [[suite.staged.phases]]
+  profile = "random-mix"
+  needs = ["seed-liquidity"]
+  world = "inherit"
+
+  [[suite.staged.phases]]
+  profile = "deep-case"
+  needs = ["random-mix"]
+  world = "inherit"
+```
+
 ## 5. Loader pipeline: the `cross-vm-config` crate
 
 A new pure data crate at `crates/config`, package name `cross-vm-config`. No framework dependency, no tokio, no chains. This purity is what makes YAML later a one function addition, keeps the loader unit testable with plain string fixtures, and lets the phase 5 macro bridge reuse it verbatim.
@@ -333,13 +405,14 @@ How generated runs pick the next op kind becomes explicit:
 ```rust
 /// How generated runs pick the next op kind.
 pub enum KindMix<'a, K> {
-    /// Harness defined: calls Harness::generate, so a harness override (the vault's
-    /// weighted generate) still applies. Config emits this when neither kinds nor
-    /// weights is set.
+    /// Every kind from Harness::op_kinds, static weight 1 each (the mix is then purely the
+    /// harness's dynamic weights; with the default weight this is a uniform draw). Config
+    /// emits this when neither kinds nor weights is set.
     Harness,
-    /// Uniform over a subset (the existing kinds path).
+    /// A subset of kinds, static weight 1 each (uniform up to dynamic weights).
     Restricted(&'a [K]),
-    /// Config supplied weights: rng.weighted over the pairs, then generate_op.
+    /// Config supplied static weights per kind, in sorted-kind-name order (the loader hands
+    /// weights as a BTreeMap). Each static weight is multiplied per draw by Harness::weight.
     Weighted(&'a [(K, u32)]),
 }
 
@@ -356,7 +429,7 @@ impl<H: Harness, M: Sequential> Runner<H, M> {
 
 Implementation constraint: the weighted path is one new arm in `OpSource` (or a third variant `Weighted { pairs, remaining }`). The existing `Generated` and `Fixed` arms keep their exact draw sequences so the golden seed test in `mechanics.rs` passes untouched, and the weighted path gets its own golden test so it is pinned from birth. The iteration order of config supplied weight pairs is the sorted kind name order (the loader hands over a `BTreeMap`), documented so the same file always yields the same op stream.
 
-Precedence, documented in the schema: `weights` beats `kinds` beats the harness `generate` override. A zero total weight or an empty pair list produces the same infra failure an empty `kinds` slice already produces.
+Precedence, documented in the schema: `weights` beats `kinds`, and both compose with the harness's dynamic `weight` (effective weight is static times dynamic, so a dynamic 0 always excludes a kind). A zero total static weight or an empty pair list produces the same infra failure an empty `kinds` slice already produces; a mix whose *effective* weights are all 0 for the current state fails the run at that draw.
 
 The endurance driver gains the same `mix` parameter through its config (section 6.4).
 
@@ -504,6 +577,12 @@ Driver changes:
 The CLI installs `tokio::signal::ctrl_c` to flip the flag, so a SIGINT on an eight hour soak still yields a full report, artifacts and the correct exit code. A second ctrl-c hard exits (the standard double ctrl-c contract). Stopping is cooperative, never a `select!` abort mid `apply`, so the process global `wallet_lock` is never stranded and a live broadcast is never left half observed.
 
 Deferred: stop file polling, resume seed continuation, staged load (section 12).
+
+### 6.5 Pipeline handoff: the session slot
+
+A `world = "inherit"` phase (section 4.7) is served by one session slot per registered harness, `Rc<RefCell<Option<(Ctx, H::World)>>>`, alive for the whole registry's lifetime. A donor phase whose ending world a later phase inherits stashes its final `(Ctx, World)` pair into the slot after it passes; the inheriting phase takes (moves) the pair out of the slot, leaving it empty again. Because the CLI process runs exactly one invocation and every inheritor consumes the slot by move rather than by reference, an accidental reuse (an inheriting phase whose donor never ran, or already handed its world to someone else) finds an empty slot and fails loudly with `RunError::Invalid`, never a silent reuse of stale state. A donor that fails never stashes anything, so a dependent phase gated on it is skipped by the `needs` rule (section 4.7) before it would ever reach the empty slot.
+
+Two behaviors follow from the pair being a real, live, moved value rather than a serialized snapshot. First, shrinking an inherited phase's failure is disabled: a shrink rebuild always starts from a fresh setup, which cannot reproduce the state a donor handed over, so shrinking under a different starting world would compare unrelated runs; the raw (unshrunk) failing history is kept instead. Second, a replay artifact written for an inherited phase's failure records `world_source = "inherited"` in its `[replay]` provenance and warns in the log: a standalone `cross-vm replay` of that artifact starts from a fresh setup, exactly like every other artifact, so it may not reproduce the same failure the pipeline run saw. Both caveats lift with the forthcoming replay fork design, which rematerializes an inherited starting state by replaying the donor's accepted op history instead of requiring the live pair.
 
 ## 7. Registry and type erasure
 

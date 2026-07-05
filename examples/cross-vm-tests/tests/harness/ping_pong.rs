@@ -34,12 +34,6 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use cross_vm_framework::prelude::*;
-#[cfg(feature = "endurance")]
-use cross_vm_macros::endurance_runner;
-#[cfg(feature = "fuzz")]
-use cross_vm_macros::fuzz_runner;
-#[cfg(feature = "invariant")]
-use cross_vm_macros::invariant_runner;
 
 use crate::support::{
     fund_alice, parse_packets, test_wallets, Bridge, BridgeLedger, PacketKind, PingPong,
@@ -97,16 +91,17 @@ impl PingPongHarness {
     /// out of the env (shared state), so the handle drives the one live contract.
     fn pp(ctx: &Ctx, world: &PingPongWorld, label: &str) -> Result<PingPong, HarnessError> {
         let chain = ctx.chain(label)?;
-        let account = world.account.get(label).cloned().ok_or_else(|| {
-            HarnessError::Infra(CrossVmError::wallet(format!(
-                "no ping-pong deployed on {label}"
-            )))
-        })?;
+        let account = world
+            .account
+            .get(label)
+            .cloned()
+            .ok_or_else(|| HarnessError::infra(format!("no ping-pong deployed on {label}")))?;
         Ok(PingPong::instance(chain, account))
     }
 }
 
 impl Harness for PingPongHarness {
+    type Ctx = Ctx;
     type World = PingPongWorld;
     type Operation = PingPongOp;
     type Invariant = PingPongInv;
@@ -120,14 +115,16 @@ impl Harness for PingPongHarness {
     ) -> Result<Verdict, HarnessError> {
         match op {
             PingPongOp::Ping { src, dst } => {
-                let dst_port = w.port.get(dst).cloned().ok_or_else(|| {
-                    HarnessError::Infra(CrossVmError::wallet(format!("no port for {dst}")))
-                })?;
+                let dst_port = w
+                    .port
+                    .get(dst)
+                    .cloned()
+                    .ok_or_else(|| HarnessError::infra(format!("no port for {dst}")))?;
                 let pp = Self::pp(ctx, w, src)?;
                 let resp = pp
                     .ping("alice", dst_port)
                     .await
-                    .map_err(HarnessError::Infra)?;
+                    .map_err(HarnessError::infra)?;
                 let emitted = parse_packets(resp.kind(), resp.raw());
                 w.ledger.borrow_mut().record_all(emitted);
             }
@@ -138,7 +135,7 @@ impl Harness for PingPongHarness {
                 w.bridge
                     .relay_tick(&mut ctx.env)
                     .await
-                    .map_err(HarnessError::Infra)?;
+                    .map_err(HarnessError::infra)?;
             }
         }
         Ok(Verdict::Accepted)
@@ -159,18 +156,21 @@ impl Harness for PingPongHarness {
         }
     }
 
-    // Bias toward pings (relay every ~third op) so packets accumulate and then drain.
-    fn generate(&self, rng: &mut Prng, w: &PingPongWorld) -> PingPongOp {
-        let kind = if rng.chance(0.34) {
-            PingPongOpKind::Relay
-        } else {
-            PingPongOpKind::Ping
-        };
-        self.generate_op(rng, w, kind)
+    // Bias toward pings (relay roughly every third op) so packets accumulate and then drain.
+    fn weight(&self, _ctx: &Ctx, _w: &PingPongWorld, kind: PingPongOpKind) -> u32 {
+        match kind {
+            PingPongOpKind::Ping => 2,
+            PingPongOpKind::Relay => 1,
+        }
     }
 
     fn invariants(&self) -> Vec<PingPongInv> {
         vec![PingPongInv::StatsMatchLedger, PingPongInv::NoOrphanEvents]
+    }
+
+    async fn advance(&self, ctx: &mut Ctx, blocks: u64) -> Result<(), HarnessError> {
+        ctx.advance_all(blocks).await;
+        Ok(())
     }
 
     async fn check(&self, ctx: &mut Ctx, w: &PingPongWorld, inv: &PingPongInv) -> CheckOutcome {
@@ -249,13 +249,11 @@ async fn ping_pong_setup(_seed: u64) -> Result<(Ctx, PingPongWorld), HarnessErro
         let pp = PingPong::new(chain);
         pp.setup("alice", chain_id)
             .await
-            .map_err(HarnessError::Infra)?;
-        let acct = pp.address().ok_or_else(|| {
-            HarnessError::Infra(CrossVmError::wallet(format!(
-                "{label}: setup recorded no address"
-            )))
-        })?;
-        let p = pp.port().await.map_err(HarnessError::Infra)?;
+            .map_err(HarnessError::infra)?;
+        let acct = pp
+            .address()
+            .ok_or_else(|| HarnessError::infra(format!("{label}: setup recorded no address")))?;
+        let p = pp.port().await.map_err(HarnessError::infra)?;
 
         bridge.register(p.clone(), label, acct.clone(), "alice");
         account.insert(label.to_string(), acct);

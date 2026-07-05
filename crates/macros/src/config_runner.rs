@@ -10,7 +10,7 @@
 //! At **expansion** time this reads `<CARGO_MANIFEST_DIR>/<config>` (a proc-macro is a build-time
 //! process with `CARGO_MANIFEST_DIR` set, same as any other build script) purely to learn how
 //! many `#[tokio::test]` fns to fan out: a `mode = "fuzz"` profile emits one
-//! `<name>_case_<i>` test per `cases` (mirroring [`crate::runner_macros`]'s `#[fuzz_runner]`
+//! `<name>_case_<i>` test per `cases` (mirroring `harness_core_macros::fuzz_runner`'s per-case
 //! fan-out), any other mode emits a single `<name>` test. The annotated fn's own body is dropped
 //! entirely; only its name and asyncness are used.
 //!
@@ -22,7 +22,7 @@
 //! The emitted code names `cross_vm_framework::config::test_bridge::run_profile_for_test`
 //! fully qualified (no scope requirement for the framework path itself), but `harness`/`setup`
 //! are emitted unqualified — the call site must `use` them into scope, same convention as
-//! [`crate::runner_macros`] and `#[cross_vm_contract]`.
+//! `harness_core_macros::fuzz_runner` and `#[cross_vm_contract]`.
 
 use std::path::Path;
 

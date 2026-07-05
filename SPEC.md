@@ -111,7 +111,7 @@ The example wrapper covers all three VMs: an in-process CosmWasm counter (`Contr
 
 ### Property-testing harness (`cross-vm-framework`)
 
-The `harness` module drives a contract wrapper over many generated operation sequences. It is VM agnostic: it runs over whatever chain the test injects, so the same property is checked on CosmWasm, EVM, Solana, or Tron. A developer implements one `Harness` trait, with associated types `World` (persisted bookkeeping / a model), `Operation`, `Invariant`, and `OpKind` (the data free operation kinds), plus `apply` (run one operation against the env and model), `check` (evaluate one invariant), and `generate_op(rng, world, kind)` (build a random instance of one kind). A provided `generate` picks a kind and calls `generate_op`; override it only to bias the kind mix.
+The `harness` module drives a contract wrapper over many generated operation sequences. It is VM agnostic: it runs over whatever chain the test injects, so the same property is checked on CosmWasm, EVM, Solana, or Tron. A developer implements one `Harness` trait, with associated types `World` (persisted bookkeeping / a model), `Operation`, `Invariant`, and `OpKind` (the data free operation kinds), plus `apply` (run one operation against the env and model), `check` (evaluate one invariant), and `generate_op(rng, world, kind)` (build a random instance of one kind). The runner picks each kind by weight and calls `generate_op`. A provided `weight(ctx, world, kind)` returns 1 by default (a uniform mix); a harness overrides it to bias the mix dynamically, and a weight of 0 excludes a kind for as long as the current state makes it meaningless. Config supplied static weights multiply the dynamic weight.
 
 The harness itself does not build the environment. Each test builds its own `(Ctx, World)` (deploy, prime the model, set up preconditions) and loads it into a mode typed runner with `r.setup(ctx, world)`. One `Runner<H, Mode>` exposes only the driver its mode needs, via the `RunMode` typestate (`Fuzz`, `Invariant`, `Endurance`, `Scenario`):
 
@@ -121,6 +121,17 @@ The harness itself does not build the environment. Each test builds its own `(Ct
 * `ScenarioRunner` runs one concrete op or sequence (rstest matrices), and `replay(history)` re runs a recorded failing sequence deterministically.
 
 The fuzz, invariant, and endurance runs are attribute macros (`#[fuzz_runner]`, `#[invariant_runner]`, `#[endurance_runner]`) that inject a seeded, mode typed runner shell into a `#[runner]` argument; the developer writes setup, the `run(..)` call, and the asserts in the body. `#[fuzz_runner]` fans out into one `#[tokio::test]` per case (case `i` seeded by `sub_seed(seed, i)`, so a flagged case re-runs by name); the others emit one test each. A negative seed picks a fresh random seed per run and prints it for reproducibility. Invariants whose precondition has not happened yet return `CheckOutcome::Skipped` rather than failing.
+
+The config driven CLI (`docs/config-runs-spec.md`) layers a pipeline shape over the same harness: `[suite.<name>]` can declare `[[suite.<name>.phases]]`, an ordered list of profiles where a later phase names an earlier one in `needs` (skipped unless the dependency passed) and, with `world = "inherit"`, continues from the exact `(Ctx, World)` that donor phase ended with rather than a fresh setup.
+
+```toml
+[[suite.progressive.phases]]
+profile = "mixed-after-deposits"
+needs = ["deposit-soak"]
+world = "inherit"
+```
+
+See `docs/config-runs-spec.md` section 4.7 for the full phase schema and its structural rules.
 
 ### Predefined chains
 

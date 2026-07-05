@@ -200,7 +200,7 @@ A worked cross VM flow, a CosmWasm/EVM ping pong relayer driven through one `Mul
 
 ## Property testing harness
 
-You implement one `Harness` (a `World` of persisted bookkeeping, an `Operation` enum, an `Invariant` enum, an `OpKind` enum of the data free operation kinds, and `apply` / `generate_op` / `check`). Generation is decomposed: `generate_op(rng, world, kind)` builds a random instance of one kind, and `generate` (a provided default) picks a kind and calls it. Each test builds its own `(Ctx, World)` (deploy, prime the model, set up op preconditions) and loads it into a mode typed runner with `r.setup(ctx, world)`. The runner sits on top of the env, it does not replace it.
+You implement one `Harness` (a `World` of persisted bookkeeping, an `Operation` enum, an `Invariant` enum, an `OpKind` enum of the data free operation kinds, and `apply` / `generate_op` / `check`). Generation is decomposed: `generate_op(rng, world, kind)` builds a random instance of one kind, and the runner picks each kind by weight. `weight(ctx, world, kind)` (a provided default returning 1) sets the relative draw weight per kind for the current state, so a harness can bias the mix or return 0 to exclude a kind until the world makes it meaningful. Each test builds its own `(Ctx, World)` (deploy, prime the model, set up op preconditions) and loads it into a mode typed runner with `r.setup(ctx, world)`. The runner sits on top of the env, it does not replace it.
 
 That one harness then drives several runner types:
 
@@ -230,6 +230,41 @@ Case `i` is seeded by `sub_seed(seed, i)`, so a flagged case re-runs in isolatio
 **Reproducing a failure.** Every failed run reports its seed and the exact operation history. Feed the seed back as the macro's `seed =`, or turn the history into a deterministic regression test with `ScenarioRunner::replay(history)`; both re-drive the identical sequence. When filing a bug, the seed plus mode (and the failing invariant name) are all a maintainer needs.
 
 In the example crate the heavier runs are opt in so the default `cargo test` stays fast: the fuzz, invariant, and endurance tests sit behind the `fuzz`, `invariant`, and `endurance` cargo features, while the scenario (rstest matrix) tests and the runner mechanics self tests always run. See `examples/cross-vm-tests/tests/harness/` for a multi chain counter, a DeFi vault, and the runner mechanics.
+
+A config file's `[suite.<name>]` can also chain profiles into a dependency gated pipeline, with a later phase continuing from an earlier one's finished state instead of a fresh setup:
+
+```toml
+[suite.progressive]
+
+  [[suite.progressive.phases]]
+  profile = "deposit-soak"
+
+  [[suite.progressive.phases]]
+  profile = "mixed-after-deposits"
+  needs = ["deposit-soak"]
+  world = "inherit"
+```
+
+Phases mix modes freely: a scenario phase can seed liquidity or set preconditions with a few concrete steps, hand its world to an invariant phase (a long random "auto run"), which hands off to a single case fuzz phase, each starting where the previous one stopped and optionally re-pinning state through its own `params` table:
+
+```toml
+[suite.staged]
+
+  [[suite.staged.phases]]
+  profile = "seed-liquidity"    # scenario: fixed setup steps
+
+  [[suite.staged.phases]]
+  profile = "random-mix"        # invariant: long random sweep
+  needs = ["seed-liquidity"]
+  world = "inherit"
+
+  [[suite.staged.phases]]
+  profile = "deep-case"         # fuzz, cases = 1: deep single case
+  needs = ["random-mix"]
+  world = "inherit"
+```
+
+See `docs/config-runs-spec.md` section 4.7 for the phase schema and structural rules, and `examples/cross-vm-tests/vault.cross-vm.toml`'s `progressive` and `staged` suites for the checked in, runnable versions.
 
 ## Wallets
 
@@ -276,22 +311,24 @@ Two honest v1 limits remain in the mock. The mock's `CREATE` / `CREATE2` use rev
 | `#[invariant_runner]` | attribute | One `#[tokio::test]` with a seeded `InvariantRunner` |
 | `#[endurance_runner]` | attribute | One `#[tokio::test]` with a seeded `EnduranceRunner` |
 
-Five are re-exported from `cross_vm_framework::prelude`. The two `Cw*Fns` derives are applied on a contract's message enums (often in a separate crate compiled to wasm), so they are named directly as `cross_vm_macros::CwExecuteFns` / `CwQueryFns` behind a `cross-vm` feature. The generated code names framework types unqualified, so any invocation site needs `use cross_vm_framework::prelude::*;` in scope.
+Five are re-exported from `cross_vm_framework::prelude`. The three runner attribute macros live in the standalone `harness-core-macros` crate (the prelude re-exports them directly, since they know nothing about chains); the rest are defined in `cross-vm-macros`. The two `Cw*Fns` derives are applied on a contract's message enums (often in a separate crate compiled to wasm), so they are named directly as `cross_vm_macros::CwExecuteFns` / `CwQueryFns` behind a `cross-vm` feature. The generated code names framework types unqualified, so any invocation site needs `use cross_vm_framework::prelude::*;` in scope.
 
 ## Workspace layout
 
 ```
 crates/
-  core/       cross-vm-core      shared ChainProvider / ChainSpec traits, ChainKind, CrossVmError, FundError
-  cosmwasm/   cross-vm-cosmwasm  CwMockProvider (cw-multi-test), CwRpcProvider (live reads), CwChain, CwAsset
-  solidity/   cross-vm-solidity  EvmMockProvider (revm), EvmRpcProvider (live reads), EvmChain, EvmAsset
-  solana/     cross-vm-solana    SvmMockProvider (litesvm), SvmRpcProvider (live reads), SvmChain, SvmAsset
-  tron/       cross-vm-tron      TronMockProvider (revm + TVM layers), TronRpcProvider (live java-tron over TronGrid HTTP), TronChain, TronAsset
-  macros/     cross-vm-macros    proc-macros: cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, runners
-  framework/  cross-vm-framework MultiChainEnv (umbrella over all VMs), the Harness runners, prelude
+  core/           cross-vm-core         shared ChainProvider / ChainSpec traits, ChainKind, CrossVmError, FundError
+  cosmwasm/       cross-vm-cosmwasm     CwMockProvider (cw-multi-test), CwRpcProvider (live reads), CwChain, CwAsset
+  solidity/       cross-vm-solidity     EvmMockProvider (revm), EvmRpcProvider (live reads), EvmChain, EvmAsset
+  solana/         cross-vm-solana       SvmMockProvider (litesvm), SvmRpcProvider (live reads), SvmChain, SvmAsset
+  tron/           cross-vm-tron         TronMockProvider (revm + TVM layers), TronRpcProvider (live java-tron over TronGrid HTTP), TronChain, TronAsset
+  harness/        harness-core          standalone, VM agnostic property testing runner: the Harness trait, mode typed Runner, rng, stats, outcome types
+  harness-macros/ harness-core-macros   proc-macros for harness-core: fuzz_runner, invariant_runner, endurance_runner
+  macros/         cross-vm-macros       proc-macros: cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, config_runner
+  framework/      cross-vm-framework    MultiChainEnv (umbrella over all VMs), a Ctx/classify layer over harness-core, prelude
 ```
 
-Dependency trees are isolated per crate, so building or testing one VM does not pull the others. Each VM crate carries a `chains` module with predefined chain constants. The `cross-vm-framework` crate re-exports everything and adds the multi chain `MultiChainEnv` and the property testing harness.
+Dependency trees are isolated per crate, so building or testing one VM does not pull the others. Each VM crate carries a `chains` module with predefined chain constants. `harness-core` is VM agnostic and knows nothing about chains; `cross-vm-framework` re-exports everything, adds the multi chain `MultiChainEnv`, and pins `harness-core`'s generic `Ctx` to a started multi-chain environment for the property testing harness.
 
 Example crates and contract sources live outside the root workspace:
 

@@ -430,3 +430,334 @@ fn json_input_parses_to_an_equal_run_config() {
     let from_json = cross_vm_config::from_json_str(PARITY_JSON, &no_vars).unwrap();
     assert_eq!(from_toml, from_json);
 }
+
+// --- Phase 3.1: pipeline `phases` and `WorldSource` ---
+
+use cross_vm_config::{ConfigError, WorldSource};
+
+/// Two single-setup `invariant` profiles named `a` and `b`, plus a `[suite.p]` header, ready for
+/// a caller to append `[[suite.p.phases]]` blocks. `body` is the phase declarations.
+fn suite_with_phases(body: &str) -> String {
+    format!(
+        r#"
+[harness]
+name = "vault"
+[profile.a]
+mode = "invariant"
+ops = 10
+[profile.b]
+mode = "invariant"
+ops = 10
+[suite.p]
+{body}
+"#
+    )
+}
+
+#[test]
+fn suite_phases_parse_with_needs_and_world() {
+    let toml = r#"
+[harness]
+name = "vault"
+[profile.a]
+mode = "invariant"
+ops = 10
+[profile.b]
+mode = "invariant"
+ops = 10
+[suite.p]
+[[suite.p.phases]]
+profile = "a"
+[[suite.p.phases]]
+profile = "b"
+needs = ["a"]
+world = "inherit"
+"#;
+    let cfg = cross_vm_config::from_toml_str(toml, &no_vars).expect("loads");
+    let suite = &cfg.suites["p"];
+    assert_eq!(suite.phases.len(), 2);
+    assert_eq!(suite.phases[1].needs, vec!["a".to_string()]);
+    assert!(matches!(suite.phases[1].world, WorldSource::Inherit));
+    assert!(matches!(suite.phases[0].world, WorldSource::Fresh));
+}
+
+#[test]
+fn suite_phase_params_parse() {
+    let toml = suite_with_phases(
+        r#"[[suite.p.phases]]
+profile = "a"
+params = { pinned_token = "uosmo" }"#,
+    );
+    let cfg = cross_vm_config::from_toml_str(&toml, &no_vars).expect("loads");
+    let suite = &cfg.suites["p"];
+    let params = suite.phases[0].params.as_ref().expect("params present");
+    assert_eq!(params["pinned_token"].as_str(), Some("uosmo"));
+}
+
+#[test]
+fn suite_profiles_normalize_into_phases() {
+    // Legacy sugar: `profiles = ["a", "b"]` becomes two fresh phases with no needs, and the
+    // legacy `profiles` field is cleared so `phases` is the single source of truth.
+    let toml = r#"
+[harness]
+name = "vault"
+[profile.a]
+mode = "invariant"
+ops = 10
+[profile.b]
+mode = "invariant"
+ops = 10
+[suite.p]
+profiles = ["a", "b"]
+"#;
+    let cfg = cross_vm_config::from_toml_str(toml, &no_vars).expect("loads");
+    let suite = &cfg.suites["p"];
+    assert!(suite.profiles.is_empty(), "legacy profiles must be cleared");
+    assert_eq!(suite.phases.len(), 2);
+    assert_eq!(suite.phases[0].profile, "a");
+    assert_eq!(suite.phases[1].profile, "b");
+    assert!(suite
+        .phases
+        .iter()
+        .all(|p| matches!(p.world, WorldSource::Fresh)));
+    assert!(suite.phases.iter().all(|p| p.needs.is_empty()));
+}
+
+#[test]
+fn suite_with_both_profiles_and_phases_is_an_error() {
+    let toml = suite_with_phases(
+        r#"profiles = ["a"]
+[[suite.p.phases]]
+profile = "b""#,
+    );
+    let err = cross_vm_config::from_toml_str(&toml, &no_vars).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::SuiteProfilesAndPhases { ref suite } if suite == "p"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn phase_needs_must_reference_an_earlier_phase() {
+    // `needs = ["b"]` on the FIRST phase is a forward reference and must error.
+    let toml = suite_with_phases(
+        r#"[[suite.p.phases]]
+profile = "a"
+needs = ["b"]
+[[suite.p.phases]]
+profile = "b""#,
+    );
+    let err = cross_vm_config::from_toml_str(&toml, &no_vars).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ConfigError::PhaseNeedsNotEarlier { ref suite, ref phase, ref needed }
+                if suite == "p" && phase == "a" && needed == "b"
+        ),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn phase_self_reference_is_an_error() {
+    let toml = suite_with_phases(
+        r#"[[suite.p.phases]]
+profile = "a"
+needs = ["a"]"#,
+    );
+    let err = cross_vm_config::from_toml_str(&toml, &no_vars).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ConfigError::PhaseNeedsNotEarlier { ref phase, ref needed, .. }
+                if phase == "a" && needed == "a"
+        ),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn inherit_requires_exactly_one_need() {
+    // `world = "inherit"` with no `needs` must error.
+    let toml = suite_with_phases(
+        r#"[[suite.p.phases]]
+profile = "a"
+[[suite.p.phases]]
+profile = "b"
+world = "inherit""#,
+    );
+    let err = cross_vm_config::from_toml_str(&toml, &no_vars).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ConfigError::PhaseInheritArity { ref suite, ref phase, needs } if suite == "p" && phase == "b" && needs == 0
+        ),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn inherit_rejects_multi_case_fuzz_donor_and_consumer() {
+    // A multi-case fuzz donor cannot be inherited from (its final world is undefined).
+    let donor_multi = r#"
+[harness]
+name = "vault"
+[profile.donor]
+mode = "fuzz"
+cases = 8
+ops = 1
+[profile.consumer]
+mode = "invariant"
+ops = 10
+[suite.p]
+[[suite.p.phases]]
+profile = "donor"
+[[suite.p.phases]]
+profile = "consumer"
+needs = ["donor"]
+world = "inherit"
+"#;
+    let err = cross_vm_config::from_toml_str(donor_multi, &no_vars).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ConfigError::PhaseWorldNotSingleSetup { ref suite, ref phase, .. } if suite == "p" && phase == "donor"
+        ),
+        "donor error: {err}"
+    );
+
+    // A multi-case fuzz consumer cannot inherit (it would fan out one world into many cases).
+    let consumer_multi = r#"
+[harness]
+name = "vault"
+[profile.donor]
+mode = "invariant"
+ops = 10
+[profile.consumer]
+mode = "fuzz"
+cases = 8
+ops = 1
+[suite.p]
+[[suite.p.phases]]
+profile = "donor"
+[[suite.p.phases]]
+profile = "consumer"
+needs = ["donor"]
+world = "inherit"
+"#;
+    let err = cross_vm_config::from_toml_str(consumer_multi, &no_vars).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ConfigError::PhaseWorldNotSingleSetup { ref suite, ref phase, .. } if suite == "p" && phase == "consumer"
+        ),
+        "consumer error: {err}"
+    );
+
+    // A single-case fuzz on both sides is single-setup and loads.
+    let both_single = r#"
+[harness]
+name = "vault"
+[profile.donor]
+mode = "fuzz"
+cases = 1
+ops = 1
+[profile.consumer]
+mode = "fuzz"
+cases = 1
+ops = 1
+[suite.p]
+[[suite.p.phases]]
+profile = "donor"
+[[suite.p.phases]]
+profile = "consumer"
+needs = ["donor"]
+world = "inherit"
+"#;
+    cross_vm_config::from_toml_str(both_single, &no_vars).expect("single-case fuzz inherit loads");
+}
+
+#[test]
+fn duplicate_phase_profile_in_one_suite_is_an_error() {
+    let toml = suite_with_phases(
+        r#"[[suite.p.phases]]
+profile = "a"
+[[suite.p.phases]]
+profile = "a""#,
+    );
+    let err = cross_vm_config::from_toml_str(&toml, &no_vars).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::DuplicatePhaseProfile { ref suite, ref profile } if suite == "p" && profile == "a"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn two_inheritors_of_one_donor_is_an_error() {
+    let toml = r#"
+[harness]
+name = "vault"
+[profile.a]
+mode = "invariant"
+ops = 10
+[profile.b]
+mode = "invariant"
+ops = 10
+[profile.c]
+mode = "invariant"
+ops = 10
+[suite.p]
+[[suite.p.phases]]
+profile = "a"
+[[suite.p.phases]]
+profile = "b"
+needs = ["a"]
+world = "inherit"
+[[suite.p.phases]]
+profile = "c"
+needs = ["a"]
+world = "inherit"
+"#;
+    let err = cross_vm_config::from_toml_str(toml, &no_vars).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        matches!(
+            err,
+            ConfigError::SharedDonor { ref suite, ref donor, ref first, ref second }
+                if suite == "p" && donor == "a" && first == "b" && second == "c"
+        ),
+        "unexpected error: {err}"
+    );
+    // The message must name the donor and both inheriting phases.
+    assert!(message.contains('a') && message.contains('b') && message.contains('c'));
+}
+
+#[test]
+fn linear_inherit_chain_stays_valid() {
+    // a -> b -> c, each phase inheriting from exactly one distinct donor, is legal.
+    let toml = r#"
+[harness]
+name = "vault"
+[profile.a]
+mode = "invariant"
+ops = 10
+[profile.b]
+mode = "invariant"
+ops = 10
+[profile.c]
+mode = "invariant"
+ops = 10
+[suite.p]
+[[suite.p.phases]]
+profile = "a"
+[[suite.p.phases]]
+profile = "b"
+needs = ["a"]
+world = "inherit"
+[[suite.p.phases]]
+profile = "c"
+needs = ["b"]
+world = "inherit"
+"#;
+    cross_vm_config::from_toml_str(toml, &no_vars).expect("linear inherit chain loads");
+}

@@ -191,16 +191,17 @@ impl VaultHarness {
     /// Rebuild a `Vault` handle bound to the deployed instance on `label`.
     fn vault(ctx: &Ctx, world: &VaultWorld, label: &str) -> Result<Vault, HarnessError> {
         let chain = ctx.chain(label)?;
-        let addr = world.addrs.get(label).cloned().ok_or_else(|| {
-            HarnessError::Infra(CrossVmError::wallet(format!(
-                "no vault deployed on {label}"
-            )))
-        })?;
+        let addr = world
+            .addrs
+            .get(label)
+            .cloned()
+            .ok_or_else(|| HarnessError::infra(format!("no vault deployed on {label}")))?;
         Ok(Vault::instance(chain, addr))
     }
 }
 
 impl Harness for VaultHarness {
+    type Ctx = Ctx;
     type World = VaultWorld;
     type Operation = VaultOp;
     type Invariant = VaultInv;
@@ -226,7 +227,7 @@ impl Harness for VaultHarness {
                 let before = vault
                     .collateral_of(USERS[*user])
                     .await
-                    .map_err(HarnessError::Infra)?;
+                    .map_err(HarnessError::infra)?;
                 let res = vault.deposit(USERS[*user], *amount).await;
                 let verdict = classify(
                     true,
@@ -332,15 +333,14 @@ impl Harness for VaultHarness {
         }
     }
 
-    // Bias the kind mix (deposit-heavy); reuse `generate_op` for the per-kind data.
-    fn generate(&self, rng: &mut Prng, w: &VaultWorld) -> VaultOp {
-        let kind = match rng.weighted(&[40, 25, 20, 15]) {
-            0 => VaultOpKind::Deposit,
-            1 => VaultOpKind::Withdraw,
-            2 => VaultOpKind::Borrow,
-            _ => VaultOpKind::Repay,
-        };
-        self.generate_op(rng, w, kind)
+    // Deposit-heavy kind mix; `generate_op` still owns all per-kind data.
+    fn weight(&self, _ctx: &Ctx, _w: &VaultWorld, kind: VaultOpKind) -> u32 {
+        match kind {
+            VaultOpKind::Deposit => 40,
+            VaultOpKind::Withdraw => 25,
+            VaultOpKind::Borrow => 20,
+            VaultOpKind::Repay => 15,
+        }
     }
 
     fn invariants(&self) -> Vec<VaultInv> {
@@ -350,6 +350,11 @@ impl Harness for VaultHarness {
             VaultInv::Solvency,
             VaultInv::DepositTransition,
         ]
+    }
+
+    async fn advance(&self, ctx: &mut Ctx, blocks: u64) -> Result<(), HarnessError> {
+        ctx.advance_all(blocks).await;
+        Ok(())
     }
 
     async fn check(&self, ctx: &mut Ctx, w: &VaultWorld, inv: &VaultInv) -> CheckOutcome {
@@ -443,12 +448,10 @@ async fn deploy_and_prime(
         fund_user(&mut chain, WalletLabel::wrap(user)).await;
     }
     let vault = Vault::new(chain);
-    vault.setup("alice").await.map_err(HarnessError::Infra)?;
-    let addr = vault.address().ok_or_else(|| {
-        HarnessError::Infra(CrossVmError::wallet(format!(
-            "{label}: setup recorded no address"
-        )))
-    })?;
+    vault.setup("alice").await.map_err(HarnessError::infra)?;
+    let addr = vault
+        .address()
+        .ok_or_else(|| HarnessError::infra(format!("{label}: setup recorded no address")))?;
     addrs.insert(label.to_string(), addr);
     models.insert(label.to_string(), VaultModel::new(USERS.len()));
     Ok(())
