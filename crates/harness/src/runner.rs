@@ -1336,7 +1336,7 @@ async fn step<H: Harness>(
 /// Emit a one-line end-of-run summary (op count, skips, pass/fail) at `info` level, plus a
 /// per-invariant coverage line that flags any invariant that never ran, and (when `stats` is
 /// enabled) a per-op stats block. Sits above the per-op `debug` logs so a run's totals show under
-/// `RUST_LOG=cross_vm_framework=info` without the per-operation spam. Called once at every driver
+/// `RUST_LOG=harness_core=info` without the per-operation spam. Called once at every driver
 /// exit via a labeled-block funnel.
 fn log_summary<Op>(report: &RunReport<Op>, stats: Option<&Stats>) {
     match &report.failure {

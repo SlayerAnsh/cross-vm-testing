@@ -447,7 +447,7 @@ impl<K> KindSelection<K> {
 
 /// Parses one profile's `kinds`/`weights` against `H::OpKind`. Precedence matches spec section
 /// 6.1 (`weights` beats `kinds`; both compose with the harness's dynamic `Harness::weight`
-/// (static times dynamic)); `cross-vm-config`'s structural validation already rejects a profile
+/// (static times dynamic)); `harness-config`'s structural validation already rejects a profile
 /// that sets both, so this is belt and suspenders.
 pub(crate) fn parse_kind_selection<H: Harness>(
     kinds: &Option<Vec<String>>,

@@ -1,5 +1,7 @@
 # Implementation Plan: TOML-Driven Test Runs (P1 to P6)
 
+> Historical plan (as shipped, P1 to P6). It describes the original layout where the config loader lived in `cross-vm-config` and the CLI in `crates/framework/src/cli.rs`. The generic config and CLI were later extracted into the reusable `harness-config` and `harness-cli` crates; see `docs/extending-harness-cli.md` for the current three-layer structure. This file is kept as a record and is not maintained against the current tree.
+
 ## Context
 
 `docs/config-runs-spec.md` (commit 6efbe26, status "proposed, not implemented") specifies a declarative run-configuration layer: define harness plus ops once in Rust, declare any number of run combinations (fuzz, invariant, endurance, scenario) in TOML, run them via a user-crate `cross-vm` CLI binary. Today every run is a hand-written Rust test behind `#[fuzz_runner]`-style macros and cargo features; changing seed, duration, op mix, or mock vs rpc requires editing Rust and recompiling.

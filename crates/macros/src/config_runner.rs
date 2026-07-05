@@ -96,7 +96,7 @@ enum ProfileMode {
 
 /// Reads `path` as TOML and learns `profile_name`'s fan-out shape (spec section 13/P5): a
 /// `mode = "fuzz"` profile's `cases` count (honoring a `[defaults].cases` fallback, mirroring the
-/// loader's own defaults-merge for just this one key — see `cross-vm-config`'s `merge` module for
+/// loader's own defaults-merge for just this one key — see `harness-config`'s `merge` module for
 /// the full version this deliberately does not replicate), or [`ProfileMode::Other`] for any
 /// other mode. Every error path returns a plain `String`; the caller turns it into a
 /// `compile_error!`.

@@ -87,9 +87,9 @@ pub fn define_wallet_roster(input: TokenStream) -> TokenStream {
     wallet_roster::expand(input.into()).into()
 }
 
-/// Bridge a `*.cross-vm.toml` config profile into `#[tokio::test]`s, reusing the config crate's
-/// loader and the framework's harness registry at run time
-/// (`cross_vm_framework::config::test_bridge::run_profile_for_test`).
+/// Bridge a `*.cross-vm.toml` config profile into `#[tokio::test]`s, reusing the generic
+/// `harness-config` loader and the `harness-cli` registry at run time, through the stable
+/// `cross_vm_framework::config::test_bridge::run_profile_for_test` re-export.
 ///
 /// ```ignore
 /// #[config_runner(config = "vault.cross-vm.toml", harness = VaultHarness, setup = vault_config_setup, profile = "smoke")]

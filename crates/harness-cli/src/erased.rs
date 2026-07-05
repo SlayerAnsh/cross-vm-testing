@@ -19,7 +19,7 @@ pub(crate) type LocalBoxFuture<'a, T> =
 ///
 /// Produced by `erase_report` from a monomorphized `RunReport<H::Operation>`. This is the
 /// shape the CLI prints, maps to an exit code, and serializes as one entry of the
-/// `--json-report` payload's `profiles` array (spec section 9); `config::report::JsonReport`
+/// `--json-report` payload's `profiles` array (spec section 9); `report::JsonReport`
 /// wraps a `&[ErasedReport]` in the envelope written once per invocation. `elapsed` serializes
 /// with `Duration`'s default serde representation (`{"secs": .., "nanos": ..}`), matching how
 /// every other `Duration` field in this crate's serde surface serializes; no custom

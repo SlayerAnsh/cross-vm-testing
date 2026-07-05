@@ -330,9 +330,9 @@ ops = 60
   world = "inherit"
 ```
 
-## 5. Loader pipeline: the `cross-vm-config` crate
+## 5. Loader pipeline: the `harness-config` crate (re-exported through `cross-vm-config`)
 
-A new pure data crate at `crates/config`, package name `cross-vm-config`. No framework dependency, no tokio, no chains. This purity is what makes YAML later a one function addition, keeps the loader unit testable with plain string fixtures, and lets the phase 5 macro bridge reuse it verbatim.
+The generic loader is a pure data crate at `crates/harness-config`, package name `harness-config`. No framework dependency, no tokio, no chains. `cross-vm-config` (`crates/config`) is a thin variant that re-exports it and adds the chain schema (`[[chain]]`, `EnvSpec`) through the `ConfigExt` seam. This purity is what makes YAML later a one function addition, keeps the loader unit testable with plain string fixtures, and lets the macro bridge reuse it verbatim.
 
 ```rust
 pub struct ChainDecl {
@@ -383,22 +383,31 @@ Kind names stay as `Vec<String>` and `BTreeMap<String, u32>` at this layer, and 
 
 New workspace dependencies: `serde` (derive), `toml`, `humantime`. `clap` is added too but only reached through the framework's `cli` feature.
 
-Module layout:
+Module layout. The generic loader modules live in `harness-config`; `cross-vm-config` keeps only the chain-specific schema and validation and re-exports the rest:
 
 ```
-crates/config/src/
-  lib.rs          # RunConfig, load(), errors
-  schema.rs       # typed structs (ChainDecl, Profile, FuzzProfile, ...)
-  interpolate.rs  # ${VAR} / ${VAR:-default} over toml::Value strings
-  merge.rs        # defaults into profile table merge
+crates/harness-config/src/    # the generic loader (package harness-config)
+  lib.rs          # RunConfig<X>, load(), errors, the ConfigExt seam
+  schema.rs       # generic typed structs (Profile, FuzzProfile, ...)
+  value.rs        # the Doc/DocMap document abstraction (toml + json)
+  interpolate.rs  # ${VAR} / ${VAR:-default} over document strings
+  merge.rs        # defaults into profile table merge (+ the merge_env_entry hook)
   duration.rs     # humantime serde adapters
   seed.rs         # SeedSpec (integer | "random" | negative integer)
+  ext.rs          # the ConfigExt trait and NoExt
+  validate.rs     # generic structural validation
+
+crates/config/src/            # the cross-vm variant (package cross-vm-config)
+  lib.rs          # CrossVmExt, env_spec, re-exports of the harness-config generics
+  schema.rs       # EnvSpec and TargetStr (the cross-vm env shape)
   chain.rs        # ChainDecl serde, per-kind field presence validation
+  validate.rs     # chain validators run by CrossVmExt::validate
+  target.rs       # mock/rpc target resolution
 ```
 
 ## 6. Framework additions
 
-All framework side code lives in a new `crates/framework/src/config/` module behind a new `cli` cargo feature, plus a small `serde` feature (section 9). Library consumers who never touch the CLI pay nothing.
+The generic registry, profile resolution, run driving, JSON reports, and replay artifacts live in the `harness-cli` crate (parameterized by the `CliDomain` seam). `crates/framework/src/config/` adds only the cross-vm pieces on top: the `CrossVmDomain` adapter, `build_chain`, and the chain-aware `SetupRequest`, behind a `cli` cargo feature plus a small `serde` feature (section 9). Library consumers who never touch the CLI pay nothing.
 
 ### 6.1 `KindMix` and `run_with`
 
@@ -824,9 +833,9 @@ Deferred indefinitely: **parallel workers** (Medusa). The `Rc` based `!Send` sin
 
 Each phase is independently shippable and ends with docs (a SPEC.md pointer stays current, DEVELOPER.md usage, CHANGELOG entry).
 
-**P1: the `cross-vm-config` crate.** New workspace member. Raw parse, interpolation with injected variable lookup, defaults and env merging, typed schema (including `ChainDecl` and `chains: Vec<ChainDecl>` on `RunConfig`), structural validation (`[[chain]]` label uniqueness, per kind required fields, selection label existence), `SeedSpec`, duration adapters, JSON input variant. Pure unit tests: golden good and bad TOML fixtures, interpolation edge cases (missing variable, default, escape), merge precedence, every mode's field table, mutual exclusion rules, chain declaration validation (duplicate labels, missing `bech32_prefix` on cosmwasm, unknown selection label). No framework changes.
+**P1: the `cross-vm-config` crate.** New workspace member. (The generic loader described here was later extracted into `harness-config`; `cross-vm-config` now re-exports it and keeps only the chain schema. See sections 5 and 6.) Raw parse, interpolation with injected variable lookup, defaults and env merging, typed schema (including `ChainDecl` and `chains: Vec<ChainDecl>` on `RunConfig`), structural validation (`[[chain]]` label uniqueness, per kind required fields, selection label existence), `SeedSpec`, duration adapters, JSON input variant. Pure unit tests: golden good and bad TOML fixtures, interpolation edge cases (missing variable, default, escape), merge precedence, every mode's field table, mutual exclusion rules, chain declaration validation (duplicate labels, missing `bech32_prefix` on cosmwasm, unknown selection label). No framework changes.
 
-**P2: `run_with(KindMix)`, registry, erasure, CLI for fuzz and invariant, and `build_chain`.** The golden seed test must pass untouched; a new weighted path golden test is added. `SetupRequest` (with `chain_specs`), `ChainSpecData`, `Target`, `build_chain` factory (owned `*ChainInfo` constructors with string interning, `ChainKind::FromStr`, `SpecId`/`Commitment` string parsing), `Registry`, `ErasedReport`, the fuzz and invariant drivers, the `Cli` builder with `run` (fuzz and invariant profiles only), `validate`, `list`, precedence and exit codes. The vault harness and its support code move from `examples/integration-tests/tests/` (now `examples/cross-vm-tests`) into that crate's `src/` lib (a bin target cannot see dev dependencies or test modules), with a `cross-vm` bin and a checked in `vault.cross-vm.toml` using `[[chain]]` declarations. The feature gated Makefile targets must keep passing unchanged. Tests: registry validation errors, an end to end CLI run over the mock vault with config defined chains, seed reproducibility across two invocations, `build_chain` round trip for each VM kind (mock and rpc), backward compatible setup with no `[[chain]]` entries.
+**P2: `run_with(KindMix)`, registry, erasure, CLI for fuzz and invariant, and `build_chain`.** (The generic registry, erasure, JSON reports, and CLI described here were later extracted into `harness-cli`; the framework keeps only the `CrossVmDomain` adapter and `build_chain`. See section 6.) The golden seed test must pass untouched; a new weighted path golden test is added. `SetupRequest` (with `chain_specs`), `ChainSpecData`, `Target`, `build_chain` factory (owned `*ChainInfo` constructors with string interning, `ChainKind::FromStr`, `SpecId`/`Commitment` string parsing), `Registry`, `ErasedReport`, the fuzz and invariant drivers, the `Cli` builder with `run` (fuzz and invariant profiles only), `validate`, `list`, precedence and exit codes. The vault harness and its support code move from `examples/integration-tests/tests/` (now `examples/cross-vm-tests`) into that crate's `src/` lib (a bin target cannot see dev dependencies or test modules), with a `cross-vm` bin and a checked in `vault.cross-vm.toml` using `[[chain]]` declarations. The feature gated Makefile targets must keep passing unchanged. Tests: registry validation errors, an end to end CLI run over the mock vault with config defined chains, seed reproducibility across two invocations, `build_chain` round trip for each VM kind (mock and rpc), backward compatible setup with no `[[chain]]` entries.
 
 **P3: scenario and endurance.** `Expectation`, `ScenarioStep`, `run_steps`; the scenario driver with per step deserialization, expect, delay, check. The `EnduranceConfig` extensions and the ctrl-c wiring. Tests: an expect mismatch becomes `Bug`, delay honored under a paused tokio clock, endurance stops on `max_ops`, the infra tolerance counter resets on success, the stop flag yields a passing report with a final sweep. This phase makes `target = "rpc"` scenario profiles a working deployment scripting tool.
 
