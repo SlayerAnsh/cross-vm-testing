@@ -235,6 +235,15 @@ fn empty_registry_constructs_via_default() {
 }
 
 #[test]
+#[should_panic(expected = "no op kinds registered")]
+fn empty_registry_panics_on_use() {
+    // Construction is fine (the builder starts empty), but using a registry with no ops is a
+    // construction bug: the runner calls op_kinds at the start of every run, so it throws there.
+    let empty: OpSetHarness<(), World> = OpSetHarness::new();
+    let _ = empty.op_kinds();
+}
+
+#[test]
 fn op_kinds_are_sorted_by_name() {
     // build_harness registers "sub" before "add"; the BTreeMap must still sort.
     assert_eq!(build_harness().op_kinds(), vec!["add", "sub"]);

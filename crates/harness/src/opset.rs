@@ -130,9 +130,11 @@ pub type AdvanceFn<C> = for<'a> fn(&'a mut C, u64) -> OpFuture<'a, Result<(), Ha
 /// the kind up in the registry, so adding an op touches exactly one [`OpDef`].
 ///
 /// Kinds live in a `BTreeMap`, so `op_kinds` yields sorted name order on every run: the same
-/// seed draws the same op stream regardless of registration order. Register at least one op
-/// before loading the harness into a runner; a run over an empty registry fails at the first
-/// draw.
+/// seed draws the same op stream regardless of registration order.
+///
+/// Register at least one op before loading the harness into a runner. Using an empty registry is
+/// a construction bug, so [`op_kinds`](Harness::op_kinds) panics (the runner calls it at the
+/// start of every run), the same way [`register`](Self::register) panics on a duplicate kind.
 pub struct OpSetHarness<C: 'static, W: 'static> {
     ops: BTreeMap<&'static str, OpDef<C, W>>,
     invariants: Vec<Box<dyn DynInvariant<C, W>>>,
@@ -200,7 +202,13 @@ impl<C: 'static, W: 'static> Harness for OpSetHarness<C, W> {
         op.apply(ctx, world).await
     }
 
+    // An empty registry is a construction bug, not a runtime condition (like a duplicate kind):
+    // the runner calls `op_kinds` at the start of every run, so panicking here throws eagerly
+    // with a clear message instead of degrading to the runner's opaque empty-mix Infra failure.
     fn op_kinds(&self) -> Vec<&'static str> {
+        if self.ops.is_empty() {
+            panic!("OpSetHarness: no op kinds registered; register at least one OpDef before use");
+        }
         self.ops.keys().copied().collect()
     }
 
