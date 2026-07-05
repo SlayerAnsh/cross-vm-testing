@@ -211,7 +211,8 @@ impl ChainProvider for TronMockProvider {
 
     async fn new_account(&mut self, label: &str) -> TronAddress {
         let addr = address_from_label(label);
-        let _ = self.set_balance(&addr, DEFAULT_FUNDING_SUN).await;
+        let denom = self.chain_info().native_symbol;
+        let _ = self.set_balance(&addr, denom, DEFAULT_FUNDING_SUN).await;
         addr
     }
 
@@ -223,7 +224,18 @@ impl ChainProvider for TronMockProvider {
             .map_err(|f| TronError::Balance(f.call_message("balance")))
     }
 
-    async fn set_balance(&mut self, addr: &TronAddress, amount: u64) -> Result<(), TronError> {
+    async fn set_balance(
+        &mut self,
+        addr: &TronAddress,
+        denom: &str,
+        amount: u64,
+    ) -> Result<(), TronError> {
+        let symbol = self.chain_info().native_symbol;
+        if !denom.eq_ignore_ascii_case(symbol) {
+            return Err(TronError::Balance(format!(
+                "unknown denom '{denom}': this chain's native token is '{symbol}'"
+            )));
+        }
         // Store the u64 sun balance as revm's U256 at the boundary.
         self.core.set_balance(addr.as_evm(), U256::from(amount));
         Ok(())
@@ -261,8 +273,19 @@ mod tests {
     async fn set_and_read_balance() {
         let mut c = provider();
         let a = c.new_account("alice").await;
-        c.set_balance(&a, 42 * SUN_PER_TRX).await.unwrap();
+        c.set_balance(&a, "TRX", 42 * SUN_PER_TRX).await.unwrap();
         assert_eq!(c.balance(&a).await.unwrap(), 42 * SUN_PER_TRX);
+    }
+
+    #[tokio::test]
+    async fn set_balance_validates_denom() {
+        let mut c = provider();
+        let a = c.new_account("alice").await;
+
+        assert!(c.set_balance(&a, "BTC", 1).await.is_err());
+
+        c.set_balance(&a, "trx", 7 * SUN_PER_TRX).await.unwrap();
+        assert_eq!(c.balance(&a).await.unwrap(), 7 * SUN_PER_TRX);
     }
 
     #[tokio::test]

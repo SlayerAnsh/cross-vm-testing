@@ -31,8 +31,30 @@ async fn new_account_is_funded() {
 async fn set_and_read_balance() {
     let mut chain = LOCAL.mock(empty_wallets());
     let bob = chain.new_account("bob").await;
-    chain.set_balance(&bob, U256::from(42u64)).await.unwrap();
+    chain
+        .set_balance(&bob, "ETH", U256::from(42u64))
+        .await
+        .unwrap();
     assert_eq!(chain.balance(&bob).await.unwrap(), U256::from(42u64));
+}
+
+#[tokio::test]
+async fn set_balance_validates_denom() {
+    let mut chain = LOCAL.mock(empty_wallets());
+    let bob = chain.new_account("bob").await;
+
+    // Unknown denom is rejected.
+    assert!(chain
+        .set_balance(&bob, "BTC", U256::from(1u64))
+        .await
+        .is_err());
+
+    // The native symbol is accepted case-insensitively.
+    chain
+        .set_balance(&bob, "eth", U256::from(7u64))
+        .await
+        .unwrap();
+    assert_eq!(chain.balance(&bob).await.unwrap(), U256::from(7u64));
 }
 
 #[tokio::test]
@@ -47,7 +69,7 @@ async fn blocks_advance() {
 async fn rpc_write_paths_unimplemented() {
     let mut chain = ETHEREUM.rpc(empty_wallets());
     assert!(chain
-        .set_balance(&alloy_primitives::Address::ZERO, U256::from(1u64))
+        .set_balance(&alloy_primitives::Address::ZERO, "ETH", U256::from(1u64))
         .await
         .is_err());
 }

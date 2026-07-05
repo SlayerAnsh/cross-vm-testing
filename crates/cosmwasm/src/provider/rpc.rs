@@ -435,7 +435,12 @@ impl ChainProvider for CwRpcProvider {
         }
     }
 
-    async fn set_balance(&mut self, _addr: &Addr, _amount: u128) -> Result<(), CwError> {
+    async fn set_balance(
+        &mut self,
+        _addr: &Addr,
+        _denom: &str,
+        _amount: u128,
+    ) -> Result<(), CwError> {
         // Cannot mint on a real chain. Use a faucet; declared funding is validated, not minted.
         Err(CwError::Unimplemented("rpc set_balance".into()))
     }

@@ -24,8 +24,10 @@ pub async fn fund_alice(chain: &mut AnyChain) {
 pub async fn fund_evm(chain: &mut AnyChain, label: WalletLabel<'_>) {
     if let AnyChain::Evm(c) = chain {
         let a = c.wallet_address(label).await.unwrap();
+        let denom = c.chain_info().native_symbol;
         c.set_balance(
             &a,
+            denom,
             cross_vm_solidity::U256::from(10u64).pow(cross_vm_solidity::U256::from(20)),
         )
         .await
@@ -38,8 +40,10 @@ pub async fn fund_user(chain: &mut AnyChain, label: WalletLabel<'_>) {
     match chain {
         AnyChain::Evm(c) => {
             let a = c.wallet_address(label).await.unwrap();
+            let denom = c.chain_info().native_symbol;
             c.set_balance(
                 &a,
+                denom,
                 cross_vm_solidity::U256::from(10u64).pow(cross_vm_solidity::U256::from(20)),
             )
             .await
@@ -47,15 +51,18 @@ pub async fn fund_user(chain: &mut AnyChain, label: WalletLabel<'_>) {
         }
         AnyChain::Svm(c) => {
             let a = c.wallet_address(label).await.unwrap();
-            c.set_balance(&a, 100_000_000_000).await.unwrap(); // 100 SOL
+            let denom = c.chain_info().native_symbol;
+            c.set_balance(&a, denom, 100_000_000_000).await.unwrap(); // 100 SOL
         }
         AnyChain::CosmWasm(c) => {
             let a = c.wallet_address(label).await.unwrap();
-            let _ = c.set_balance(&a, 1_000_000_000_000).await;
+            let denom = c.chain_info().native_denom;
+            let _ = c.set_balance(&a, denom, 1_000_000_000_000).await;
         }
         AnyChain::Tron(c) => {
             let a = c.wallet_address(label).await.unwrap();
-            c.set_balance(&a, 100_000_000_000_000).await.unwrap(); // 100M TRX in sun
+            let denom = c.chain_info().native_symbol;
+            c.set_balance(&a, denom, 100_000_000_000_000).await.unwrap(); // 100M TRX in sun
         }
     }
 }

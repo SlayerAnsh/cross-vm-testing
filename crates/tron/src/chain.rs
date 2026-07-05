@@ -198,7 +198,8 @@ impl TronChain {
                     .await
                     .map_err(|e| FundError::Provider(e.to_string()))?;
                 if current < amount {
-                    p.set_balance(who, amount)
+                    let denom = p.chain_info().native_symbol;
+                    p.set_balance(who, denom, amount)
                         .await
                         .map_err(|e| FundError::Provider(e.to_string()))?;
                 }
@@ -261,10 +262,15 @@ impl ChainProvider for TronChain {
         }
     }
 
-    async fn set_balance(&mut self, addr: &TronAddress, amount: u64) -> Result<(), TronError> {
+    async fn set_balance(
+        &mut self,
+        addr: &TronAddress,
+        denom: &str,
+        amount: u64,
+    ) -> Result<(), TronError> {
         match self {
-            TronChain::Mock(p) => p.set_balance(addr, amount).await,
-            TronChain::Rpc(p) => p.set_balance(addr, amount).await,
+            TronChain::Mock(p) => p.set_balance(addr, denom, amount).await,
+            TronChain::Rpc(p) => p.set_balance(addr, denom, amount).await,
         }
     }
 

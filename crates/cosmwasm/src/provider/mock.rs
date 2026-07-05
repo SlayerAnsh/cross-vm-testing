@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use cosmwasm_std::testing::MockStorage;
-use cosmwasm_std::{coins, Addr, Coin, Empty};
+use cosmwasm_std::{coin, Addr, Coin, Empty, Uint128};
 use cross_vm_core::{BlockTime, ChainProvider, WalletFactory};
 use cw_multi_test::{
     App, AppBuilder, BankKeeper, Contract, DistributionKeeper, Executor, FailingModule,
@@ -148,7 +148,8 @@ impl ChainProvider for CwMockProvider {
     async fn new_account(&mut self, label: &str) -> Addr {
         let addr = label.into_bech32_with_prefix(self.info.bech32_prefix);
         // Best-effort default funding; ignore the (infallible in practice) result.
-        let _ = self.set_balance(&addr, DEFAULT_FUNDING).await;
+        let denom = self.info.native_denom;
+        let _ = self.set_balance(&addr, denom, DEFAULT_FUNDING).await;
         addr
     }
 
@@ -165,15 +166,27 @@ impl ChainProvider for CwMockProvider {
             .map_err(|e| CwError::Balance(e.to_string()))
     }
 
-    async fn set_balance(&mut self, addr: &Addr, amount: u128) -> Result<(), CwError> {
-        let denom = self.info.native_denom;
+    async fn set_balance(&mut self, addr: &Addr, denom: &str, amount: u128) -> Result<(), CwError> {
         let addr = addr.clone();
+        // `BankKeeper::init_balance` replaces the account's whole coin vector, so read,
+        // merge the one denom, and write the full list back to preserve other denoms.
+        #[allow(deprecated)]
+        // cosmwasm-std 2.3 deprecates query_all_balances; no non-paginated replacement.
+        let mut balances = self
+            .app
+            .borrow()
+            .wrap()
+            .query_all_balances(&addr)
+            .map_err(|e| CwError::Balance(e.to_string()))?;
+        match balances.iter_mut().find(|c| c.denom == denom) {
+            Some(entry) => entry.amount = Uint128::new(amount),
+            None => balances.push(coin(amount, denom)),
+        }
+        balances.retain(|c| !c.amount.is_zero());
         self.app
             .borrow_mut()
             .init_modules(|router, _api, storage| {
-                router
-                    .bank
-                    .init_balance(storage, &addr, coins(amount, denom))
+                router.bank.init_balance(storage, &addr, balances)
             })
             .map_err(|e| CwError::Balance(e.to_string()))
     }

@@ -32,7 +32,10 @@ async fn main() {
 
     let alice = chain.wallet_address(DEMO_WALLETS.alice).await.unwrap();
     let bob = chain.wallet_address(DEMO_WALLETS.bob).await.unwrap();
-    chain.set_balance(&alice, 100_000_000_000).await.unwrap(); // 100 SOL
+    chain
+        .set_balance(&alice, "SOL", 100_000_000_000)
+        .await
+        .unwrap(); // 100 SOL
     println!(
         "alice: {alice}  balance: {}",
         chain.balance(&alice).await.unwrap()

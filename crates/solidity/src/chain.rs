@@ -189,7 +189,8 @@ impl EvmChain {
                     .await
                     .map_err(|e| FundError::Provider(e.to_string()))?;
                 if current < amount {
-                    p.set_balance(who, amount)
+                    let denom = p.chain_info().native_symbol;
+                    p.set_balance(who, denom, amount)
                         .await
                         .map_err(|e| FundError::Provider(e.to_string()))?;
                 }
@@ -252,10 +253,15 @@ impl ChainProvider for EvmChain {
         }
     }
 
-    async fn set_balance(&mut self, addr: &Address, amount: U256) -> Result<(), EvmError> {
+    async fn set_balance(
+        &mut self,
+        addr: &Address,
+        denom: &str,
+        amount: U256,
+    ) -> Result<(), EvmError> {
         match self {
-            EvmChain::Mock(p) => p.set_balance(addr, amount).await,
-            EvmChain::Rpc(p) => p.set_balance(addr, amount).await,
+            EvmChain::Mock(p) => p.set_balance(addr, denom, amount).await,
+            EvmChain::Rpc(p) => p.set_balance(addr, denom, amount).await,
         }
     }
 

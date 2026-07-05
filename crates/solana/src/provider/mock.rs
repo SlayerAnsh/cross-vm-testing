@@ -147,7 +147,18 @@ impl ChainProvider for SvmMockProvider {
         Ok(self.svm.borrow().get_balance(addr).unwrap_or(0))
     }
 
-    async fn set_balance(&mut self, addr: &Address, amount: u64) -> Result<(), SvmError> {
+    async fn set_balance(
+        &mut self,
+        addr: &Address,
+        denom: &str,
+        amount: u64,
+    ) -> Result<(), SvmError> {
+        if !denom.eq_ignore_ascii_case(self.info.native_symbol) {
+            return Err(SvmError::Balance(format!(
+                "unknown denom '{denom}': this chain's native token is '{}'",
+                self.info.native_symbol
+            )));
+        }
         let account = Account {
             lamports: amount,
             data: Vec::new(),

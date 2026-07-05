@@ -402,7 +402,12 @@ impl ChainProvider for TronRpcProvider {
         Ok(v["balance"].as_u64().unwrap_or(0))
     }
 
-    async fn set_balance(&mut self, _addr: &TronAddress, _amount: u64) -> Result<(), TronError> {
+    async fn set_balance(
+        &mut self,
+        _addr: &TronAddress,
+        _denom: &str,
+        _amount: u64,
+    ) -> Result<(), TronError> {
         // Cannot mint on a real chain. Use a faucet; declared funding is validated, not minted.
         Err(TronError::Unimplemented("rpc set_balance".into()))
     }
@@ -428,7 +433,7 @@ mod tests {
         let mut c = TronRpcProvider::new(NILE, Rc::new(WalletFactory::from_roster(&[]).unwrap()));
         let a = c.new_account("x").await;
         assert!(matches!(
-            c.set_balance(&a, 1).await,
+            c.set_balance(&a, "TRX", 1).await,
             Err(TronError::Unimplemented(_))
         ));
     }

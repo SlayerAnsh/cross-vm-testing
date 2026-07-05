@@ -61,7 +61,7 @@ async fn three_chains_in_one_env() {
         .unwrap();
     env.solana("sol")
         .unwrap()
-        .set_balance(&sol_alice, 2_000_000_000u64)
+        .set_balance(&sol_alice, "SOL", 2_000_000_000u64)
         .await
         .unwrap();
 

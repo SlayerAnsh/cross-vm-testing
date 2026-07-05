@@ -25,7 +25,10 @@ async fn main() {
         OSMOSIS.native_denom
     );
 
-    chain.set_balance(&alice, 5_000_000).await.unwrap();
+    chain
+        .set_balance(&alice, OSMOSIS.native_denom, 5_000_000)
+        .await
+        .unwrap();
     println!(
         "after set_balance: {}",
         chain.balance(&alice).await.unwrap()

@@ -29,8 +29,19 @@ async fn new_account_is_funded() {
 async fn set_and_read_balance() {
     let mut chain = SOLANA_LOCALNET.mock(empty_wallets());
     let bob = chain.new_account("bob").await;
-    chain.set_balance(&bob, 12_345).await.unwrap();
+    chain.set_balance(&bob, "SOL", 12_345).await.unwrap();
     assert_eq!(chain.balance(&bob).await.unwrap(), 12_345);
+}
+
+#[tokio::test]
+async fn set_balance_validates_denom() {
+    let mut chain = SOLANA_LOCALNET.mock(empty_wallets());
+    let bob = chain.new_account("bob").await;
+
+    assert!(chain.set_balance(&bob, "BTC", 1).await.is_err());
+
+    chain.set_balance(&bob, "sol", 7_777).await.unwrap();
+    assert_eq!(chain.balance(&bob).await.unwrap(), 7_777);
 }
 
 #[tokio::test]
@@ -45,5 +56,5 @@ async fn blocks_advance() {
 async fn rpc_write_paths_unimplemented() {
     let mut chain = SOLANA_DEVNET.rpc(empty_wallets());
     let addr = solana_address::Address::new_unique();
-    assert!(chain.set_balance(&addr, 1).await.is_err());
+    assert!(chain.set_balance(&addr, "SOL", 1).await.is_err());
 }

@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use cosmwasm_std::{coins, Addr, Coin};
+use cosmwasm_std::{Addr, Coin};
 use cross_vm_core::{
     wallet_lock, BlockTime, ChainProvider, ChainSpec, FundError, WalletDeriver, WalletFactory,
     WalletLabel,
@@ -237,13 +237,8 @@ impl CwChain {
                     .parse::<u128>()
                     .map_err(|e| FundError::Provider(e.to_string()))?;
                 if current < amount {
-                    let who = who.clone();
-                    p.app_mut()
-                        .init_modules(|router, _api, storage| {
-                            router
-                                .bank
-                                .init_balance(storage, &who, coins(amount, &denom))
-                        })
+                    p.set_balance(who, &denom, amount)
+                        .await
                         .map_err(|e| FundError::Provider(e.to_string()))?;
                 }
                 Ok(())
@@ -307,10 +302,10 @@ impl ChainProvider for CwChain {
         }
     }
 
-    async fn set_balance(&mut self, addr: &Addr, amount: u128) -> Result<(), CwError> {
+    async fn set_balance(&mut self, addr: &Addr, denom: &str, amount: u128) -> Result<(), CwError> {
         match self {
-            CwChain::Mock(p) => p.set_balance(addr, amount).await,
-            CwChain::Rpc(p) => p.set_balance(addr, amount).await,
+            CwChain::Mock(p) => p.set_balance(addr, denom, amount).await,
+            CwChain::Rpc(p) => p.set_balance(addr, denom, amount).await,
         }
     }
 

@@ -177,7 +177,8 @@ impl SvmChain {
                     .await
                     .map_err(|e| FundError::Provider(e.to_string()))?;
                 if current < amount {
-                    p.set_balance(who, amount)
+                    let denom = p.chain_info().native_symbol;
+                    p.set_balance(who, denom, amount)
                         .await
                         .map_err(|e| FundError::Provider(e.to_string()))?;
                 }
@@ -235,10 +236,15 @@ impl ChainProvider for SvmChain {
         }
     }
 
-    async fn set_balance(&mut self, addr: &Address, amount: u64) -> Result<(), SvmError> {
+    async fn set_balance(
+        &mut self,
+        addr: &Address,
+        denom: &str,
+        amount: u64,
+    ) -> Result<(), SvmError> {
         match self {
-            SvmChain::Mock(p) => p.set_balance(addr, amount).await,
-            SvmChain::Rpc(p) => p.set_balance(addr, amount).await,
+            SvmChain::Mock(p) => p.set_balance(addr, denom, amount).await,
+            SvmChain::Rpc(p) => p.set_balance(addr, denom, amount).await,
         }
     }
 

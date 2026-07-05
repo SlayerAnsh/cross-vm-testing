@@ -23,7 +23,7 @@ async fn main() {
     println!("balance (wei): {}", chain.balance(&alice).await.unwrap());
 
     chain
-        .set_balance(&alice, U256::from(1_000u64))
+        .set_balance(&alice, "ETH", U256::from(1_000u64))
         .await
         .unwrap();
     println!(

@@ -27,7 +27,10 @@ async fn fund_transfer_balance() {
 
     let alice = chain.wallet_address(TEST_WALLETS.alice).await.unwrap();
     let bob = chain.wallet_address(TEST_WALLETS.bob).await.unwrap();
-    chain.set_balance(&alice, 100_000_000_000).await.unwrap(); // 100 SOL
+    chain
+        .set_balance(&alice, "SOL", 100_000_000_000)
+        .await
+        .unwrap(); // 100 SOL
 
     let alice_start = chain.balance(&alice).await.unwrap();
     let bob_start = chain.balance(&bob).await.unwrap();

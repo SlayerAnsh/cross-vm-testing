@@ -40,10 +40,17 @@ pub trait ChainProvider: Sized {
     /// Read an account's native balance.
     async fn balance(&self, addr: &Self::Address) -> Result<Self::Balance, Self::Error>;
 
-    /// Overwrite an account's native balance (mock-only convenience).
+    /// Overwrite an account's balance in `denom` (mock-only convenience).
+    ///
+    /// CosmWasm mocks mint any bank denom verbatim (`"uosmo"`, `"uatom"`, `"ibc/..."`),
+    /// leaving the account's other denoms untouched. EVM, Solana, and Tron have exactly
+    /// one native token, so `denom` must equal the chain's native symbol,
+    /// case-insensitively (`"ETH"`, `"SOL"`, `"TRX"`); `amount` stays in base units
+    /// (wei, lamports, sun). RPC backends return `Unimplemented` (a live chain cannot mint).
     async fn set_balance(
         &mut self,
         addr: &Self::Address,
+        denom: &str,
         amount: Self::Balance,
     ) -> Result<(), Self::Error>;
 

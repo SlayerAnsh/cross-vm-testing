@@ -37,7 +37,7 @@ async fn main() {
 
     env.solana("sol")
         .unwrap()
-        .set_balance(&alice, 10_000_000_000)
+        .set_balance(&alice, "SOL", 10_000_000_000)
         .await
         .unwrap();
     let ix = transfer(&alice, &bob, 1_000_000_000); // 1 SOL

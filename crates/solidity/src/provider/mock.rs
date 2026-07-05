@@ -150,8 +150,9 @@ impl ChainProvider for EvmMockProvider {
 
     async fn new_account(&mut self, label: &str) -> Address {
         let addr = address_from_label(label);
+        let denom = self.info.native_symbol;
         let _ = self
-            .set_balance(&addr, U256::from(DEFAULT_FUNDING_WEI))
+            .set_balance(&addr, denom, U256::from(DEFAULT_FUNDING_WEI))
             .await;
         addr
     }
@@ -162,7 +163,18 @@ impl ChainProvider for EvmMockProvider {
             .map_err(|f| EvmError::Balance(f.call_message("balance")))
     }
 
-    async fn set_balance(&mut self, addr: &Address, amount: U256) -> Result<(), EvmError> {
+    async fn set_balance(
+        &mut self,
+        addr: &Address,
+        denom: &str,
+        amount: U256,
+    ) -> Result<(), EvmError> {
+        if !denom.eq_ignore_ascii_case(self.info.native_symbol) {
+            return Err(EvmError::Balance(format!(
+                "unknown denom '{denom}': this chain's native token is '{}'",
+                self.info.native_symbol
+            )));
+        }
         self.core.set_balance(*addr, amount);
         Ok(())
     }

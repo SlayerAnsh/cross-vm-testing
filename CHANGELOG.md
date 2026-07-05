@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Changed (multi native balance: denom aware `set_balance`)
+
+* **Breaking:** `ChainProvider::set_balance` is now `set_balance(addr, denom, amount)`. CosmWasm mocks mint any bank denom verbatim ("uosmo", "uatom", "ibc/...") and merge it into the account's existing coins instead of overwriting them (setting an amount of 0 clears the denom). EVM, Solana, and Tron have a single native token, so `denom` must equal the chain's `native_symbol`, matched case-insensitively ("ETH", "SOL", "TRX"), and amounts stay in base units (wei, lamports, sun); any other denom is a `Balance` error. Every RPC backend keeps returning `Unimplemented` (a live chain cannot mint).
+* Fixed: `CwChain::ensure_asset` with a native asset no longer wipes the account's other denoms when it mints (it now routes through the merge aware `set_balance`).
+
 ### Added (dyn-op registry: modular operations without an enum harness)
 
 * `harness-core`: new opt-in `opset` layer. An operation can now be a standalone struct implementing `DynOp<C, W>` (its data plus its own `apply`), registered into an `OpSetHarness<C, W>` through `OpDef` entries (kind name, generator fn, optional dynamic weight fn); invariants follow the same shape via `DynInvariant<C, W>`. `OpSetHarness` implements the existing `Harness` trait with `Operation = Box<dyn DynOp<C, W>>` and `OpKind = &'static str`, so every runner mode, shrinking, replay, per-op stats, and the runner attribute macros work unchanged, and kind names line up directly with config `weights` keys. Adding an op touches one `OpDef` instead of four match arms, an op is unit-testable without a runner (call its `apply` directly), and op libraries can be shared across harnesses. The enum-based path is untouched and remains the right choice for small harnesses; `crates/harness/tests/opset.rs` rebuilds the `pure_function.rs` counter as registered ops to prove parity.

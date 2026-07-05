@@ -40,7 +40,7 @@ async fn payable_deposit_attaches_funds_then_borrow_and_query() {
         .await
         .expect("alice addr");
     chain
-        .set_balance(&alice, 1_000_000)
+        .set_balance(&alice, denom, 1_000_000)
         .await
         .expect("fund alice");
 

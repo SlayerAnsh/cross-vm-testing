@@ -228,7 +228,12 @@ impl ChainProvider for SvmRpcProvider {
             .ok_or_else(|| SvmError::Balance(format!("getBalance: unexpected result {result}")))
     }
 
-    async fn set_balance(&mut self, _addr: &Address, _amount: u64) -> Result<(), SvmError> {
+    async fn set_balance(
+        &mut self,
+        _addr: &Address,
+        _denom: &str,
+        _amount: u64,
+    ) -> Result<(), SvmError> {
         // Cannot mint on a real cluster. Use a faucet; declared funding is validated, not minted.
         Err(SvmError::Unimplemented("rpc set_balance".into()))
     }

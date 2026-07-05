@@ -246,7 +246,12 @@ impl ChainProvider for EvmRpcProvider {
             .map_err(|e| EvmError::Balance(e.to_string()))
     }
 
-    async fn set_balance(&mut self, _addr: &Address, _amount: U256) -> Result<(), EvmError> {
+    async fn set_balance(
+        &mut self,
+        _addr: &Address,
+        _denom: &str,
+        _amount: U256,
+    ) -> Result<(), EvmError> {
         // Cannot mint on a real chain. Use a faucet; declared funding is validated, not minted.
         Err(EvmError::Unimplemented("rpc set_balance".into()))
     }
