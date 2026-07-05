@@ -10,7 +10,7 @@ use core::fmt;
 use core::future::Future;
 use core::pin::Pin;
 
-use crate::{CheckOutcome, HarnessError, Verdict};
+use crate::{CheckOutcome, HarnessError, Prng, Verdict};
 
 /// Boxed future returned by the object-safe async methods in this module. Object safety
 /// forbids `async fn` in the dyn traits, so implementations return `Box::pin(async move { .. })`.
@@ -62,5 +62,60 @@ pub trait DynInvariant<C: 'static, W: 'static>: fmt::Debug {
 impl<C: 'static, W: 'static> Clone for Box<dyn DynInvariant<C, W>> {
     fn clone(&self) -> Self {
         self.clone_box()
+    }
+}
+
+/// Generator stored in an [`OpDef`]: build one random op of this kind from `rng`, state-aware
+/// via the world (mirrors [`Harness::generate_op`](crate::Harness::generate_op)). A plain fn
+/// pointer keeps generation deterministic in `(seed, world)`.
+pub type GenerateFn<C, W> = fn(&mut Prng, &W) -> Box<dyn DynOp<C, W>>;
+
+/// Dynamic selection weight stored in an [`OpDef`] (mirrors
+/// [`Harness::weight`](crate::Harness::weight)): `0` excludes the kind while the state makes
+/// it meaningless. Must be deterministic in `(ctx, world)`; it receives no rng by design.
+pub type WeightFn<C, W> = fn(&C, &W) -> u32;
+
+/// One registered operation kind: its name, its generator, and its dynamic weight. The
+/// dyn-registry counterpart of one `OpKind` variant plus its `generate_op` and `weight` arms.
+pub struct OpDef<C: 'static, W: 'static> {
+    name: &'static str,
+    generate: GenerateFn<C, W>,
+    weight: WeightFn<C, W>,
+}
+
+fn weight_one<C, W>(_ctx: &C, _world: &W) -> u32 {
+    1
+}
+
+impl<C: 'static, W: 'static> OpDef<C, W> {
+    /// A new kind descriptor with the default weight of `1` (a uniform mix).
+    pub fn new(name: &'static str, generate: GenerateFn<C, W>) -> Self {
+        Self {
+            name,
+            generate,
+            weight: weight_one::<C, W>,
+        }
+    }
+
+    /// Override the dynamic weight (default `1`).
+    pub fn with_weight(mut self, weight: WeightFn<C, W>) -> Self {
+        self.weight = weight;
+        self
+    }
+
+    /// The kind name: the `OpKind` value of [`OpSetHarness`] runs, the key config weights
+    /// address, and the registry key.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// Build one random op of this kind (calls the stored generator).
+    pub fn generate(&self, rng: &mut Prng, world: &W) -> Box<dyn DynOp<C, W>> {
+        (self.generate)(rng, world)
+    }
+
+    /// The kind's dynamic weight for the current state (calls the stored weight fn).
+    pub fn weight(&self, ctx: &C, world: &W) -> u32 {
+        (self.weight)(ctx, world)
     }
 }

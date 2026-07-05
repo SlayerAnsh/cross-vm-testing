@@ -2,7 +2,9 @@
 //! `pure_function.rs`, rebuilt as standalone op structs registered into an `OpSetHarness`
 //! instead of a hand-written enum harness.
 
-use harness_core::{CheckOutcome, DynInvariant, DynOp, HarnessError, OpFuture, Verdict};
+use harness_core::{
+    CheckOutcome, DynInvariant, DynOp, HarnessError, OpDef, OpFuture, Prng, Verdict,
+};
 
 /// The system under test: a u8 counter with saturating add and a subtract that
 /// rejects underflow.
@@ -129,4 +131,31 @@ async fn invariant_checks_standalone_without_runner() {
     let boxed: Box<dyn DynInvariant<(), World>> = Box::new(MatchesModel);
     assert!(format!("{boxed:?}").starts_with("MatchesModel"));
     let _clone = boxed.clone();
+}
+
+/// Generator for the `"add"` kind: any `n` in `0..300` cast to u8 (wraps past 255 on
+/// purpose, exercising saturation). A named fn coerces cleanly to `GenerateFn`.
+fn gen_add(rng: &mut Prng, _world: &World) -> Box<dyn DynOp<(), World>> {
+    Box::new(Add {
+        n: rng.below(300) as u8,
+    })
+}
+
+fn zero_weight(_ctx: &(), _world: &World) -> u32 {
+    0
+}
+
+#[test]
+fn opdef_default_weight_is_one_and_overridable() {
+    let def = OpDef::new("add", gen_add);
+    assert_eq!(def.name(), "add");
+
+    let mut rng = Prng::seed_from_u64(1);
+    let world = fresh_world();
+    let op = def.generate(&mut rng, &world);
+    assert!(format!("{op:?}").starts_with("Add"), "{op:?}");
+    assert_eq!(def.weight(&(), &world), 1);
+
+    let gated = OpDef::new("add", gen_add).with_weight(zero_weight);
+    assert_eq!(gated.weight(&(), &world), 0);
 }
