@@ -27,6 +27,9 @@ tracing.workspace = true
 # `cli`-only helper: draws a fresh `u64` base seed for a `Random` seed spec (`resolve_base_seed`).
 # The deterministic run RNG (ChaCha) now lives entirely in `harness-core`.
 rand.workspace = true
+# `cli`-only: the generic config-driven CLI, harness registry, and run pipeline the `config`
+# module builds the cross-vm domain adapter (`CrossVmDomain`) over.
+harness-cli = { workspace = true, optional = true }
 # `cli`-only: the declarative run-config schema the `config` module bridges into framework types.
 cross-vm-config = { workspace = true, optional = true }
 # `cli`-only: CLI argument parsing (Task 7).
@@ -37,14 +40,8 @@ clap = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 # `cli`-only: `--json-report` (Task 7) and JSON config input (already in cross-vm-config).
 serde_json = { workspace = true, optional = true }
-# `cli`-only: `.env` secret loading for the CLI binary (Task 7/10).
-dotenvy = { workspace = true, optional = true }
-# `cli`-only: the CLI's tracing-subscriber fmt layer (Task 7).
-tracing-subscriber = { workspace = true, optional = true }
 # `cli`-only: `ChainSpecData::params` and inline config tables.
 toml = { workspace = true, optional = true }
-# `cli`-only: `--duration` humantime string parsing (Task 7's `run` subcommand).
-humantime = { workspace = true, optional = true }
 # EVM/Tron only: `revm::primitives::hardfork::SpecId` is the parsed hardfork type used solely in
 # `build_chain`'s EVM/Tron arms (and `parse_spec_id`). Neither `cross-vm-solidity` nor
 # `cross-vm-tron` re-export the type, so the framework needs its own direct dependency to name it.
@@ -69,17 +66,15 @@ serde = ["dep:serde", "harness-core/serde"]
 # later tasks) the registry and the `cross-vm` binary's argument parsing.
 cli = [
     "serde",
+    "dep:harness-cli",
     "dep:cross-vm-config",
     "dep:clap",
     "dep:serde_json",
-    "dep:dotenvy",
-    "dep:tracing-subscriber",
     "dep:toml",
-    "dep:humantime",
-    # ctrl-c handling for the endurance runner's cooperative stop flag (Task 10); tokio is a
-    # mandatory workspace dep with a fixed feature set, so `cli` adds the extra feature to the
-    # existing dependency rather than redeclaring it.
-    "tokio/signal",
+    # `.env` loading, the tracing-subscriber fmt layer, `--duration` humantime parsing, and the
+    # endurance ctrl-c stop flag now all live in `harness-cli` (the `cross-vm` binary is a thin
+    # alias over `harness_cli::Cli`), so the framework no longer names dotenvy, tracing-subscriber,
+    # humantime, or `tokio/signal` directly.
 ]
 
 [dev-dependencies]

@@ -2313,10 +2313,9 @@ dependencies = [
 name = "cross-vm-config"
 version = "0.1.0"
 dependencies = [
- "humantime",
+ "harness-config",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "toml",
 ]
 
@@ -2363,10 +2362,9 @@ dependencies = [
  "cross-vm-solana",
  "cross-vm-solidity",
  "cross-vm-tron",
- "dotenvy",
+ "harness-cli",
  "harness-core",
  "harness-core-macros",
- "humantime",
  "rand 0.8.6",
  "revm",
  "serde",
@@ -2376,7 +2374,6 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
@@ -3423,6 +3420,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "harness-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dotenvy",
+ "harness-config",
+ "harness-core",
+ "humantime",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
+name = "harness-config"
+version = "0.1.0"
+dependencies = [
+ "humantime",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml",
+]
+
+[[package]]
 name = "harness-core"
 version = "0.1.0"
 dependencies = [
@@ -4328,6 +4355,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
+]
+
+[[package]]
+name = "math-tests"
+version = "0.1.0"
+dependencies = [
+ "harness-cli",
+ "harness-core",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

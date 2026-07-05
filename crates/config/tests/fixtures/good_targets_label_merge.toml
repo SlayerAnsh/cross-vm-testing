@@ -1,0 +1,48 @@
+# Pins CrossVmExt's label-wise `targets` env merge: the top-level `[env].targets`
+# declares one label (`eth`) and profile `p`'s own `env.targets` declares a
+# different label (`osmosis`). A correct label-wise merge keeps BOTH; a naive
+# whole-value replace would drop `eth`.
+#
+# `eth` also carries an `rpc_url` so that even under a (buggy) whole-replace the
+# config still LOADS: with `eth` gone from `targets`, `eth` would fall through to
+# the profile's `env.target = "rpc"` fallback and need an rpc_url. This keeps the
+# discrimination on the assertions (eth surviving in `targets`) rather than on a
+# load error.
+[harness]
+name = "vault"
+
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "1"
+rpc_url = "https://eth.example"
+
+[[chain]]
+label = "osmosis"
+kind = "cosmwasm"
+chain_id = "osmosis-1"
+bech32_prefix = "osmo"
+native_denom = "uosmo"
+rpc_url = "https://rpc.osmosis.example"
+
+# Top-level env: a scalar `target` (for the whole-replace discriminator) plus a
+# single-label `targets` map.
+[env]
+target = "mock"
+
+[env.targets]
+eth = "mock"
+
+[profile.p]
+mode = "fuzz"
+cases = 1
+ops = 1
+
+# Profile `p`'s own env override. `target` collides on a non-`targets` key and
+# must be whole-replaced (mock -> rpc). `targets` collides and must merge
+# label-wise, adding `osmosis` while preserving the top-level `eth`.
+[profile.p.env]
+target = "rpc"
+
+[profile.p.env.targets]
+osmosis = "rpc"

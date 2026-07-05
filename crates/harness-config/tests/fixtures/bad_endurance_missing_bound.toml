@@ -1,0 +1,6 @@
+# Endurance requires `duration` or `max_ops`; neither is set here.
+[harness]
+name = "h"
+
+[profile.p]
+mode = "endurance"

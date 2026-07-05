@@ -10,15 +10,18 @@
 //!    `[defaults]`) are never stripped; a genuine typo in the profile body still hard-errors
 //!    at typed deserialize.
 //! 2. **Env merge.** The profile's own `env` inline table (if any) shallow-merges over the
-//!    top-level `[env]` table: `target`, `chains`, and `params` are whole-value overrides
-//!    (profile wins when present), while `targets` merges label-wise (profile labels win,
-//!    other top-level labels survive). The result replaces the profile's `env` key, so by the
-//!    time typed deserialization runs, `Profile::common().env` already holds the fully
+//!    top-level `[env]` table. A key present only in the override is inserted; a key that
+//!    collides with the top-level table is resolved by [`ConfigExt::merge_env_entry`], whose
+//!    default replaces the top-level slot with the override value wholesale. A domain
+//!    extension can override the hook to deep-merge selected keys (for example, cross-vm
+//!    merges its `targets` map label-wise). The result replaces the profile's `env` key, so by
+//!    the time typed deserialization runs, `Profile::common().env` already holds the fully
 //!    resolved effective environment for that profile (not just the override delta).
 //!
 //! `[defaults]` itself is consumed and removed from the document; it has no place in the
 //! typed schema; it existing only to seed profiles during this stage.
 
+use crate::ext::ConfigExt;
 use crate::value::{Doc, DocMap};
 use crate::ConfigError;
 
@@ -83,9 +86,13 @@ fn key_applies_to_mode(key: &str, mode: &str) -> bool {
 /// Merges `[defaults]` into every `[profile.*]` table and each profile's `env` over the
 /// top-level `[env]`, operating on the raw parsed document before typed deserialization.
 ///
+/// Per-key env collisions are resolved through the domain extension `X`'s
+/// [`ConfigExt::merge_env_entry`] hook; the [`NoExt`](crate::NoExt) default replaces the
+/// colliding slot wholesale.
+///
 /// Returns the warnings emitted by the per-mode defaults allowlist strip (one per stripped
 /// key), in profile-then-key order.
-pub fn merge<V: Doc>(root: &mut V) -> Result<Vec<String>, ConfigError> {
+pub(crate) fn merge<V: Doc, X: ConfigExt>(root: &mut V) -> Result<Vec<String>, ConfigError> {
     let table = root.as_object_mut().ok_or_else(|| {
         ConfigError::Parse("the root of a config document must be a table".to_string())
     })?;
@@ -144,8 +151,7 @@ pub fn merge<V: Doc>(root: &mut V) -> Result<Vec<String>, ConfigError> {
                 }
                 None => None,
             };
-            let merged_env =
-                merge_env_tables::<V>(profile_name, &top_env, profile_env_override.as_ref())?;
+            let merged_env = merge_env_tables::<V, X>(&top_env, profile_env_override.as_ref());
             if merged_env.is_empty() {
                 profile_table.remove("env");
             } else {
@@ -158,51 +164,41 @@ pub fn merge<V: Doc>(root: &mut V) -> Result<Vec<String>, ConfigError> {
 }
 
 /// Shallow-merges a profile's `env` override table over the top-level `[env]` table.
-/// `target`, `chains`, and `params` are whole-value overrides (override wins when present);
-/// `targets` merges label-wise (override labels win, other top-level labels survive).
 ///
-/// A non-table `targets` override (e.g. `env = { targets = "oops" }`) is a hard error rather
-/// than being silently dropped: it is a user typo (the schema requires a label-to-target
-/// table), and masking it would let a broken override pass through as if it were simply absent.
-fn merge_env_tables<V: Doc>(
-    profile_name: &str,
+/// The result starts as a clone of the top-level table. Each override key that is absent from
+/// the top-level table is inserted; each key that collides is passed to
+/// [`ConfigExt::merge_env_entry`] to resolve. The [`NoExt`](crate::NoExt) default hook replaces
+/// the colliding slot with the override value wholesale (so `target`, `chains`, `params`, and
+/// any other scalar or table are plain profile-wins overrides), while a domain extension can
+/// deep-merge selected keys instead (for example cross-vm's label-wise `targets` merge).
+///
+/// A profile with no `env` override yields a clone of the top-level table unchanged, so every
+/// profile ends up carrying the fully resolved effective environment.
+fn merge_env_tables<V: Doc, X: ConfigExt>(
     top: &V::Map,
     profile_override: Option<&V::Map>,
-) -> Result<V::Map, ConfigError> {
+) -> V::Map {
     let mut merged = top.clone();
     let Some(over) = profile_override else {
-        return Ok(merged);
+        return merged;
     };
 
     for (key, value) in over.iter() {
-        if key == "targets" {
-            let over_targets = match value.as_object() {
-                Some(t) => t,
-                None => {
-                    return Err(ConfigError::Parse(format!(
-                        "`profile.{profile_name}.env.targets` must be a table"
-                    )))
-                }
-            };
-            let mut targets_table = match merged.get("targets") {
-                Some(v) if v.is_object() => v.as_object().expect("checked is_object").clone(),
-                _ => V::Map::new(),
-            };
-            for (label, target) in over_targets.iter() {
-                targets_table.insert(label.clone(), target.clone());
+        match merged.get_mut(key) {
+            Some(slot) => X::merge_env_entry(key, slot, value.clone()),
+            None => {
+                merged.insert(key.clone(), value.clone());
             }
-            merged.insert("targets".to_string(), V::from_object(targets_table));
-        } else {
-            merged.insert(key.clone(), value.clone());
         }
     }
 
-    Ok(merged)
+    merged
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ext::NoExt;
 
     fn parse(s: &str) -> toml::Value {
         toml::from_str(s).unwrap()
@@ -223,7 +219,7 @@ mod tests {
             seed = 99
             "#,
         );
-        merge(&mut doc).unwrap();
+        merge::<toml::Value, NoExt>(&mut doc).unwrap();
         let profile = doc.get("profile").unwrap().get("p").unwrap();
         // Profile's own `seed` wins over the default.
         assert_eq!(profile.get("seed").unwrap().as_integer(), Some(99));
@@ -246,7 +242,7 @@ mod tests {
               op = "Ping"
             "#,
         );
-        let warnings = merge(&mut doc).unwrap();
+        let warnings = merge::<toml::Value, NoExt>(&mut doc).unwrap();
         let profile = doc.get("profile").unwrap().get("p").unwrap();
         // `check_every` is a common key, applies everywhere, so it survives.
         assert_eq!(profile.get("check_every").unwrap().as_integer(), Some(5));
@@ -264,7 +260,7 @@ mod tests {
               op = "Ping"
             "#,
         );
-        let warnings2 = merge(&mut doc2).unwrap();
+        let warnings2 = merge::<toml::Value, NoExt>(&mut doc2).unwrap();
         let profile2 = doc2.get("profile").unwrap().get("p").unwrap();
         assert!(profile2.get("cases").is_none(), "cases must be stripped");
         assert!(
@@ -292,7 +288,7 @@ mod tests {
             env = { target = "rpc" }
             "#,
         );
-        merge(&mut doc).unwrap();
+        merge::<toml::Value, NoExt>(&mut doc).unwrap();
         let env = doc
             .get("profile")
             .unwrap()
@@ -309,7 +305,10 @@ mod tests {
     }
 
     #[test]
-    fn targets_map_merges_label_wise_profile_wins_on_shared_label() {
+    fn targets_map_is_whole_value_replaced_under_default_ext() {
+        // The generic default hook replaces a colliding env key wholesale: with `NoExt`, a
+        // profile `targets` override is NOT label-merged (label-wise merge lives in the
+        // domain's own `ConfigExt` impl), so the top-level-only label disappears.
         let mut doc = parse(
             r#"
             [env]
@@ -322,7 +321,7 @@ mod tests {
             env = { targets = { osmosis = "mock" } }
             "#,
         );
-        merge(&mut doc).unwrap();
+        merge::<toml::Value, NoExt>(&mut doc).unwrap();
         let targets = doc
             .get("profile")
             .unwrap()
@@ -332,8 +331,11 @@ mod tests {
             .unwrap()
             .get("targets")
             .unwrap();
-        assert_eq!(targets.get("eth").unwrap().as_str(), Some("rpc"));
-        // Profile wins on the shared label.
+        // Whole-value override: only the override's labels remain.
+        assert!(
+            targets.get("eth").is_none(),
+            "eth is not label-preserved under NoExt"
+        );
         assert_eq!(targets.get("osmosis").unwrap().as_str(), Some("mock"));
     }
 
@@ -350,7 +352,7 @@ mod tests {
             ops = 1
             "#,
         );
-        merge(&mut doc).unwrap();
+        merge::<toml::Value, NoExt>(&mut doc).unwrap();
         let env = doc
             .get("profile")
             .unwrap()
@@ -371,7 +373,7 @@ mod tests {
             ops = 1
             "#,
         );
-        merge(&mut doc).unwrap();
+        merge::<toml::Value, NoExt>(&mut doc).unwrap();
         let profile = doc.get("profile").unwrap().get("p").unwrap();
         assert!(profile.get("env").is_none());
     }
@@ -389,7 +391,7 @@ mod tests {
             bogus = true
             "#,
         );
-        merge(&mut doc).unwrap();
+        merge::<toml::Value, NoExt>(&mut doc).unwrap();
         let profile = doc.get("profile").unwrap().get("p").unwrap();
         assert_eq!(profile.get("bogus").unwrap().as_bool(), Some(true));
     }
@@ -409,7 +411,7 @@ mod tests {
             [profile.p]
             "#,
         );
-        let warnings = merge(&mut doc).unwrap();
+        let warnings = merge::<toml::Value, NoExt>(&mut doc).unwrap();
         let profile = doc.get("profile").unwrap().get("p").unwrap();
         assert_eq!(profile.get("mode").unwrap().as_str(), Some("fuzz"));
         assert_eq!(profile.get("cases").unwrap().as_integer(), Some(1));
@@ -433,7 +435,7 @@ mod tests {
               op = "Ping"
             "#,
         );
-        merge(&mut doc).unwrap();
+        merge::<toml::Value, NoExt>(&mut doc).unwrap();
         let profile = doc.get("profile").unwrap().get("p").unwrap();
         assert_eq!(profile.get("mode").unwrap().as_str(), Some("scenario"));
         assert!(
@@ -443,7 +445,10 @@ mod tests {
     }
 
     #[test]
-    fn malformed_targets_override_is_a_hard_error() {
+    fn malformed_targets_override_passes_through_to_typed_deserialize() {
+        // Under the generic default hook, a non-table `targets` override is no longer a hard
+        // error in the merge stage (that shape check moves into the domain's `ConfigExt`): it
+        // simply overrides the slot, and typed deserialize rejects it downstream.
         let mut doc = parse(
             r#"
             [env]
@@ -456,11 +461,17 @@ mod tests {
             env = { targets = "not-a-table" }
             "#,
         );
-        let err = merge(&mut doc).unwrap_err();
-        assert!(
-            matches!(err, ConfigError::Parse(ref msg) if msg.contains("targets")),
-            "expected a targets-shaped Parse error, got: {err:?}"
-        );
+        merge::<toml::Value, NoExt>(&mut doc).unwrap();
+        let targets = doc
+            .get("profile")
+            .unwrap()
+            .get("p")
+            .unwrap()
+            .get("env")
+            .unwrap()
+            .get("targets")
+            .unwrap();
+        assert_eq!(targets.as_str(), Some("not-a-table"));
     }
 
     #[test]
@@ -476,7 +487,66 @@ mod tests {
             ops = 1
             "#,
         );
-        merge(&mut doc).unwrap();
+        merge::<toml::Value, NoExt>(&mut doc).unwrap();
         assert!(doc.get("defaults").is_none());
+    }
+}
+
+#[cfg(test)]
+mod ext_hook_tests {
+    use super::*;
+    use crate::ext::{ConfigExt, NoExt};
+
+    /// An ext whose hook deep-merges the `nested` env key label-wise.
+    #[derive(Debug, Clone, Default, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DeepNested {}
+    impl ConfigExt for DeepNested {
+        fn merge_env_entry<V: crate::Doc>(key: &str, slot: &mut V, incoming: V) {
+            if key == "nested" {
+                if let (Some(base), Some(inc)) =
+                    (slot.as_object_mut(), incoming.clone().into_object())
+                {
+                    let keys: Vec<String> = inc.iter().map(|(k, _)| k.clone()).collect();
+                    let mut inc = inc;
+                    for k in keys {
+                        let v = inc.remove(&k).expect("key came from this map");
+                        base.insert(k, v);
+                    }
+                    return;
+                }
+            }
+            *slot = incoming;
+        }
+    }
+
+    fn doc(s: &str) -> toml::Value {
+        toml::from_str(s).expect("valid toml")
+    }
+
+    #[test]
+    fn default_hook_replaces_whole_value() {
+        let mut root = doc(
+            "[env]\n[env.nested]\na = 1\nb = 2\n\n[profile.p]\nmode = \"fuzz\"\ncases = 1\nops = 1\n[profile.p.env]\n[profile.p.env.nested]\na = 9\n",
+        );
+        merge::<toml::Value, NoExt>(&mut root).expect("merge succeeds");
+        let merged = &root["profile"]["p"]["env"]["nested"];
+        assert_eq!(merged.get("a").and_then(|v| v.as_integer()), Some(9));
+        assert_eq!(
+            merged.get("b"),
+            None,
+            "default hook replaces, not deep-merges"
+        );
+    }
+
+    #[test]
+    fn custom_hook_deep_merges_selected_key() {
+        let mut root = doc(
+            "[env]\n[env.nested]\na = 1\nb = 2\n\n[profile.p]\nmode = \"fuzz\"\ncases = 1\nops = 1\n[profile.p.env]\n[profile.p.env.nested]\na = 9\n",
+        );
+        merge::<toml::Value, DeepNested>(&mut root).expect("merge succeeds");
+        let merged = &root["profile"]["p"]["env"]["nested"];
+        assert_eq!(merged.get("a").and_then(|v| v.as_integer()), Some(9));
+        assert_eq!(merged.get("b").and_then(|v| v.as_integer()), Some(2));
     }
 }

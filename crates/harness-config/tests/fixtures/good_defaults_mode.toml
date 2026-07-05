@@ -1,0 +1,12 @@
+# [defaults].mode is structural and must survive the per-mode allowlist strip even when a
+# profile omits its own `mode`; the profile below inherits "fuzz" (plus its fuzz-specific
+# `cases`/`ops`) entirely from [defaults] and must dispatch as a Fuzz profile.
+[harness]
+name = "h"
+
+[defaults]
+mode = "fuzz"
+cases = 1
+ops = 1
+
+[profile.p]

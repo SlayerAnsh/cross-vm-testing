@@ -10,6 +10,8 @@ members = [
     "crates/tron",
     "crates/harness",
     "crates/harness-macros",
+    "crates/harness-config",
+    "crates/harness-cli",
     "crates/framework",
     "crates/macros",
     # Reusable contract bindings (mocks) + shared test helpers for the example test crates.
@@ -21,6 +23,8 @@ members = [
     "examples/tvm-tests",
     # Multi-chain integration & example tests, co-located with the contract artifacts they embed.
     "examples/cross-vm-tests",
+    # Raw generic example: harness-core + harness-cli with no domain layer (developer docs).
+    "examples/math-tests",
 ]
 # Example contracts (now under `contracts/`) are standalone crates (their own workspaces / build
 # toolchains); they are consumed by tests via path dependencies but must not be workspace members.
@@ -67,6 +71,8 @@ cross-vm-solana = { path = "crates/solana", version = "0.1.0" }
 cross-vm-tron = { path = "crates/tron", version = "0.1.0" }
 harness-core = { path = "crates/harness", version = "0.1.0" }
 harness-core-macros = { path = "crates/harness-macros", version = "0.1.0" }
+harness-config = { path = "crates/harness-config", version = "0.1.0" }
+harness-cli = { path = "crates/harness-cli", version = "0.1.0" }
 
 # Proc-macro toolkit
 syn = { version = "2", features = ["full"] }

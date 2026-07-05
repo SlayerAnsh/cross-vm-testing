@@ -18,7 +18,7 @@ use serde::de::DeserializeOwned;
 /// A JSON/TOML-agnostic document value. Implemented for [`toml::Value`] and
 /// [`serde_json::Value`]; both are also `serde` deserializers, which [`Doc::deserialize_into`]
 /// relies on for the typed stage.
-pub(crate) trait Doc: Clone + Sized + DeserializeOwned {
+pub trait Doc: Clone + Sized + DeserializeOwned {
     /// The associated object/table map type (`toml::Table` or `serde_json::Map`).
     type Map: DocMap<Value = Self>;
 
@@ -45,7 +45,7 @@ pub(crate) trait Doc: Clone + Sized + DeserializeOwned {
 }
 
 /// The map operations the merge stage needs, over `toml::Table` / `serde_json::Map`.
-pub(crate) trait DocMap: Clone {
+pub trait DocMap: Clone {
     /// The value type stored in the map.
     type Value;
 

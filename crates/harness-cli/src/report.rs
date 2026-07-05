@@ -10,7 +10,7 @@
 use std::io;
 use std::path::Path;
 
-use super::erased::ErasedReport;
+use crate::erased::ErasedReport;
 
 /// The `--json-report` (or `json_report` profile key) output envelope: `schema_version` pins the
 /// shape for forward compatibility (spec section 9 only ever specifies `1`), `invocation`
@@ -93,8 +93,8 @@ pub fn write_json_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ErasedFailure;
-    use crate::harness::FailureKind;
+    use crate::erased::ErasedFailure;
+    use harness_core::FailureKind;
 
     fn report(profile: &str, seed: u64) -> ErasedReport {
         ErasedReport {

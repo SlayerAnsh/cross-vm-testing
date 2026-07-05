@@ -1,0 +1,10 @@
+# `kinds` and `weights` are mutually exclusive.
+[harness]
+name = "h"
+
+[profile.p]
+mode = "fuzz"
+cases = 1
+ops = 1
+kinds = ["Deposit"]
+weights = { Deposit = 1 }

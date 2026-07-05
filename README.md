@@ -35,6 +35,7 @@ On top of that base, three things make full cross VM tests practical:
 * [Cross VM contracts: one wrapper, four VMs](#cross-vm-contracts-one-wrapper-four-vms)
 * [Two ways to write a test](#two-ways-to-write-a-test)
 * [Property testing harness](#property-testing-harness)
+* [The config-driven CLI](#the-config-driven-cli)
 * [Wallets](#wallets)
 * [Live RPC providers](#live-rpc-providers)
 * [Tron (TVM)](#tron-tvm)
@@ -266,6 +267,66 @@ Phases mix modes freely: a scenario phase can seed liquidity or set precondition
 
 See `docs/config-runs-spec.md` section 4.7 for the phase schema and structural rules, and `examples/cross-vm-tests/vault.cross-vm.toml`'s `progressive` and `staged` suites for the checked in, runnable versions.
 
+## The config-driven CLI
+
+The same `Harness` also drives from a declarative TOML (or JSON) config file, through a command line runner. A config names the harness, an `[env]` table, and a set of `[profile.*]` blocks (one per fuzz, invariant, endurance, or scenario mode), plus optional `[suite.*]` pipelines:
+
+```toml
+[harness]
+name = "vault"
+
+[profile.smoke]
+mode = "fuzz"
+cases = 4
+ops = 20
+
+[profile.invariant-long]
+mode = "invariant"
+ops = 500
+```
+
+A binary registers its harness once and hands off to the shared CLI:
+
+```rust
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::process::ExitCode {
+    cross_vm_framework::cli::Cli::new()
+        .env_file(".env")
+        .register("vault", || VaultHarness, vault_config_setup)
+        .main()
+        .await
+}
+```
+
+That binary drives the whole config from the command line:
+
+```sh
+# type-check a config against the registered harness (touches no chains)
+cargo run -p cross-vm-tests --bin cross-vm -- validate vault.cross-vm.toml
+
+# run one profile against the mock chains
+cargo run -p cross-vm-tests --bin cross-vm -- run vault.cross-vm.toml --profile smoke
+
+# list registered harnesses and a config's profiles and suites
+cargo run -p cross-vm-tests --bin cross-vm -- list vault.cross-vm.toml
+
+# re-run a failing run's replay artifact
+cargo run -p cross-vm-tests --bin cross-vm -- replay target/cross-vm/vault-deep-....replay.toml
+```
+
+Exit codes are a stable CI contract: `0` all runs passed, `1` a `Bug` or invariant violation, `2` an infrastructure or setup failure, `3` a config or usage error. Every failing fuzz, invariant, or endurance run writes a self contained `*.replay.toml` artifact (itself a valid config), so `replay` closes the failure to regression loop with no bespoke tooling. `--json-report <path>` emits a machine readable envelope (`schema_version = 1`). Environment overrides follow a fixed precedence: a CLI flag beats a `CROSS_VM_*` variable, which beats a profile key, which beats the built in default. See `docs/config-runs-spec.md` for the full schema.
+
+**Three reusable layers.** The runner, the config loader, and the CLI are three standalone crates, none of which knows about chains:
+
+```
+harness-core     the Harness trait, the mode-typed Runner, rng, stats, outcomes
+harness-config   the TOML/JSON config schema and load pipeline (ConfigExt seam)
+harness-cli      the registry, profile resolution, run driving, JSON reports,
+                 replay artifacts, and the clap CLI (CliDomain seam)
+```
+
+cross-vm is one variant on top of them. `cross-vm-config` adds the `[[chain]]` sections through `ConfigExt`, and `cross-vm-framework` adds the `--target` flags and chain-aware setup through `CliDomain`, keeping the `cross-vm` binary a thin `harness_cli::Cli<CrossVmDomain>`. You can also use the stack raw, with no domain layer at all: `examples/math-tests` registers a plain `MathHarness` against `harness_cli::GenericDomain` and drives it from `math.harness.toml` (`harness run math.harness.toml --profile smoke`), a complete config-driven runner whose binary is fifteen lines. `docs/extending-harness-cli.md` walks both the raw path and building a new variant.
+
 ## Wallets
 
 Mnemonics are the only secret, and they live in a `.env` (gitignored). Everything else, the wallet roster (labels, account indices, how each wallet sources its key), is a compile time const built with `define_wallet_roster!`, resolved by a single shared `WalletFactory`. Each roster row picks one source:
@@ -324,11 +385,14 @@ crates/
   tron/           cross-vm-tron         TronMockProvider (revm + TVM layers), TronRpcProvider (live java-tron over TronGrid HTTP), TronChain, TronAsset
   harness/        harness-core          standalone, VM agnostic property testing runner: the Harness trait, mode typed Runner, rng, stats, outcome types
   harness-macros/ harness-core-macros   proc-macros for harness-core: fuzz_runner, invariant_runner, endurance_runner
+  harness-config/ harness-config        generic TOML/JSON run-config schema and loader (the ConfigExt seam); pure data, no runtime deps
+  harness-cli/    harness-cli           generic registry, profile resolution, run driving, JSON reports, replay artifacts, and clap CLI (the CliDomain seam)
+  config/         cross-vm-config       cross-vm variant of harness-config: the [[chain]] sections, the typed EnvSpec, and chain validation
   macros/         cross-vm-macros       proc-macros: cross_vm_contract, CwExecuteFns/CwQueryFns, define_wallet_roster, config_runner
-  framework/      cross-vm-framework    MultiChainEnv (umbrella over all VMs), a Ctx/classify layer over harness-core, prelude
+  framework/      cross-vm-framework    MultiChainEnv (umbrella over all VMs), a Ctx/classify layer over harness-core, the cross-vm CLI variant (CrossVmDomain over harness-cli), prelude
 ```
 
-Dependency trees are isolated per crate, so building or testing one VM does not pull the others. Each VM crate carries a `chains` module with predefined chain constants. `harness-core` is VM agnostic and knows nothing about chains; `cross-vm-framework` re-exports everything, adds the multi chain `MultiChainEnv`, and pins `harness-core`'s generic `Ctx` to a started multi-chain environment for the property testing harness.
+Dependency trees are isolated per crate, so building or testing one VM does not pull the others. Each VM crate carries a `chains` module with predefined chain constants. `harness-core`, `harness-config`, and `harness-cli` are VM agnostic and know nothing about chains: they are the reusable generic stack (see [The config-driven CLI](#the-config-driven-cli)). `cross-vm-config` and `cross-vm-framework` are the cross-vm variant built on that stack. The framework re-exports everything, adds the multi chain `MultiChainEnv`, pins `harness-core`'s generic `Ctx` to a started multi-chain environment for the property testing harness, and supplies the `CrossVmDomain` that gives the generic CLI its `[[chain]]` sections and `--target` flags.
 
 Example crates and contract sources live outside the root workspace:
 
@@ -342,10 +406,11 @@ examples/
   common/         cross-vm-common   reusable contract bindings (mocks) + shared wallet/tracing helpers
   cross-vm-tests/ cross-vm-tests    multi-chain tests (cross-VM flows, ping-pong, vault, replay) + the cross-vm CLI
   evm-tests/      cosmos-tests/     solana-tests/     tvm-tests/   single-VM Counter example crates
+  math-tests/     math-tests        raw harness-core + harness-cli example (no chains, no domain layer); the reference for building a new variant
   scripts/        deploy_counter    imperative deploy script over the live RPC providers
 ```
 
-Each single-VM example crate exercises one `Counter` harness three ways: attribute-macro runners (`tests/harness.rs`), config-driven `#[config_runner]` fan-out (`tests/config_runner.rs`) against its `counter.cross-vm.toml`, and a CLI binary driven end to end (`tests/cli_e2e.rs`). All of them source their contract bindings from `cross-vm-common`.
+Each single-VM example crate exercises one `Counter` harness three ways: attribute-macro runners (`tests/harness.rs`), config-driven `#[config_runner]` fan-out (`tests/config_runner.rs`) against its `counter.cross-vm.toml`, and a CLI binary driven end to end (`tests/cli_e2e.rs`). All of them source their contract bindings from `cross-vm-common`. The `math-tests` crate is the minimal counterpart: a plain arithmetic harness driven by the generic config and CLI with no chains and no domain layer at all, doubling as the worked walkthrough in `docs/extending-harness-cli.md`.
 
 ## Build and test
 
@@ -388,6 +453,8 @@ cargo test -p cross-vm-tests --test harness --features "fuzz invariant endurance
 
 * `SPEC.md`: architecture and design.
 * `DEVELOPER.md`: per crate details, the full contract wrapper and hook reference, and how to add a VM or chain.
+* `docs/extending-harness-cli.md`: the three reusable layers (harness-core, harness-config, harness-cli) and how to build a new config-driven variant.
+* `docs/config-runs-spec.md`: the TOML/JSON config schema for config-driven runs, profiles, and suites.
 * `docs/adding-a-vm.md`: the file-by-file checklist for a new chain ecosystem.
 * `CONTRIBUTING.md`: setup, the pre-PR command list, and ground rules.
 * `CHANGELOG.md`: release notes.
