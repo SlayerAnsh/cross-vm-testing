@@ -25,6 +25,11 @@
 //!
 //! The same `apply` is reused by every mode: no test logic is written twice. An invariant whose
 //! precondition has not occurred yet returns [`CheckOutcome::Skipped`] instead of failing.
+//!
+//! Operations can alternatively be assembled without an enum: implement [`DynOp`] on standalone
+//! op structs and register them into an [`OpSetHarness`] (one [`OpDef`] per kind, invariants via
+//! [`DynInvariant`]). The registry implements [`Harness`] with boxed ops, so every runner mode,
+//! shrinking, and replay work unchanged; see `tests/opset.rs` for a complete worked example.
 
 mod opset;
 mod outcome;

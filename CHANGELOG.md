@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added (dyn-op registry: modular operations without an enum harness)
+
+* `harness-core`: new opt-in `opset` layer. An operation can now be a standalone struct implementing `DynOp<C, W>` (its data plus its own `apply`), registered into an `OpSetHarness<C, W>` through `OpDef` entries (kind name, generator fn, optional dynamic weight fn); invariants follow the same shape via `DynInvariant<C, W>`. `OpSetHarness` implements the existing `Harness` trait with `Operation = Box<dyn DynOp<C, W>>` and `OpKind = &'static str`, so every runner mode, shrinking, replay, per-op stats, and the runner attribute macros work unchanged, and kind names line up directly with config `weights` keys. Adding an op touches one `OpDef` instead of four match arms, an op is unit-testable without a runner (call its `apply` directly), and op libraries can be shared across harnesses. The enum-based path is untouched and remains the right choice for small harnesses; `crates/harness/tests/opset.rs` rebuilds the `pure_function.rs` counter as registered ops to prove parity.
+
 ### Changed (three-layer extraction: standalone `harness-config` / `harness-cli` crates)
 
 * The config-driven runner split into two new, chain-agnostic crates so a non-cross-vm project can reuse the whole config and CLI machinery. `harness-config` (`crates/harness-config`) is the declarative TOML/JSON schema: the five-stage loader (parse, interpolate `${VAR}`, merge `[defaults]` and per-profile `env`, typed deserialize, validate) producing a `RunConfig<X>`, with an opaque `[env]` table and one extension seam, the `ConfigExt` trait. It has no runtime dependencies (serde, toml, serde_json, thiserror) and does not depend on `harness-core`. `harness-cli` (`crates/harness-cli`) holds the harness registry, the clap CLI (`run`/`replay`/`list`/`validate`), the run pipeline over `harness-core`, the JSON report envelope, and the replay-artifact writer; its extension seam is the `CliDomain` trait, and its batteries-included `GenericDomain` runs the whole thing with no domain code.
