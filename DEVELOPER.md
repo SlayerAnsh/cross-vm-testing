@@ -166,6 +166,19 @@ Each crate has unit tests (chain metadata, account creation, balance set/get, bl
   * Solana: `include_bytes!` loads `contracts/solana/target/deploy/counter.so` (`cargo-build-sbf`).
   * `tests/cli_e2e.rs` drives the `cross-vm` binary itself as a subprocess (`Command::new(env!("CARGO_BIN_EXE_cross-vm"))`) against `vault.cross-vm.toml` and `vault.no-chains.cross-vm.toml`, checking exit codes and seed reproducibility exactly as a user would see them. See "The `cross-vm` CLI binary" below.
 
+## Dyn-op registry (`opset`)
+
+`harness-core` offers a second way to assemble a harness. Instead of one `Operation` enum with match arms spread across `apply`, `generate_op`, and `weight`, each operation is a standalone struct implementing `DynOp<C, W>`, registered into an `OpSetHarness<C, W>`:
+
+```rust
+let harness = OpSetHarness::new()
+    .register(OpDef::new("add", gen_add))
+    .register(OpDef::new("sub", gen_sub).with_weight(sub_weight))
+    .invariant(Box::new(MatchesModel));
+```
+
+`OpSetHarness` implements the normal `Harness` trait (`Operation = Box<dyn DynOp<C, W>>`, `OpKind = &'static str`), so every runner mode, shrinking, and replay work unchanged, and kind names match config `weights` keys directly. Ops are unit-testable without a runner (call `apply` on the struct directly). See `crates/harness/tests/opset.rs` for the complete worked example. The enum path remains preferred for small harnesses (two or three ops); the registry pays off as the op count grows or when ops are shared across harnesses.
+
 ## The `cross-vm` CLI binary
 
 `cross-vm-tests` ships a small binary (`src/bin/cross_vm.rs`) built by the framework's config-driven CLI (`docs/config-runs-spec.md` section 8, `cross_vm_framework::cli::Cli`). It registers the vault harness once:
