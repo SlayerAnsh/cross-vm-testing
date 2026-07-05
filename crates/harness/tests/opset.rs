@@ -2,7 +2,7 @@
 //! `pure_function.rs`, rebuilt as standalone op structs registered into an `OpSetHarness`
 //! instead of a hand-written enum harness.
 
-use harness_core::{DynOp, HarnessError, OpFuture, Verdict};
+use harness_core::{CheckOutcome, DynInvariant, DynOp, HarnessError, OpFuture, Verdict};
 
 /// The system under test: a u8 counter with saturating add and a subtract that
 /// rejects underflow.
@@ -94,4 +94,39 @@ async fn boxed_op_clones_and_debugs() {
     let mut world = fresh_world();
     cloned.apply(&mut (), &mut world).await.expect("apply");
     assert_eq!(world.model, 7);
+}
+
+/// Every chain state matches the shadow model: the one invariant of this harness.
+#[derive(Debug, Clone)]
+struct MatchesModel;
+
+impl DynInvariant<(), World> for MatchesModel {
+    fn check<'a>(&'a self, _ctx: &'a mut (), world: &'a World) -> OpFuture<'a, CheckOutcome> {
+        Box::pin(async move {
+            if world.sut.value as i32 == world.model {
+                CheckOutcome::Held
+            } else {
+                CheckOutcome::violated(format!("sut {} != model {}", world.sut.value, world.model))
+            }
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynInvariant<(), World>> {
+        Box::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn invariant_checks_standalone_without_runner() {
+    let mut world = fresh_world();
+    let outcome = MatchesModel.check(&mut (), &world).await;
+    assert!(matches!(outcome, CheckOutcome::Held));
+
+    world.model = 9; // desync the model on purpose
+    let outcome = MatchesModel.check(&mut (), &world).await;
+    assert!(!matches!(outcome, CheckOutcome::Held));
+
+    let boxed: Box<dyn DynInvariant<(), World>> = Box::new(MatchesModel);
+    assert!(format!("{boxed:?}").starts_with("MatchesModel"));
+    let _clone = boxed.clone();
 }

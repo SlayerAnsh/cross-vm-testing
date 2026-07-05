@@ -10,7 +10,7 @@ use core::fmt;
 use core::future::Future;
 use core::pin::Pin;
 
-use crate::{HarnessError, Verdict};
+use crate::{CheckOutcome, HarnessError, Verdict};
 
 /// Boxed future returned by the object-safe async methods in this module. Object safety
 /// forbids `async fn` in the dyn traits, so implementations return `Box::pin(async move { .. })`.
@@ -38,6 +38,28 @@ pub trait DynOp<C: 'static, W: 'static>: fmt::Debug {
 }
 
 impl<C: 'static, W: 'static> Clone for Box<dyn DynOp<C, W>> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+/// One named property that must always hold: the dyn-registry counterpart of one variant of
+/// an `Invariant` enum plus its match arm in `check`.
+///
+/// Implementors derive `Debug` (coverage buckets by the leading `Debug` token, so the struct
+/// name becomes the invariant label) and `Clone`, and write `clone_box` as
+/// `Box::new(self.clone())`. Return [`CheckOutcome::skipped`](crate::CheckOutcome::skipped)
+/// while a precondition has not happened yet.
+pub trait DynInvariant<C: 'static, W: 'static>: fmt::Debug {
+    /// Check the invariant against the current (post-operation) state. Same contract as
+    /// [`Harness::check`](crate::Harness::check).
+    fn check<'a>(&'a self, ctx: &'a mut C, world: &'a W) -> OpFuture<'a, CheckOutcome>;
+
+    /// Clone into a fresh box. Powers `Clone` for `Box<dyn DynInvariant<C, W>>`.
+    fn clone_box(&self) -> Box<dyn DynInvariant<C, W>>;
+}
+
+impl<C: 'static, W: 'static> Clone for Box<dyn DynInvariant<C, W>> {
     fn clone(&self) -> Self {
         self.clone_box()
     }
