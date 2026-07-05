@@ -11,7 +11,7 @@ use core::future::Future;
 use core::pin::Pin;
 use std::collections::BTreeMap;
 
-use crate::{CheckOutcome, HarnessError, Prng, Verdict};
+use crate::{CheckOutcome, Harness, HarnessError, Prng, Verdict};
 
 /// Boxed future returned by the object-safe async methods in this module. Object safety
 /// forbids `async fn` in the dyn traits, so implementations return `Box::pin(async move { .. })`.
@@ -181,5 +181,55 @@ impl<C: 'static, W: 'static> OpSetHarness<C, W> {
 impl<C: 'static, W: 'static> Default for OpSetHarness<C, W> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<C: 'static, W: 'static> Harness for OpSetHarness<C, W> {
+    type Ctx = C;
+    type World = W;
+    type Operation = Box<dyn DynOp<C, W>>;
+    type Invariant = Box<dyn DynInvariant<C, W>>;
+    type OpKind = &'static str;
+
+    async fn apply(
+        &self,
+        ctx: &mut C,
+        world: &mut W,
+        op: &Self::Operation,
+    ) -> Result<Verdict, HarnessError> {
+        op.apply(ctx, world).await
+    }
+
+    fn op_kinds(&self) -> Vec<&'static str> {
+        self.ops.keys().copied().collect()
+    }
+
+    fn generate_op(&self, rng: &mut Prng, world: &W, kind: &'static str) -> Self::Operation {
+        let def = self
+            .ops
+            .get(kind)
+            .unwrap_or_else(|| panic!("OpSetHarness: unknown op kind {kind:?}"));
+        def.generate(rng, world)
+    }
+
+    // An unknown kind weighs 0 (excluded) rather than panicking: a typo in a restricted
+    // run's kind list then surfaces as the runner's every-weight-zero Infra failure.
+    fn weight(&self, ctx: &C, world: &W, kind: &'static str) -> u32 {
+        self.ops.get(kind).map_or(0, |def| def.weight(ctx, world))
+    }
+
+    fn invariants(&self) -> Vec<Self::Invariant> {
+        self.invariants.clone()
+    }
+
+    async fn check(&self, ctx: &mut C, world: &W, inv: &Self::Invariant) -> CheckOutcome {
+        inv.check(ctx, world).await
+    }
+
+    async fn advance(&self, ctx: &mut C, blocks: u64) -> Result<(), HarnessError> {
+        match self.advance {
+            Some(advance) => advance(ctx, blocks).await,
+            None => Ok(()),
+        }
     }
 }

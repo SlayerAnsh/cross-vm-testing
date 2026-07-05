@@ -3,7 +3,8 @@
 //! instead of a hand-written enum harness.
 
 use harness_core::{
-    CheckOutcome, DynInvariant, DynOp, HarnessError, OpDef, OpFuture, OpSetHarness, Prng, Verdict,
+    CheckOutcome, DynInvariant, DynOp, Harness, HarnessError, OpDef, OpFuture, OpSetHarness, Prng,
+    Runner, Verdict,
 };
 
 /// The system under test: a u8 counter with saturating add and a subtract that
@@ -231,4 +232,83 @@ fn duplicate_op_name_panics() {
 fn empty_registry_constructs_via_default() {
     let _h: OpSetHarness<(), World> = OpSetHarness::default();
     let _h = build_harness();
+}
+
+#[test]
+fn op_kinds_are_sorted_by_name() {
+    // build_harness registers "sub" before "add"; the BTreeMap must still sort.
+    assert_eq!(build_harness().op_kinds(), vec!["add", "sub"]);
+}
+
+#[tokio::test]
+async fn fuzz_opset_counter() {
+    let mut r = Runner::fuzz(build_harness(), 42);
+    r.setup((), fresh_world());
+    let report = r.run(200, None, 1).await;
+    assert!(report.passed(), "{:?}", report.failure);
+    assert_eq!(report.steps, 200);
+}
+
+#[tokio::test]
+async fn invariant_mode_opset_counter() {
+    let mut r = Runner::invariant(build_harness(), 7);
+    r.setup((), fresh_world());
+    let report = r.run(30, None, 1).await;
+    assert!(report.passed(), "{:?}", report.failure);
+    assert_eq!(report.steps, 30);
+}
+
+#[tokio::test]
+async fn scenario_run_with_boxed_ops() {
+    let mut r = Runner::scenario(build_harness(), 0);
+    r.setup((), fresh_world());
+    // Sub(200) on a model of 3 is a legitimate rejection, not a failure.
+    let ops: Vec<Box<dyn DynOp<(), World>>> = vec![
+        Box::new(Add { n: 1 }),
+        Box::new(Add { n: 2 }),
+        Box::new(Sub { n: 200 }),
+        Box::new(Add { n: 3 }),
+    ];
+    let report = r.run_scenario(ops).await;
+    assert!(report.passed(), "{:?}", report.failure);
+    assert_eq!(r.world().model, 6);
+}
+
+#[tokio::test]
+async fn zero_weight_gates_sub_until_first_add() {
+    let mut r = Runner::fuzz(build_harness(), 3);
+    r.setup((), fresh_world());
+    let report = r.run(50, None, 1).await;
+    assert!(report.passed(), "{:?}", report.failure);
+    // The model starts at 0, so "sub" weighs 0 at the first draw: op 1 must be an Add.
+    assert_eq!(r.world().first_op, Some("Add"));
+}
+
+#[tokio::test]
+async fn restricted_run_draws_only_named_kind() {
+    let mut r = Runner::fuzz(build_harness(), 11);
+    r.setup((), fresh_world());
+    let report = r.run(20, Some(&["add"]), 1).await;
+    assert!(report.passed(), "{:?}", report.failure);
+    assert_eq!(r.world().first_op, Some("Add"));
+}
+
+fn bump<'a>(ctx: &'a mut u64, blocks: u64) -> OpFuture<'a, Result<(), HarnessError>> {
+    Box::pin(async move {
+        *ctx += blocks;
+        Ok(())
+    })
+}
+
+#[tokio::test]
+async fn advance_hook_runs_when_set_and_defaults_to_noop() {
+    let with_hook: OpSetHarness<u64, World> = OpSetHarness::new().with_advance(bump);
+    let mut ctx = 0u64;
+    with_hook.advance(&mut ctx, 3).await.expect("advance");
+    assert_eq!(ctx, 3);
+
+    let without: OpSetHarness<u64, World> = OpSetHarness::new();
+    let mut ctx = 0u64;
+    without.advance(&mut ctx, 3).await.expect("advance");
+    assert_eq!(ctx, 0);
 }
