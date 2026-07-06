@@ -48,32 +48,6 @@ const CHAINS: [(&str, &str); 3] = [
     ("solana", "solana-localnet"),
 ];
 
-/// One action. Chains selected by string label, matching how `MultiChainEnv` keys its chains.
-#[derive(Clone, Debug)]
-enum PingPongOp {
-    /// Send a ping from `src` to `dst`'s port.
-    Ping { src: String, dst: String },
-    /// One relay tick: deliver the packets pending right now (receive, then acknowledge), and
-    /// stop. Events emitted this tick are left for the next Relay.
-    Relay,
-}
-
-/// The data-free kinds of [`PingPongOp`], for per-kind fuzzing.
-#[derive(Clone, Copy, Debug)]
-enum PingPongOpKind {
-    Ping,
-    Relay,
-}
-
-#[derive(Clone, Debug)]
-enum PingPongInv {
-    /// Every contract's on-chain counters match what the ledger attributes to its port.
-    StatsMatchLedger,
-    /// No causally-impossible packet event was ever recorded (e.g. a `ReceivePacket` for a
-    /// packet that was never sent). Catches a contract emitting a bogus lifecycle event.
-    NoOrphanEvents,
-}
-
 /// Persisted state for one run: per-chain deployed account and port, the shared ledger, and the
 /// bridge (port registry + the same ledger). No chains or contract handles live here.
 struct PingPongWorld {
@@ -84,146 +58,207 @@ struct PingPongWorld {
     bridge: Bridge,
 }
 
-struct PingPongHarness;
+/// Rebuild a `PingPong` handle bound to the deployed instance on `label`. The chain is cloned
+/// out of the env (shared state), so the handle drives the one live contract.
+fn pp_handle(ctx: &Ctx, world: &PingPongWorld, label: &str) -> Result<PingPong, HarnessError> {
+    let chain = ctx.chain(label)?;
+    let account = world
+        .account
+        .get(label)
+        .cloned()
+        .ok_or_else(|| HarnessError::infra(format!("no ping-pong deployed on {label}")))?;
+    Ok(PingPong::instance(chain, account))
+}
 
-impl PingPongHarness {
-    /// Rebuild a `PingPong` handle bound to the deployed instance on `label`. The chain is cloned
-    /// out of the env (shared state), so the handle drives the one live contract.
-    fn pp(ctx: &Ctx, world: &PingPongWorld, label: &str) -> Result<PingPong, HarnessError> {
-        let chain = ctx.chain(label)?;
-        let account = world
-            .account
-            .get(label)
-            .cloned()
-            .ok_or_else(|| HarnessError::infra(format!("no ping-pong deployed on {label}")))?;
-        Ok(PingPong::instance(chain, account))
+/// Send a ping from `src` to `dst`'s port.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Ping {
+    src: String,
+    dst: String,
+}
+
+impl DynOp<Ctx, PingPongWorld> for Ping {
+    fn kind(&self) -> &'static str {
+        "ping"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a mut Ctx,
+        w: &'a mut PingPongWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            let dst_port = w
+                .port
+                .get(&self.dst)
+                .cloned()
+                .ok_or_else(|| HarnessError::infra(format!("no port for {}", self.dst)))?;
+            let pp = pp_handle(ctx, w, &self.src)?;
+            let resp = pp
+                .ping("alice", dst_port)
+                .await
+                .map_err(HarnessError::infra)?;
+            let emitted = parse_packets(resp.kind(), resp.raw());
+            w.ledger.borrow_mut().record_all(emitted);
+            Ok(Verdict::Accepted)
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<Ctx, PingPongWorld>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
     }
 }
 
-impl Harness for PingPongHarness {
-    type Ctx = Ctx;
-    type World = PingPongWorld;
-    type Operation = PingPongOp;
-    type Invariant = PingPongInv;
-    type OpKind = PingPongOpKind;
+/// One relay tick: deliver the packets pending right now (receive, then acknowledge), and stop.
+/// Events emitted this tick are left for the next relay.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Relay {}
 
-    async fn apply(
-        &self,
-        ctx: &mut Ctx,
-        w: &mut PingPongWorld,
-        op: &PingPongOp,
-    ) -> Result<Verdict, HarnessError> {
-        match op {
-            PingPongOp::Ping { src, dst } => {
-                let dst_port = w
-                    .port
-                    .get(dst)
-                    .cloned()
-                    .ok_or_else(|| HarnessError::infra(format!("no port for {dst}")))?;
-                let pp = Self::pp(ctx, w, src)?;
-                let resp = pp
-                    .ping("alice", dst_port)
-                    .await
-                    .map_err(HarnessError::infra)?;
-                let emitted = parse_packets(resp.kind(), resp.raw());
-                w.ledger.borrow_mut().record_all(emitted);
+impl DynOp<Ctx, PingPongWorld> for Relay {
+    fn kind(&self) -> &'static str {
+        "relay"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a mut Ctx,
+        w: &'a mut PingPongWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            // One tick only: relay the packets pending right now. The Receive/WriteAck/Ack this
+            // emits are parsed and recorded (the bridge shares `w.ledger`) but left for the next
+            // relay, so a packet steps through its stages across ticks.
+            w.bridge
+                .relay_tick(&mut ctx.env)
+                .await
+                .map_err(HarnessError::infra)?;
+            Ok(Verdict::Accepted)
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<Ctx, PingPongWorld>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
+    }
+}
+
+/// No causally-impossible packet event was ever recorded (e.g. a `ReceivePacket` for a packet
+/// that was never sent). Catches a contract emitting a bogus lifecycle event.
+#[derive(Clone, Debug)]
+struct NoOrphanEvents;
+
+impl DynInvariant<Ctx, PingPongWorld> for NoOrphanEvents {
+    fn check<'a>(&'a self, _ctx: &'a mut Ctx, w: &'a PingPongWorld) -> OpFuture<'a, CheckOutcome> {
+        Box::pin(async move {
+            let orphans = w.ledger.borrow().orphans();
+            if orphans.is_empty() {
+                CheckOutcome::Held
+            } else {
+                CheckOutcome::violated(orphans.join("; "))
             }
-            PingPongOp::Relay => {
-                // One tick only: relay the packets pending right now. The Receive/WriteAck/Ack
-                // this emits are parsed and recorded (the bridge shares `w.ledger`) but left for
-                // the next Relay, so a packet steps through its stages across ticks.
-                w.bridge
-                    .relay_tick(&mut ctx.env)
-                    .await
-                    .map_err(HarnessError::infra)?;
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynInvariant<Ctx, PingPongWorld>> {
+        Box::new(self.clone())
+    }
+}
+
+/// Every contract's on-chain counters match what the ledger attributes to its port.
+#[derive(Clone, Debug)]
+struct StatsMatchLedger;
+
+impl DynInvariant<Ctx, PingPongWorld> for StatsMatchLedger {
+    fn check<'a>(&'a self, ctx: &'a mut Ctx, w: &'a PingPongWorld) -> OpFuture<'a, CheckOutcome> {
+        Box::pin(async move {
+            // Snapshot the ledger-derived expectations under a short borrow, then compare to
+            // on-chain stats without holding the borrow across an await.
+            let expected: Vec<(String, u64, u64)> = {
+                let l = w.ledger.borrow();
+                w.labels
+                    .iter()
+                    .map(|label| {
+                        let port = &w.port[label];
+                        let sent = l.count_for_source(PacketKind::Send, port) as u64;
+                        let acked = l.count_for_source(PacketKind::Ack, port) as u64;
+                        (label.clone(), sent, acked)
+                    })
+                    .collect()
+            };
+            for (label, sent, acked) in expected {
+                let pp = match pp_handle(ctx, w, &label) {
+                    Ok(p) => p,
+                    Err(e) => return CheckOutcome::violated(e.to_string()),
+                };
+                let stats = match pp.stats().await {
+                    Ok(s) => s,
+                    Err(e) => return CheckOutcome::violated(e.to_string()),
+                };
+                if stats.pings_sent != sent {
+                    return CheckOutcome::violated(format!(
+                        "{label}: pings_sent on-chain {} != ledger {sent}",
+                        stats.pings_sent
+                    ));
+                }
+                if stats.pongs_received != acked {
+                    return CheckOutcome::violated(format!(
+                        "{label}: pongs_received on-chain {} != ledger {acked}",
+                        stats.pongs_received
+                    ));
+                }
             }
-        }
-        Ok(Verdict::Accepted)
+            CheckOutcome::Held
+        })
     }
 
-    fn op_kinds(&self) -> Vec<PingPongOpKind> {
-        vec![PingPongOpKind::Ping, PingPongOpKind::Relay]
+    fn clone_box(&self) -> Box<dyn DynInvariant<Ctx, PingPongWorld>> {
+        Box::new(self.clone())
     }
+}
 
-    fn generate_op(&self, rng: &mut Prng, w: &PingPongWorld, kind: PingPongOpKind) -> PingPongOp {
-        match kind {
-            PingPongOpKind::Relay => PingPongOp::Relay,
-            PingPongOpKind::Ping => {
-                let src = w.labels[rng.index(w.labels.len())].clone();
-                let dst = w.labels[rng.index(w.labels.len())].clone();
-                PingPongOp::Ping { src, dst }
-            }
-        }
-    }
+fn gen_ping(rng: &mut Prng, w: &PingPongWorld) -> Box<dyn DynOp<Ctx, PingPongWorld>> {
+    let src = w.labels[rng.index(w.labels.len())].clone();
+    let dst = w.labels[rng.index(w.labels.len())].clone();
+    Box::new(Ping { src, dst })
+}
 
-    // Bias toward pings (relay roughly every third op) so packets accumulate and then drain.
-    fn weight(&self, _ctx: &Ctx, _w: &PingPongWorld, kind: PingPongOpKind) -> u32 {
-        match kind {
-            PingPongOpKind::Ping => 2,
-            PingPongOpKind::Relay => 1,
-        }
-    }
+fn gen_relay(_rng: &mut Prng, _w: &PingPongWorld) -> Box<dyn DynOp<Ctx, PingPongWorld>> {
+    Box::new(Relay {})
+}
 
-    fn invariants(&self) -> Vec<PingPongInv> {
-        vec![PingPongInv::StatsMatchLedger, PingPongInv::NoOrphanEvents]
-    }
+// Bias toward pings (relay roughly every third op) so packets accumulate and then drain.
+fn weight_ping(_ctx: &Ctx, _w: &PingPongWorld) -> u32 {
+    2
+}
 
-    async fn advance(&self, ctx: &mut Ctx, blocks: u64) -> Result<(), HarnessError> {
+fn advance(ctx: &mut Ctx, blocks: u64) -> OpFuture<'_, Result<(), HarnessError>> {
+    Box::pin(async move {
         ctx.advance_all(blocks).await;
         Ok(())
-    }
+    })
+}
 
-    async fn check(&self, ctx: &mut Ctx, w: &PingPongWorld, inv: &PingPongInv) -> CheckOutcome {
-        match inv {
-            PingPongInv::NoOrphanEvents => {
-                let orphans = w.ledger.borrow().orphans();
-                if orphans.is_empty() {
-                    CheckOutcome::Held
-                } else {
-                    CheckOutcome::violated(orphans.join("; "))
-                }
-            }
-            PingPongInv::StatsMatchLedger => {
-                // Snapshot the ledger-derived expectations under a short borrow, then compare to
-                // on-chain stats without holding the borrow across an await.
-                let expected: Vec<(String, u64, u64)> = {
-                    let l = w.ledger.borrow();
-                    w.labels
-                        .iter()
-                        .map(|label| {
-                            let port = &w.port[label];
-                            let sent = l.count_for_source(PacketKind::Send, port) as u64;
-                            let acked = l.count_for_source(PacketKind::Ack, port) as u64;
-                            (label.clone(), sent, acked)
-                        })
-                        .collect()
-                };
-                for (label, sent, acked) in expected {
-                    let pp = match Self::pp(ctx, w, &label) {
-                        Ok(p) => p,
-                        Err(e) => return CheckOutcome::violated(e.to_string()),
-                    };
-                    let stats = match pp.stats().await {
-                        Ok(s) => s,
-                        Err(e) => return CheckOutcome::violated(e.to_string()),
-                    };
-                    if stats.pings_sent != sent {
-                        return CheckOutcome::violated(format!(
-                            "{label}: pings_sent on-chain {} != ledger {sent}",
-                            stats.pings_sent
-                        ));
-                    }
-                    if stats.pongs_received != acked {
-                        return CheckOutcome::violated(format!(
-                            "{label}: pongs_received on-chain {} != ledger {acked}",
-                            stats.pongs_received
-                        ));
-                    }
-                }
-                CheckOutcome::Held
-            }
-        }
-    }
+/// Assemble the ping-pong relayer harness.
+fn ping_pong_harness() -> OpSetHarness<Ctx, PingPongWorld> {
+    OpSetHarness::new()
+        .register(
+            OpDef::new("ping", gen_ping, decode_json_op::<Ping, _, _>).with_weight(weight_ping),
+        )
+        .register(OpDef::new(
+            "relay",
+            gen_relay,
+            decode_json_op::<Relay, _, _>,
+        ))
+        .invariant(Box::new(StatsMatchLedger))
+        .invariant(Box::new(NoOrphanEvents))
+        .with_advance(advance)
 }
 
 /// Build the live env (a ping-pong deployed on all three chains) and the primed world with the
@@ -278,17 +313,17 @@ async fn ping_pong_setup(_seed: u64) -> Result<(Ctx, PingPongWorld), HarnessErro
 #[tokio::test]
 async fn ping_pong_round_trip_scenario() {
     let (ctx, world) = ping_pong_setup(0).await.expect("setup");
-    let mut r = Runner::scenario(PingPongHarness, 0);
+    let mut r = Runner::scenario(ping_pong_harness(), 0);
     r.setup(ctx, world);
 
     // After the ping + first tick: Send, Receive, WriteAck recorded, but no Ack yet.
     let report = r
         .run_scenario(vec![
-            PingPongOp::Ping {
+            DynOperation(Box::new(Ping {
                 src: "eth".to_string(),
                 dst: "osmosis".to_string(),
-            },
-            PingPongOp::Relay,
+            })),
+            DynOperation(Box::new(Relay {})),
         ])
         .await;
     assert!(report.passed(), "{:?}", report.failure);
@@ -301,7 +336,7 @@ async fn ping_pong_round_trip_scenario() {
     }
 
     // Second tick acknowledges; now the packet is fully settled.
-    let report = r.run_case(PingPongOp::Relay).await;
+    let report = r.run_case(DynOperation(Box::new(Relay {}))).await;
     assert!(report.passed(), "{:?}", report.failure);
     let l = r.world().ledger.borrow();
     assert_eq!(l.count(PacketKind::Ack), 1, "ack after tick 2");
@@ -315,8 +350,10 @@ async fn ping_pong_round_trip_scenario() {
 }
 
 #[cfg(feature = "invariant")]
-#[invariant_runner(harness = PingPongHarness, seed = 7)]
-async fn ping_pong_invariant_mode(#[runner] mut r: InvariantRunner<PingPongHarness>) {
+#[invariant_runner(harness = ping_pong_harness(), seed = 7)]
+async fn ping_pong_invariant_mode(
+    #[runner] mut r: InvariantRunner<OpSetHarness<Ctx, PingPongWorld>>,
+) {
     let (ctx, world) = ping_pong_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
     let report = r.run(30, None, 1).await;
@@ -325,8 +362,10 @@ async fn ping_pong_invariant_mode(#[runner] mut r: InvariantRunner<PingPongHarne
 }
 
 #[cfg(feature = "endurance")]
-#[endurance_runner(harness = PingPongHarness, seed = 1)]
-async fn ping_pong_endurance_mode(#[runner] mut r: EnduranceRunner<PingPongHarness>) {
+#[endurance_runner(harness = ping_pong_harness(), seed = 1)]
+async fn ping_pong_endurance_mode(
+    #[runner] mut r: EnduranceRunner<OpSetHarness<Ctx, PingPongWorld>>,
+) {
     let (ctx, world) = ping_pong_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
     let report = r
@@ -357,8 +396,8 @@ async fn ping_pong_endurance_mode(#[runner] mut r: EnduranceRunner<PingPongHarne
 
 // Fans out into `ping_pong_fuzz_case_0` .. `ping_pong_fuzz_case_7`, each its own libtest entry.
 #[cfg(feature = "fuzz")]
-#[fuzz_runner(harness = PingPongHarness, seed = 7, cases = 8)]
-async fn ping_pong_fuzz(#[runner] mut r: FuzzRunner<PingPongHarness>) {
+#[fuzz_runner(harness = ping_pong_harness(), seed = 7, cases = 8)]
+async fn ping_pong_fuzz(#[runner] mut r: FuzzRunner<OpSetHarness<Ctx, PingPongWorld>>) {
     let (ctx, world) = ping_pong_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
     let report = r.run(25, None, 1).await;

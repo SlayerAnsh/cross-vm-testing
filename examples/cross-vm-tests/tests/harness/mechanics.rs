@@ -9,6 +9,12 @@
 //!
 //! The bank has no chains, so its [`Ctx`] is an empty `MultiChainEnv` it never touches; the
 //! `World` is pure in-memory state. This isolates the runner's control flow from any VM.
+//!
+//! This file pins the runner contract through a raw `Harness` impl (the `Bank`), driving `Runner`
+//! directly; it never registers through the CLI, so it carries no config codec. It is not the
+//! developer-facing pattern for defining operations, which is `OpSetHarness` plus `DynOp` structs
+//! (see the `counter`/`ping_pong` harnesses in this directory, or `tests/opset.rs` in
+//! `harness-core`).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
