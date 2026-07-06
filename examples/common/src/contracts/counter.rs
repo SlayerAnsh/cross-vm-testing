@@ -8,8 +8,9 @@
 //! `unimplemented!()` hooks cover the VMs it never dispatches). Bindings come from
 //! [`crate::mocks::counter`].
 //!
-//! [`CounterHarness`] drives it: `apply` performs an op and advances a shadow model, `check` asserts
-//! the on-chain count matches. [`setup_on`] builds the live env for the attribute-macro tests;
+//! [`counter_harness`] assembles it: the `increment`/`increment_twice` ops each advance a shadow
+//! model, and the `CountMatchesModel` invariant asserts the on-chain count matches. [`setup_on`]
+//! builds the live env for the attribute-macro tests;
 //! [`config_setup_with`] is the config-driven counterpart the `cross-vm` CLI registers, honoring a
 //! `[[chain]]` declaration and falling back to a caller-supplied preset otherwise. Both take the
 //! per-crate variance (chain label + preset) as parameters, since the VM presets are only in scope
@@ -267,35 +268,6 @@ impl Counter {
     }
 }
 
-/// One counter action. Externally tagged (serde default) so a TOML scenario step writes the unit
-/// variant as a bare string, e.g. `op = "Increment"`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum CounterOp {
-    /// Increment the count by one.
-    Increment,
-    /// Increment the count twice (exercises multi-call ops and a +2 model step).
-    IncrementTwice,
-}
-
-/// The data-free kinds of [`CounterOp`], for per-kind fuzzing (`kinds = [...]` / `weights = {...}`).
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub enum CounterOpKind {
-    /// See [`CounterOp::Increment`].
-    Increment,
-    /// See [`CounterOp::IncrementTwice`].
-    IncrementTwice,
-}
-
-/// The invariants [`CounterHarness`] checks after each op.
-///
-/// `pub` only because it is `Harness::Invariant` for the `pub` [`CounterHarness`]; its variants
-/// carry no data callers need.
-#[derive(Clone, Debug)]
-pub enum CounterInv {
-    /// The on-chain count equals the shadow model (skipped until the first increment lands).
-    CountMatchesModel,
-}
-
 /// Persisted state: where the counter is deployed, the shadow count, and the invariant precondition.
 pub struct CounterWorld {
     label: String,
@@ -304,93 +276,148 @@ pub struct CounterWorld {
     any_incremented: bool,
 }
 
-/// The single-VM counter [`Harness`]: increments the counter and checks the on-chain count against
-/// a shadow model. One `apply` drives the scenario, fuzz, invariant, and endurance modes.
-pub struct CounterHarness;
+/// Rebuild a `Counter` handle bound to the deployed instance.
+fn counter_handle(ctx: &Ctx, world: &CounterWorld) -> Result<Counter, HarnessError> {
+    let chain = ctx.chain(&world.label)?;
+    Ok(Counter::instance(chain, world.addr.clone()))
+}
 
-impl CounterHarness {
-    /// Rebuild a `Counter` handle bound to the deployed instance.
-    fn counter(ctx: &Ctx, world: &CounterWorld) -> Result<Counter, HarnessError> {
-        let chain = ctx.chain(&world.label)?;
-        Ok(Counter::instance(chain, world.addr.clone()))
+/// Shared body of both ops: increment `times` times, updating the shadow model.
+async fn increment_times(
+    ctx: &mut Ctx,
+    w: &mut CounterWorld,
+    times: u32,
+) -> Result<Verdict, HarnessError> {
+    let counter = counter_handle(ctx, w)?;
+    for _ in 0..times {
+        counter
+            .increment(SIGNER)
+            .await
+            .map_err(HarnessError::infra)?;
+        w.model += 1;
+    }
+    w.any_incremented = true;
+    Ok(Verdict::Accepted)
+}
+
+/// Increment the count by one.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Increment {}
+
+impl DynOp<Ctx, CounterWorld> for Increment {
+    fn kind(&self) -> &'static str {
+        "increment"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a mut Ctx,
+        w: &'a mut CounterWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(increment_times(ctx, w, 1))
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<Ctx, CounterWorld>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
     }
 }
 
-impl Harness for CounterHarness {
-    type Ctx = Ctx;
-    type World = CounterWorld;
-    type Operation = CounterOp;
-    type Invariant = CounterInv;
-    type OpKind = CounterOpKind;
+/// Increment the count twice (exercises multi-call ops and a +2 model step).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IncrementTwice {}
 
-    async fn apply(
-        &self,
-        ctx: &mut Ctx,
-        w: &mut CounterWorld,
-        op: &CounterOp,
-    ) -> Result<Verdict, HarnessError> {
-        let times = match op {
-            CounterOp::Increment => 1,
-            CounterOp::IncrementTwice => 2,
-        };
-        let counter = Self::counter(ctx, w)?;
-        for _ in 0..times {
-            counter
-                .increment(SIGNER)
-                .await
-                .map_err(HarnessError::infra)?;
-            w.model += 1;
-        }
-        w.any_incremented = true;
-        Ok(Verdict::Accepted)
+impl DynOp<Ctx, CounterWorld> for IncrementTwice {
+    fn kind(&self) -> &'static str {
+        "increment_twice"
     }
 
-    fn op_kinds(&self) -> Vec<CounterOpKind> {
-        vec![CounterOpKind::Increment, CounterOpKind::IncrementTwice]
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a mut Ctx,
+        w: &'a mut CounterWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(increment_times(ctx, w, 2))
     }
 
-    fn generate_op(&self, _rng: &mut Prng, _w: &CounterWorld, kind: CounterOpKind) -> CounterOp {
-        match kind {
-            CounterOpKind::Increment => CounterOp::Increment,
-            CounterOpKind::IncrementTwice => CounterOp::IncrementTwice,
-        }
+    fn clone_box(&self) -> Box<dyn DynOp<Ctx, CounterWorld>> {
+        Box::new(self.clone())
     }
 
-    // Bias toward single increments (double increments drawn 1 in 4).
-    fn weight(&self, _ctx: &Ctx, _w: &CounterWorld, kind: CounterOpKind) -> u32 {
-        match kind {
-            CounterOpKind::Increment => 3,
-            CounterOpKind::IncrementTwice => 1,
-        }
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
+    }
+}
+
+/// The on-chain count equals the shadow model (skipped until the first increment lands).
+#[derive(Clone, Debug)]
+pub struct CountMatchesModel;
+
+impl DynInvariant<Ctx, CounterWorld> for CountMatchesModel {
+    fn check<'a>(&'a self, ctx: &'a mut Ctx, w: &'a CounterWorld) -> OpFuture<'a, CheckOutcome> {
+        Box::pin(async move {
+            if !w.any_incremented {
+                return CheckOutcome::skipped("no increment applied yet");
+            }
+            let counter = match counter_handle(ctx, w) {
+                Ok(c) => c,
+                Err(e) => return CheckOutcome::violated(e.to_string()),
+            };
+            match counter.count().await {
+                Ok(n) if n == w.model => CheckOutcome::Held,
+                Ok(n) => CheckOutcome::violated(format!("chain {n} != model {}", w.model)),
+                Err(e) => CheckOutcome::violated(e.to_string()),
+            }
+        })
     }
 
-    fn invariants(&self) -> Vec<CounterInv> {
-        vec![CounterInv::CountMatchesModel]
+    fn clone_box(&self) -> Box<dyn DynInvariant<Ctx, CounterWorld>> {
+        Box::new(self.clone())
     }
+}
 
-    async fn advance(&self, ctx: &mut Ctx, blocks: u64) -> Result<(), HarnessError> {
+fn gen_increment(_rng: &mut Prng, _w: &CounterWorld) -> Box<dyn DynOp<Ctx, CounterWorld>> {
+    Box::new(Increment {})
+}
+
+fn gen_increment_twice(_rng: &mut Prng, _w: &CounterWorld) -> Box<dyn DynOp<Ctx, CounterWorld>> {
+    Box::new(IncrementTwice {})
+}
+
+// Bias toward single increments (double increments drawn 1 in 4).
+fn weight_increment(_ctx: &Ctx, _w: &CounterWorld) -> u32 {
+    3
+}
+
+fn advance(ctx: &mut Ctx, blocks: u64) -> OpFuture<'_, Result<(), HarnessError>> {
+    Box::pin(async move {
         ctx.advance_all(blocks).await;
         Ok(())
-    }
+    })
+}
 
-    async fn check(&self, ctx: &mut Ctx, w: &CounterWorld, inv: &CounterInv) -> CheckOutcome {
-        match inv {
-            CounterInv::CountMatchesModel => {
-                if !w.any_incremented {
-                    return CheckOutcome::skipped("no increment applied yet");
-                }
-                let counter = match Self::counter(ctx, w) {
-                    Ok(c) => c,
-                    Err(e) => return CheckOutcome::violated(e.to_string()),
-                };
-                match counter.count().await {
-                    Ok(n) if n == w.model => CheckOutcome::Held,
-                    Ok(n) => CheckOutcome::violated(format!("chain {n} != model {}", w.model)),
-                    Err(e) => CheckOutcome::violated(e.to_string()),
-                }
-            }
-        }
-    }
+/// Assemble the counter harness: the one value the runner macros, config-driven tests, and CLI
+/// binaries all load.
+pub fn counter_harness() -> OpSetHarness<Ctx, CounterWorld> {
+    OpSetHarness::new()
+        .register(
+            OpDef::new(
+                "increment",
+                gen_increment,
+                decode_json_op::<Increment, _, _>,
+            )
+            .with_weight(weight_increment),
+        )
+        .register(OpDef::new(
+            "increment_twice",
+            gen_increment_twice,
+            decode_json_op::<IncrementTwice, _, _>,
+        ))
+        .invariant(Box::new(CountMatchesModel))
+        .with_advance(advance)
 }
 
 /// Fund the signer and deploy a fresh `Counter` on `chain` under `label`, returning the primed

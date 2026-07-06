@@ -1,13 +1,13 @@
-//! Single-VM (Solana) `Counter` adapter: re-exports the shared `Counter` wrapper + harness from
+//! Single-VM (Solana) `Counter` adapter: re-exports the shared `Counter` wrapper + harness builder from
 //! `cross-vm-common` and pins them to this crate's chain (the mock/rpc `SOLANA_DEVNET` preset under
 //! `"solana"`).
 //!
-//! Everything VM-agnostic (the `Counter` wrapper, `CounterHarness`, ops, world) now lives once in
+//! Everything VM-agnostic (the `Counter` wrapper, `counter_harness`, ops, world) now lives once in
 //! [`cross_vm_common::contracts::counter`]; only the preset + label differ per crate, so this file
 //! is just the two setup wrappers the harness/config/CLI entry points call.
 
 pub use cross_vm_common::contracts::counter::{
-    Counter, CounterHarness, CounterInv, CounterOp, CounterOpKind, CounterWorld,
+    counter_harness, Counter, CounterWorld, Increment, IncrementTwice,
 };
 
 use cross_vm_common::contracts::counter::{config_setup_with, setup_on};

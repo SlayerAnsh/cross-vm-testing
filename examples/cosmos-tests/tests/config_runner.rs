@@ -6,11 +6,11 @@
 
 use cross_vm_macros::config_runner;
 
-use cosmos_tests::counter::{counter_config_setup, CounterHarness};
+use cosmos_tests::counter::{counter_config_setup, counter_harness};
 
 #[config_runner(
     config = "counter.cross-vm.toml",
-    harness = CounterHarness,
+    harness = counter_harness(),
     setup = counter_config_setup,
     profile = "smoke"
 )]

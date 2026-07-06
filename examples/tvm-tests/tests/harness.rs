@@ -6,21 +6,21 @@ use cross_vm_framework::prelude::*;
 #[cfg(feature = "endurance")]
 use std::time::Duration;
 
-use tvm_tests::counter::{counter_setup, CounterHarness, CounterOp};
+use tvm_tests::counter::{counter_harness, counter_setup, CounterWorld, IncrementTwice};
 
 // Style (a), always-on: a concrete scenario step through a `ScenarioRunner`.
 #[tokio::test]
 async fn counter_scenario_increments() {
     let (ctx, world) = counter_setup(0).await.expect("setup");
-    let mut r = Runner::scenario(CounterHarness, 0);
+    let mut r = Runner::scenario(counter_harness(), 0);
     r.setup(ctx, world);
-    let report = r.run_case(CounterOp::IncrementTwice).await;
+    let report = r.run_case(DynOperation(Box::new(IncrementTwice {}))).await;
     assert!(report.passed(), "{:?}", report.failure);
 }
 
 #[cfg(feature = "fuzz")]
-#[fuzz_runner(harness = CounterHarness, seed = 7, cases = 4)]
-async fn counter_fuzz(#[runner] mut r: FuzzRunner<CounterHarness>) {
+#[fuzz_runner(harness = counter_harness(), seed = 7, cases = 4)]
+async fn counter_fuzz(#[runner] mut r: FuzzRunner<OpSetHarness<Ctx, CounterWorld>>) {
     let (ctx, world) = counter_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
     let report = r.run(25, None, 1).await;
@@ -28,8 +28,8 @@ async fn counter_fuzz(#[runner] mut r: FuzzRunner<CounterHarness>) {
 }
 
 #[cfg(feature = "invariant")]
-#[invariant_runner(harness = CounterHarness, seed = 7)]
-async fn counter_invariant_mode(#[runner] mut r: InvariantRunner<CounterHarness>) {
+#[invariant_runner(harness = counter_harness(), seed = 7)]
+async fn counter_invariant_mode(#[runner] mut r: InvariantRunner<OpSetHarness<Ctx, CounterWorld>>) {
     let (ctx, world) = counter_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
     let report = r.run(30, None, 1).await;
@@ -38,8 +38,8 @@ async fn counter_invariant_mode(#[runner] mut r: InvariantRunner<CounterHarness>
 }
 
 #[cfg(feature = "endurance")]
-#[endurance_runner(harness = CounterHarness, seed = 1)]
-async fn counter_endurance_mode(#[runner] mut r: EnduranceRunner<CounterHarness>) {
+#[endurance_runner(harness = counter_harness(), seed = 1)]
+async fn counter_endurance_mode(#[runner] mut r: EnduranceRunner<OpSetHarness<Ctx, CounterWorld>>) {
     let (ctx, world) = counter_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
     let report = r
