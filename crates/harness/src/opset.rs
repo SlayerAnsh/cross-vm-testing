@@ -20,10 +20,17 @@ pub type OpFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 /// One operation instance: its data plus its own apply. The dyn-registry counterpart of one
 /// variant of an `Operation` enum plus that variant's match arm.
 ///
-/// Implementors derive `Debug` (the failure dump and per-op stats bucket by the leading
-/// `Debug` token, so the struct name becomes the op label) and `Clone`, and write `clone_box`
-/// as `Box::new(self.clone())`.
+/// Implementors are named-field structs (possibly empty, `struct Ping {}`) that derive
+/// `Debug`, `Clone`, and `serde::Serialize`/`serde::Deserialize`. `Debug` supplies the failure
+/// dump and per-op stats label; the serde derives back `to_data` and the registered decoder so
+/// the op flows through config, scenario, and replay. Write `clone_box` as
+/// `Box::new(self.clone())` and `to_data` as `serde_json::to_value(self).expect("op data serializes")`.
 pub trait DynOp<C: 'static, W: 'static>: fmt::Debug {
+    /// The registered kind name of this op: exactly the name its [`OpDef`] is registered
+    /// under (lowercase snake_case by convention, e.g. `"add"`). Config `kinds`/`weights`
+    /// keys, scenario `op` tags, stats buckets, and replay artifacts all use this name.
+    fn kind(&self) -> &'static str;
+
     /// Apply this operation against the live `ctx`, updating the persisted `world`. Same
     /// contract as [`Harness::apply`](crate::Harness::apply): `Ok` classifies the SUT response,
     /// `Err` is a confirmed bug or an infrastructure failure.
@@ -36,11 +43,40 @@ pub trait DynOp<C: 'static, W: 'static>: fmt::Debug {
     /// Clone into a fresh box. Powers `Clone` for `Box<dyn DynOp<C, W>>`, which the runner
     /// needs for replay and shrinking.
     fn clone_box(&self) -> Box<dyn DynOp<C, W>>;
+
+    /// This op's own data as a JSON value, for reports and replay artifacts. Implementors
+    /// derive `serde::Serialize` and write
+    /// `serde_json::to_value(self).expect("op data serializes")`.
+    fn to_data(&self) -> serde_json::Value;
 }
 
 impl<C: 'static, W: 'static> Clone for Box<dyn DynOp<C, W>> {
     fn clone(&self) -> Self {
         self.clone_box()
+    }
+}
+
+/// The `Operation` type of [`OpSetHarness`]: a boxed [`DynOp`] whose `Debug` leads with the
+/// registered kind name. Stats, coverage, and failure dumps bucket by the leading `Debug`
+/// token, so they use the same name configs use (`add`, not `Add`).
+pub struct DynOperation<C: 'static, W: 'static>(pub Box<dyn DynOp<C, W>>);
+
+impl<C: 'static, W: 'static> Clone for DynOperation<C, W> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone_box())
+    }
+}
+
+impl<C: 'static, W: 'static> fmt::Debug for DynOperation<C, W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {:?}", self.0.kind(), self.0)
+    }
+}
+
+impl<C: 'static, W: 'static> core::ops::Deref for DynOperation<C, W> {
+    type Target = dyn DynOp<C, W>;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
     }
 }
 
@@ -71,6 +107,25 @@ impl<C: 'static, W: 'static> Clone for Box<dyn DynInvariant<C, W>> {
 /// pointer keeps generation deterministic in `(seed, world)`.
 pub type GenerateFn<C, W> = fn(&mut Prng, &W) -> Box<dyn DynOp<C, W>>;
 
+/// Decoder stored in an [`OpDef`]: build one op of this kind from the data part of a config
+/// scenario step or replay artifact. `op = { add = { n = 5 } }` passes `{"n": 5}` here;
+/// `op = "ping"` passes `{}`. A plain fn pointer, like [`GenerateFn`].
+pub type DecodeFn<C, W> = fn(serde_json::Value) -> Result<Box<dyn DynOp<C, W>>, String>;
+
+/// The [`DecodeFn`] for any op struct that derives `serde::Deserialize`. Registration is
+/// `OpDef::new("add", gen_add, decode_json_op::<Add, _, _>)`.
+pub fn decode_json_op<T, C, W>(data: serde_json::Value) -> Result<Box<dyn DynOp<C, W>>, String>
+where
+    T: DynOp<C, W> + serde::de::DeserializeOwned + 'static,
+    C: 'static,
+    W: 'static,
+{
+    match serde_json::from_value::<T>(data) {
+        Ok(op) => Ok(Box::new(op)),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Dynamic selection weight stored in an [`OpDef`] (mirrors
 /// [`Harness::weight`](crate::Harness::weight)): `0` excludes the kind while the state makes
 /// it meaningless. Must be deterministic in `(ctx, world)`; it receives no rng by design.
@@ -81,6 +136,7 @@ pub type WeightFn<C, W> = fn(&C, &W) -> u32;
 pub struct OpDef<C: 'static, W: 'static> {
     name: &'static str,
     generate: GenerateFn<C, W>,
+    decode: DecodeFn<C, W>,
     weight: WeightFn<C, W>,
 }
 
@@ -89,11 +145,14 @@ fn weight_one<C, W>(_ctx: &C, _world: &W) -> u32 {
 }
 
 impl<C: 'static, W: 'static> OpDef<C, W> {
-    /// A new kind descriptor with the default weight of `1` (a uniform mix).
-    pub fn new(name: &'static str, generate: GenerateFn<C, W>) -> Self {
+    /// A new kind descriptor with the default weight of `1` (a uniform mix). `decode` builds
+    /// this kind from a config scenario step or replay artifact; for a `Deserialize`-deriving
+    /// op struct pass [`decode_json_op::<T, _, _>`](decode_json_op).
+    pub fn new(name: &'static str, generate: GenerateFn<C, W>, decode: DecodeFn<C, W>) -> Self {
         Self {
             name,
             generate,
+            decode,
             weight: weight_one::<C, W>,
         }
     }
@@ -112,7 +171,28 @@ impl<C: 'static, W: 'static> OpDef<C, W> {
 
     /// Build one random op of this kind (calls the stored generator).
     pub fn generate(&self, rng: &mut Prng, world: &W) -> Box<dyn DynOp<C, W>> {
-        (self.generate)(rng, world)
+        let op = (self.generate)(rng, world);
+        debug_assert_eq!(
+            op.kind(),
+            self.name,
+            "generated op's kind() must equal its registered OpDef name"
+        );
+        op
+    }
+
+    /// Build one op of this kind from config data (calls the stored decoder), verifying the
+    /// decoded op's `kind()` matches this def (a mismatch is a registration bug surfaced as a
+    /// config error rather than a silent mislabel).
+    pub fn decode(&self, data: serde_json::Value) -> Result<Box<dyn DynOp<C, W>>, String> {
+        let op = (self.decode)(data)?;
+        if op.kind() != self.name {
+            return Err(format!(
+                "decoded op reports kind `{}` but is registered as `{}`",
+                op.kind(),
+                self.name
+            ));
+        }
+        Ok(op)
     }
 
     /// The kind's dynamic weight for the current state (calls the stored weight fn).
@@ -189,7 +269,7 @@ impl<C: 'static, W: 'static> Default for OpSetHarness<C, W> {
 impl<C: 'static, W: 'static> Harness for OpSetHarness<C, W> {
     type Ctx = C;
     type World = W;
-    type Operation = Box<dyn DynOp<C, W>>;
+    type Operation = DynOperation<C, W>;
     type Invariant = Box<dyn DynInvariant<C, W>>;
     type OpKind = &'static str;
 
@@ -199,7 +279,7 @@ impl<C: 'static, W: 'static> Harness for OpSetHarness<C, W> {
         world: &mut W,
         op: &Self::Operation,
     ) -> Result<Verdict, HarnessError> {
-        op.apply(ctx, world).await
+        op.0.apply(ctx, world).await
     }
 
     // An empty registry is a construction bug, not a runtime condition (like a duplicate kind):
@@ -217,7 +297,7 @@ impl<C: 'static, W: 'static> Harness for OpSetHarness<C, W> {
             .ops
             .get(kind)
             .unwrap_or_else(|| panic!("OpSetHarness: unknown op kind {kind:?}"));
-        def.generate(rng, world)
+        DynOperation(def.generate(rng, world))
     }
 
     // An unknown kind weighs 0 (excluded) rather than panicking: a typo in a restricted
@@ -239,5 +319,72 @@ impl<C: 'static, W: 'static> Harness for OpSetHarness<C, W> {
             Some(advance) => advance(ctx, blocks).await,
             None => Ok(()),
         }
+    }
+}
+
+/// The config/CLI codec seam: maps registered kind names and externally tagged op payloads
+/// between config documents and a harness's own types. `harness-cli`'s registry requires
+/// this instead of serde bounds on `Operation`/`OpKind`. [`OpSetHarness`] implements it;
+/// developers never implement it by hand.
+pub trait ConfigOps: Harness {
+    /// Resolve a config kind name (`kinds = ["add"]`, `weights = { add = 3 }`) to this
+    /// harness's `OpKind`. Errors list the available names.
+    fn parse_kind(&self, name: &str) -> Result<Self::OpKind, String>;
+
+    /// Decode one externally tagged op value: a bare kind-name string (`op = "ping"`) or a
+    /// single-key table (`op = { add = { n = 5 } }`).
+    fn decode_op(&self, value: &serde_json::Value) -> Result<Self::Operation, String>;
+
+    /// Encode one op back to the same externally tagged shape, for reports and replay
+    /// artifacts. Always the single-key object form, `{"add": {"n": 5}}`.
+    fn encode_op(&self, op: &Self::Operation) -> serde_json::Value;
+}
+
+impl<C: 'static, W: 'static> OpSetHarness<C, W> {
+    fn kind_names(&self) -> String {
+        self.ops.keys().copied().collect::<Vec<_>>().join(", ")
+    }
+}
+
+impl<C: 'static, W: 'static> ConfigOps for OpSetHarness<C, W> {
+    fn parse_kind(&self, name: &str) -> Result<&'static str, String> {
+        self.ops
+            .get_key_value(name)
+            .map(|(k, _)| *k)
+            .ok_or_else(|| format!("unknown op kind `{name}`; available: {}", self.kind_names()))
+    }
+
+    fn decode_op(&self, value: &serde_json::Value) -> Result<DynOperation<C, W>, String> {
+        let (name, data) = match value {
+            serde_json::Value::String(name) => (
+                name.as_str(),
+                serde_json::Value::Object(serde_json::Map::new()),
+            ),
+            serde_json::Value::Object(map) if map.len() == 1 => {
+                let (name, data) = map.iter().next().expect("len == 1 checked above");
+                (name.as_str(), data.clone())
+            }
+            _ => {
+                return Err(
+                    "an op must be a bare kind-name string (`op = \"ping\"`) or a \
+                     single-key table (`op = { add = { n = 5 } }`)"
+                        .to_string(),
+                )
+            }
+        };
+        let def = self
+            .ops
+            .get(name)
+            .ok_or_else(|| format!("unknown op kind `{name}`; available: {}", self.kind_names()))?;
+        let op = def
+            .decode(data)
+            .map_err(|e| format!("op kind `{name}`: {e}"))?;
+        Ok(DynOperation(op))
+    }
+
+    fn encode_op(&self, op: &DynOperation<C, W>) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        map.insert(op.0.kind().to_string(), op.0.to_data());
+        serde_json::Value::Object(map)
     }
 }

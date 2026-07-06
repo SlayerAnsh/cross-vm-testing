@@ -10,17 +10,17 @@
 //! `current_thread` is required: the erased registry layer, and every mock VM, are `!Send` by
 //! design (see `cross_vm_framework::cli::Cli::main`'s docs).
 
-use cross_vm_tests::boom::{boom_setup, BoomHarness};
-use cross_vm_tests::vault::{vault_config_setup, VaultHarness};
+use cross_vm_tests::boom::{boom_harness, boom_setup};
+use cross_vm_tests::vault::{vault_config_setup, vault_harness};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::process::ExitCode {
     cross_vm_framework::cli::Cli::new()
         .env_file(".env")
-        .register("vault", || VaultHarness, vault_config_setup)
+        .register("vault", vault_harness, vault_config_setup)
         // A tiny, deterministically-failing harness registered only for `tests/cli_e2e.rs`'s
         // replay-artifact/shrink/`replay`-subcommand coverage (see `boom`'s module docs).
-        .register("boom", || BoomHarness, boom_setup)
+        .register("boom", boom_harness, boom_setup)
         .main()
         .await
 }

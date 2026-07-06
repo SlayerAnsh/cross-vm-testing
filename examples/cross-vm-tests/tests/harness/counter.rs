@@ -40,28 +40,6 @@ fn signer(chain: &str) -> &'static str {
     }
 }
 
-/// One complete action. Chains are selected by string label, matching how the `MultiChainEnv`
-/// keys its chains. Plain public fields, so an rstest test can fan them out.
-#[derive(Clone, Debug)]
-enum CounterOp {
-    Increment { chain: String },
-    IncrementOnTwoChains { chain_1: String, chain_2: String },
-}
-
-/// The data-free kinds of [`CounterOp`], for per-kind fuzzing.
-#[derive(Clone, Copy, Debug)]
-enum CounterOpKind {
-    Increment,
-    IncrementOnTwoChains,
-}
-
-#[derive(Clone, Debug)]
-enum CounterInv {
-    /// Every chain's on-chain count equals the shadow model. Only meaningful once at least one
-    /// increment has been applied; before that it is skipped.
-    CountMatchesModel,
-}
-
 /// Persisted state for one run: where the counter is deployed per chain, the shadow count, and
 /// the precondition flag for the invariant. No chains or contract handles live here.
 struct CounterWorld {
@@ -72,114 +50,168 @@ struct CounterWorld {
     any_incremented: bool,
 }
 
-struct CounterHarness;
+/// Rebuild a `Counter` handle bound to the deployed instance on `label`. The chain is cloned
+/// out of the env (shared state), so the handle reads and writes the one live counter.
+fn counter_handle(ctx: &Ctx, world: &CounterWorld, label: &str) -> Result<Counter, HarnessError> {
+    let chain = ctx.chain(label)?;
+    let addr = world
+        .addrs
+        .get(label)
+        .cloned()
+        .ok_or_else(|| HarnessError::infra(format!("no counter deployed on {label}")))?;
+    Ok(Counter::instance(chain, addr))
+}
 
-impl CounterHarness {
-    /// Rebuild a `Counter` handle bound to the deployed instance on `label`. The chain is cloned
-    /// out of the env (shared state), so the handle reads and writes the one live counter.
-    fn counter(ctx: &Ctx, world: &CounterWorld, label: &str) -> Result<Counter, HarnessError> {
-        let chain = ctx.chain(label)?;
-        let addr = world
-            .addrs
-            .get(label)
-            .cloned()
-            .ok_or_else(|| HarnessError::infra(format!("no counter deployed on {label}")))?;
-        Ok(Counter::instance(chain, addr))
+/// Increment the counter on one chain. Chains are selected by string label, matching how the
+/// `MultiChainEnv` keys its chains.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Increment {
+    chain: String,
+}
+
+impl DynOp<Ctx, CounterWorld> for Increment {
+    fn kind(&self) -> &'static str {
+        "increment"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a mut Ctx,
+        w: &'a mut CounterWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            inc(ctx, w, &self.chain).await?;
+            Ok(Verdict::Accepted)
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<Ctx, CounterWorld>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
     }
 }
 
-impl Harness for CounterHarness {
-    type Ctx = Ctx;
-    type World = CounterWorld;
-    type Operation = CounterOp;
-    type Invariant = CounterInv;
-    type OpKind = CounterOpKind;
+/// Increment the counter on two chains in one op.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct IncrementOnTwoChains {
+    chain_1: String,
+    chain_2: String,
+}
 
-    async fn apply(
-        &self,
-        ctx: &mut Ctx,
-        w: &mut CounterWorld,
-        op: &CounterOp,
-    ) -> Result<Verdict, HarnessError> {
-        match op {
-            CounterOp::Increment { chain } => inc(ctx, w, chain).await?,
-            CounterOp::IncrementOnTwoChains { chain_1, chain_2 } => {
-                inc(ctx, w, chain_1).await?;
-                inc(ctx, w, chain_2).await?;
+impl DynOp<Ctx, CounterWorld> for IncrementOnTwoChains {
+    fn kind(&self) -> &'static str {
+        "increment_on_two_chains"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a mut Ctx,
+        w: &'a mut CounterWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            inc(ctx, w, &self.chain_1).await?;
+            inc(ctx, w, &self.chain_2).await?;
+            Ok(Verdict::Accepted)
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<Ctx, CounterWorld>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
+    }
+}
+
+/// Every chain's on-chain count equals the shadow model. Only meaningful once at least one
+/// increment has been applied; before that it is skipped.
+#[derive(Clone, Debug)]
+struct CountMatchesModel;
+
+impl DynInvariant<Ctx, CounterWorld> for CountMatchesModel {
+    fn check<'a>(&'a self, ctx: &'a mut Ctx, w: &'a CounterWorld) -> OpFuture<'a, CheckOutcome> {
+        Box::pin(async move {
+            // Precondition: nothing to compare until the first increment lands.
+            if !w.any_incremented {
+                return CheckOutcome::skipped("no increment applied yet");
             }
-        }
-        Ok(Verdict::Accepted)
-    }
-
-    fn op_kinds(&self) -> Vec<CounterOpKind> {
-        vec![
-            CounterOpKind::Increment,
-            CounterOpKind::IncrementOnTwoChains,
-        ]
-    }
-
-    fn generate_op(&self, rng: &mut Prng, w: &CounterWorld, kind: CounterOpKind) -> CounterOp {
-        let a = w.labels[rng.index(w.labels.len())].clone();
-        match kind {
-            CounterOpKind::Increment => CounterOp::Increment { chain: a },
-            CounterOpKind::IncrementOnTwoChains => {
-                let b = w.labels[rng.index(w.labels.len())].clone();
-                CounterOp::IncrementOnTwoChains {
-                    chain_1: a,
-                    chain_2: b,
+            for label in &w.labels {
+                let counter = match counter_handle(ctx, w, label) {
+                    Ok(c) => c,
+                    Err(e) => return CheckOutcome::violated(e.to_string()),
+                };
+                let n = match counter.count().await {
+                    Ok(n) => n,
+                    Err(e) => return CheckOutcome::violated(e.to_string()),
+                };
+                let m = *w.model.get(label).expect("model for label");
+                if n != m {
+                    return CheckOutcome::violated(format!("{label}: chain {n} != model {m}"));
                 }
             }
-        }
+            CheckOutcome::Held
+        })
     }
 
-    // Bias toward single-chain increments (two-chain drawn 1 in 4).
-    fn weight(&self, _ctx: &Ctx, _w: &CounterWorld, kind: CounterOpKind) -> u32 {
-        match kind {
-            CounterOpKind::Increment => 3,
-            CounterOpKind::IncrementOnTwoChains => 1,
-        }
+    fn clone_box(&self) -> Box<dyn DynInvariant<Ctx, CounterWorld>> {
+        Box::new(self.clone())
     }
+}
 
-    fn invariants(&self) -> Vec<CounterInv> {
-        vec![CounterInv::CountMatchesModel]
-    }
+fn gen_increment(rng: &mut Prng, w: &CounterWorld) -> Box<dyn DynOp<Ctx, CounterWorld>> {
+    let chain = w.labels[rng.index(w.labels.len())].clone();
+    Box::new(Increment { chain })
+}
 
-    async fn advance(&self, ctx: &mut Ctx, blocks: u64) -> Result<(), HarnessError> {
+fn gen_increment_on_two_chains(
+    rng: &mut Prng,
+    w: &CounterWorld,
+) -> Box<dyn DynOp<Ctx, CounterWorld>> {
+    let chain_1 = w.labels[rng.index(w.labels.len())].clone();
+    let chain_2 = w.labels[rng.index(w.labels.len())].clone();
+    Box::new(IncrementOnTwoChains { chain_1, chain_2 })
+}
+
+// Bias toward single-chain increments (two-chain drawn 1 in 4).
+fn weight_increment(_ctx: &Ctx, _w: &CounterWorld) -> u32 {
+    3
+}
+
+fn advance(ctx: &mut Ctx, blocks: u64) -> OpFuture<'_, Result<(), HarnessError>> {
+    Box::pin(async move {
         ctx.advance_all(blocks).await;
         Ok(())
-    }
+    })
+}
 
-    async fn check(&self, ctx: &mut Ctx, w: &CounterWorld, inv: &CounterInv) -> CheckOutcome {
-        match inv {
-            CounterInv::CountMatchesModel => {
-                // Precondition: nothing to compare until the first increment lands.
-                if !w.any_incremented {
-                    return CheckOutcome::skipped("no increment applied yet");
-                }
-                for label in &w.labels {
-                    let counter = match Self::counter(ctx, w, label) {
-                        Ok(c) => c,
-                        Err(e) => return CheckOutcome::violated(e.to_string()),
-                    };
-                    let n = match counter.count().await {
-                        Ok(n) => n,
-                        Err(e) => return CheckOutcome::violated(e.to_string()),
-                    };
-                    let m = *w.model.get(label).expect("model for label");
-                    if n != m {
-                        return CheckOutcome::violated(format!("{label}: chain {n} != model {m}"));
-                    }
-                }
-                CheckOutcome::Held
-            }
-        }
-    }
+/// Assemble the multi-chain counter harness.
+fn counter_harness() -> OpSetHarness<Ctx, CounterWorld> {
+    OpSetHarness::new()
+        .register(
+            OpDef::new(
+                "increment",
+                gen_increment,
+                decode_json_op::<Increment, _, _>,
+            )
+            .with_weight(weight_increment),
+        )
+        .register(OpDef::new(
+            "increment_on_two_chains",
+            gen_increment_on_two_chains,
+            decode_json_op::<IncrementOnTwoChains, _, _>,
+        ))
+        .invariant(Box::new(CountMatchesModel))
+        .with_advance(advance)
 }
 
 /// Increment the counter on `label` and bump its model. An increment never legitimately fails,
 /// so any error is infrastructure.
 async fn inc(ctx: &mut Ctx, w: &mut CounterWorld, label: &str) -> Result<(), HarnessError> {
-    let counter = CounterHarness::counter(ctx, w, label)?;
+    let counter = counter_handle(ctx, w, label)?;
     counter
         .increment(signer(label))
         .await
@@ -255,20 +287,20 @@ async fn counter_two_chain_matrix(
     #[values("osmosis", "eth", "solana")] chain_1: &str,
     #[values("osmosis", "eth", "solana")] chain_2: &str,
 ) {
-    let op = CounterOp::IncrementOnTwoChains {
+    let op = DynOperation(Box::new(IncrementOnTwoChains {
         chain_1: chain_1.to_string(),
         chain_2: chain_2.to_string(),
-    };
+    }));
     let (ctx, world) = counter_setup(0).await.expect("setup");
-    let mut r = Runner::scenario(CounterHarness, 0);
+    let mut r = Runner::scenario(counter_harness(), 0);
     r.setup(ctx, world);
     let report = r.run_case(op).await;
     assert!(report.passed(), "{:?}", report.failure);
 }
 
 #[cfg(feature = "invariant")]
-#[invariant_runner(harness = CounterHarness, seed = 7)]
-async fn counter_invariant_mode(#[runner] mut r: InvariantRunner<CounterHarness>) {
+#[invariant_runner(harness = counter_harness(), seed = 7)]
+async fn counter_invariant_mode(#[runner] mut r: InvariantRunner<OpSetHarness<Ctx, CounterWorld>>) {
     let (ctx, world) = counter_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
     let report = r.run(30, None, 1).await;
@@ -277,8 +309,8 @@ async fn counter_invariant_mode(#[runner] mut r: InvariantRunner<CounterHarness>
 }
 
 #[cfg(feature = "endurance")]
-#[endurance_runner(harness = CounterHarness, seed = 1)]
-async fn counter_endurance_mode(#[runner] mut r: EnduranceRunner<CounterHarness>) {
+#[endurance_runner(harness = counter_harness(), seed = 1)]
+async fn counter_endurance_mode(#[runner] mut r: EnduranceRunner<OpSetHarness<Ctx, CounterWorld>>) {
     let (ctx, world) = counter_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
     let report = r
@@ -296,8 +328,8 @@ async fn counter_endurance_mode(#[runner] mut r: EnduranceRunner<CounterHarness>
 // Each is its own libtest entry (parallel, individually named and filterable, reproducible by
 // seed), with its own fresh setup built in the body.
 #[cfg(feature = "fuzz")]
-#[fuzz_runner(harness = CounterHarness, seed = 7, cases = 8)]
-async fn counter_fuzz(#[runner] mut r: FuzzRunner<CounterHarness>) {
+#[fuzz_runner(harness = counter_harness(), seed = 7, cases = 8)]
+async fn counter_fuzz(#[runner] mut r: FuzzRunner<OpSetHarness<Ctx, CounterWorld>>) {
     let (ctx, world) = counter_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
     let report = r.run(25, None, 1).await;
@@ -308,8 +340,8 @@ async fn counter_fuzz(#[runner] mut r: FuzzRunner<CounterHarness>) {
 // failure is reproducible by copying the printed value back as a fixed `seed`. The counter is
 // correct for every seed, so this stays green while exercising the random-seed expansion.
 #[cfg(feature = "fuzz")]
-#[fuzz_runner(harness = CounterHarness, seed = -1, cases = 2)]
-async fn counter_fuzz_random_seed(#[runner] mut r: FuzzRunner<CounterHarness>) {
+#[fuzz_runner(harness = counter_harness(), seed = -1, cases = 2)]
+async fn counter_fuzz_random_seed(#[runner] mut r: FuzzRunner<OpSetHarness<Ctx, CounterWorld>>) {
     let (ctx, world) = counter_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
     let report = r.run(10, None, 1).await;
@@ -320,7 +352,6 @@ async fn counter_fuzz_random_seed(#[runner] mut r: FuzzRunner<CounterHarness>) {
 // implementation warps them all).
 #[tokio::test]
 async fn advance_progresses_every_chain() {
-    let h = CounterHarness;
     let (mut ctx, _w) = counter_setup(0).await.expect("build env");
     let before: HashMap<String, u64> = {
         let mut m = HashMap::new();
@@ -332,7 +363,7 @@ async fn advance_progresses_every_chain() {
         }
         m
     };
-    h.advance(&mut ctx, 3).await.expect("advance");
+    advance(&mut ctx, 3).await.expect("advance");
     for label in LABELS {
         let after = ctx.chain(label).unwrap().block_height().await;
         assert!(

@@ -36,13 +36,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::rc::Rc;
 
-use serde::de::DeserializeOwned;
-use serde::Deserialize;
 use thiserror::Error;
 
 use harness_core::{
-    sub_seed, Endurance, EnduranceConfig, Expectation, Failure, Fuzz, Harness, Invariant, KindMix,
-    RunReport, Runner, Scenario, ScenarioStep, Stats,
+    sub_seed, ConfigOps, Endurance, EnduranceConfig, Expectation, Failure, Fuzz, Harness,
+    Invariant, KindMix, RunReport, Runner, Scenario, ScenarioStep, Stats,
 };
 
 use crate::domain::{SetupBuildError, SetupFuture};
@@ -206,11 +204,9 @@ impl<S: 'static> Registry<S> {
     /// past that point.
     pub fn register<H, F, SF>(&mut self, name: &str, harness: F, setup: SF) -> &mut Self
     where
-        H: Harness + 'static,
+        H: ConfigOps + 'static,
         H::Ctx: 'static,
         H::World: 'static,
-        H::Operation: serde::Serialize + DeserializeOwned + 'static,
-        H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
         F: Fn() -> H + 'static,
         SF: Fn(S) -> SetupFuture<'static, H::Ctx, H::World> + 'static,
     {
@@ -235,11 +231,9 @@ impl<S: 'static> Registry<S> {
     /// happens to hold something sensitive would export it verbatim.
     pub fn register_persistent<H, F, SF>(&mut self, name: &str, harness: F, setup: SF) -> &mut Self
     where
-        H: Harness + 'static,
+        H: ConfigOps + 'static,
         H::Ctx: 'static,
         H::World: 'static,
-        H::Operation: serde::Serialize + DeserializeOwned + 'static,
-        H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
         H::World: serde::Serialize + 'static,
         F: Fn() -> H + 'static,
         SF: Fn(S) -> SetupFuture<'static, H::Ctx, H::World> + 'static,
@@ -262,11 +256,9 @@ impl<S: 'static> Registry<S> {
         patch: P,
     ) -> &mut Self
     where
-        H: Harness + 'static,
+        H: ConfigOps + 'static,
         H::Ctx: 'static,
         H::World: 'static,
-        H::Operation: serde::Serialize + DeserializeOwned + 'static,
-        H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
         F: Fn() -> H + 'static,
         SF: Fn(S) -> SetupFuture<'static, H::Ctx, H::World> + 'static,
         P: Fn(&mut H::World, &toml::Table) -> Result<(), String> + 'static,
@@ -288,11 +280,9 @@ impl<S: 'static> Registry<S> {
         patch: P,
     ) -> &mut Self
     where
-        H: Harness + 'static,
+        H: ConfigOps + 'static,
         H::Ctx: 'static,
         H::World: 'static,
-        H::Operation: serde::Serialize + DeserializeOwned + 'static,
-        H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
         H::World: serde::Serialize + 'static,
         F: Fn() -> H + 'static,
         SF: Fn(S) -> SetupFuture<'static, H::Ctx, H::World> + 'static,
@@ -320,19 +310,13 @@ impl<S: 'static> Registry<S> {
         patch: Option<WorldPatchFn<H::World>>,
     ) -> &mut Self
     where
-        H: Harness + 'static,
+        H: ConfigOps + 'static,
         H::Ctx: 'static,
         H::World: 'static,
-        H::Operation: serde::Serialize + DeserializeOwned + 'static,
-        H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
         F: Fn() -> H + 'static,
         SF: Fn(S) -> SetupFuture<'static, H::Ctx, H::World> + 'static,
     {
         let export_capable = export.is_some();
-        let validate: ValidateFn = Box::new(move |profile: &harness_config::Profile| {
-            validate_profile::<H>(profile)?;
-            validate_export_world(profile, export_capable)
-        });
 
         // `Rc`, not a borrow of the closure's own captured fields: the run closure must be
         // callable an arbitrary number of times (once per fuzz case), and each call needs to
@@ -344,6 +328,16 @@ impl<S: 'static> Registry<S> {
         let harness = Rc::new(harness);
         let setup = Rc::new(setup);
         let harness_name = name.to_string();
+
+        // The validate closure builds one fresh harness instance to act as the config codec
+        // (`ConfigOps`): kind parsing and scenario decode both need registered `OpDef`s, which
+        // only an instance carries. Harness construction is cheap (registration only).
+        let harness_for_validate = Rc::clone(&harness);
+        let validate: ValidateFn = Box::new(move |profile: &harness_config::Profile| {
+            let codec = (harness_for_validate)();
+            validate_profile(&codec, profile)?;
+            validate_export_world(profile, export_capable)
+        });
 
         // The pipeline handoff slot: one per registered harness, alive for the registry's
         // lifetime, holding the typed `(Ctx, H::World)` a passing donor phase left behind.
@@ -449,65 +443,55 @@ impl<K> KindSelection<K> {
 /// 6.1 (`weights` beats `kinds`; both compose with the harness's dynamic `Harness::weight`
 /// (static times dynamic)); `harness-config`'s structural validation already rejects a profile
 /// that sets both, so this is belt and suspenders.
-pub(crate) fn parse_kind_selection<H: Harness>(
+pub(crate) fn parse_kind_selection<H: ConfigOps>(
+    harness: &H,
     kinds: &Option<Vec<String>>,
     weights: &Option<BTreeMap<String, u32>>,
-) -> Result<KindSelection<H::OpKind>, ValidationError>
-where
-    H::OpKind: DeserializeOwned,
-{
+) -> Result<KindSelection<H::OpKind>, ValidationError> {
     if let Some(weights) = weights {
         // `BTreeMap` iteration is sorted-key order: the pinned weighted-stream order documented
         // on `harness_core::KindMix::Weighted`.
         let pairs = weights
             .iter()
-            .map(|(name, weight)| parse_kind::<H>(name).map(|k| (k, *weight)))
+            .map(|(name, weight)| {
+                harness
+                    .parse_kind(name)
+                    .map(|k| (k, *weight))
+                    .map_err(ValidationError)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(KindSelection::Weighted(pairs));
     }
     if let Some(kinds) = kinds {
         let parsed = kinds
             .iter()
-            .map(|name| parse_kind::<H>(name))
+            .map(|name| harness.parse_kind(name).map_err(ValidationError))
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(KindSelection::Restricted(parsed));
     }
     Ok(KindSelection::All)
 }
 
-/// Parses one kind name via `H::OpKind`'s derived `Deserialize`: `toml::Value` is itself a
-/// `serde::Deserializer`, so a bare kind name string deserializes exactly as it would from
-/// `kinds = ["Deposit"]` in TOML. An unknown name surfaces serde's own "unknown variant, expected
-/// one of ..." message, which already lists the valid names.
-fn parse_kind<H: Harness>(name: &str) -> Result<H::OpKind, ValidationError>
-where
-    H::OpKind: DeserializeOwned,
-{
-    H::OpKind::deserialize(toml::Value::String(name.to_string()))
-        .map_err(|e| ValidationError(e.to_string()))
-}
-
-/// Type-checks one profile's `kinds`/`weights`/scenario `op`s against `H`, without running or
-/// touching a chain. Powers [`Registry::validate`].
-fn validate_profile<H: Harness>(profile: &harness_config::Profile) -> Result<(), ValidationError>
-where
-    H::OpKind: DeserializeOwned,
-    H::Operation: DeserializeOwned,
-{
+/// Type-checks one profile's `kinds`/`weights`/scenario `op`s against `harness`, without running
+/// or touching a chain. Powers [`Registry::validate`]. Kind names and scenario ops are parsed
+/// through the harness's [`ConfigOps`] codec.
+fn validate_profile<H: ConfigOps>(
+    harness: &H,
+    profile: &harness_config::Profile,
+) -> Result<(), ValidationError> {
     match profile {
         harness_config::Profile::Fuzz(p) => {
-            parse_kind_selection::<H>(&p.kinds, &p.weights).map(|_| ())
+            parse_kind_selection(harness, &p.kinds, &p.weights).map(|_| ())
         }
         harness_config::Profile::Invariant(p) => {
-            parse_kind_selection::<H>(&p.kinds, &p.weights).map(|_| ())
+            parse_kind_selection(harness, &p.kinds, &p.weights).map(|_| ())
         }
         harness_config::Profile::Endurance(p) => {
-            parse_kind_selection::<H>(&p.kinds, &p.weights).map(|_| ())
+            parse_kind_selection(harness, &p.kinds, &p.weights).map(|_| ())
         }
         harness_config::Profile::Scenario(p) => {
             for step in &p.steps {
-                H::Operation::deserialize(step.op.clone())
-                    .map_err(|e| ValidationError(e.to_string()))?;
+                harness.decode_op(&step.op).map_err(ValidationError)?;
             }
             Ok(())
         }
@@ -769,16 +753,18 @@ async fn run_profile<H, F, S, SF>(
     session: &SessionSlot<H::Ctx, H::World>,
 ) -> Result<ErasedReport, RunError>
 where
-    H: Harness,
+    H: ConfigOps,
     H::Ctx: 'static,
     H::World: 'static,
-    H::Operation: serde::Serialize + DeserializeOwned,
-    H::OpKind: DeserializeOwned + Copy,
     F: Fn() -> H,
     SF: Fn(S) -> SetupFuture<'static, H::Ctx, H::World>,
 {
     let started = std::time::Instant::now();
     let base_seed = resolve_base_seed(resolved.seed);
+
+    // One extra harness instance as the config codec: kind parsing, scenario decode, and history
+    // encoding. Harness construction is cheap (registration only).
+    let codec = make_harness();
 
     match &resolved.profile {
         harness_config::Profile::Fuzz(p) => {
@@ -789,7 +775,7 @@ where
                     "fuzz profile resolved to 0 cases".to_string(),
                 ));
             }
-            let selection = parse_kind_selection::<H>(&p.kinds, &p.weights)?;
+            let selection = parse_kind_selection(&codec, &p.kinds, &p.weights)?;
 
             // Pipeline handoff (inherit a donor world, or stash this world for the next phase)
             // and a per-phase `params` patch each need a single, well-defined starting world.
@@ -845,7 +831,8 @@ where
                     let (ctx, world) = runner.into_parts();
                     *session.borrow_mut() = Some((ctx, world));
                 }
-                return erase_report(
+                return Ok(erase_report(
+                    &codec,
                     report,
                     harness_name,
                     resolved.name.clone(),
@@ -853,8 +840,7 @@ where
                     stats,
                     started.elapsed(),
                     shrunk,
-                )
-                .map_err(|e| RunError::Serialize(e.to_string()));
+                ));
             }
 
             // The first failing case ends the profile; if every case passes, the last case's
@@ -891,7 +877,8 @@ where
                 failing_seed,
             )
             .await;
-            erase_report(
+            Ok(erase_report(
+                &codec,
                 report,
                 harness_name,
                 resolved.name.clone(),
@@ -899,12 +886,11 @@ where
                 stats,
                 started.elapsed(),
                 shrunk,
-            )
-            .map_err(|e| RunError::Serialize(e.to_string()))
+            ))
         }
         harness_config::Profile::Invariant(p) => {
             let ops = opts.ops.unwrap_or(p.ops);
-            let selection = parse_kind_selection::<H>(&p.kinds, &p.weights)?;
+            let selection = parse_kind_selection(&codec, &p.kinds, &p.weights)?;
 
             let (ctx, mut world) =
                 obtain_start_state::<H, S, SF>(setup, make_setup, session, resolved, base_seed)
@@ -929,7 +915,8 @@ where
                 let (ctx, world) = runner.into_parts();
                 *session.borrow_mut() = Some((ctx, world));
             }
-            erase_report(
+            Ok(erase_report(
+                &codec,
                 report,
                 harness_name,
                 resolved.name.clone(),
@@ -937,11 +924,10 @@ where
                 stats,
                 started.elapsed(),
                 shrunk,
-            )
-            .map_err(|e| RunError::Serialize(e.to_string()))
+            ))
         }
         harness_config::Profile::Endurance(p) => {
-            let selection = parse_kind_selection::<H>(&p.kinds, &p.weights)?;
+            let selection = parse_kind_selection(&codec, &p.kinds, &p.weights)?;
 
             let (ctx, mut world) =
                 obtain_start_state::<H, S, SF>(setup, make_setup, session, resolved, base_seed)
@@ -993,7 +979,8 @@ where
                 let (ctx, world) = runner.into_parts();
                 *session.borrow_mut() = Some((ctx, world));
             }
-            erase_report(
+            Ok(erase_report(
+                &codec,
                 report,
                 harness_name,
                 resolved.name.clone(),
@@ -1001,8 +988,7 @@ where
                 stats,
                 started.elapsed(),
                 shrunk,
-            )
-            .map_err(|e| RunError::Serialize(e.to_string()))
+            ))
         }
         harness_config::Profile::Scenario(p) => {
             // Enforced here too (not just `validate`): `cross-vm run` never requires a prior
@@ -1026,8 +1012,7 @@ where
                 .steps
                 .iter()
                 .map(|raw| {
-                    let op = H::Operation::deserialize(raw.op.clone())
-                        .map_err(|e| ValidationError(e.to_string()))?;
+                    let op = codec.decode_op(&raw.op).map_err(ValidationError)?;
                     Ok(ScenarioStep {
                         op,
                         expect: match raw.expect {
@@ -1072,7 +1057,8 @@ where
 
             // Scenario never shrinks: its steps are concrete, not generative, so there is nothing
             // to minimize.
-            erase_report(
+            Ok(erase_report(
+                &codec,
                 report,
                 harness_name,
                 resolved.name.clone(),
@@ -1080,8 +1066,7 @@ where
                 stats,
                 started.elapsed(),
                 false,
-            )
-            .map_err(|e| RunError::Serialize(e.to_string()))
+            ))
         }
     }
 }
@@ -1089,8 +1074,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_mock::mock_harness;
     use harness_config::{CommonKeys, FuzzProfile, InvariantProfile, Profile, SeedSpec};
-    use harness_core::{CheckOutcome, FailureKind, HarnessError, Prng, Verdict};
+    use harness_core::FailureKind;
     use std::collections::BTreeMap;
 
     /// The domain setup value the CLI's [`MakeSetup`] factory yields in these tests: it carries
@@ -1104,79 +1090,7 @@ mod tests {
         Ok(TestSetup { seed })
     }
 
-    // ----- a minimal mock harness: no real chain interaction, just enough to drive `run_with` -----
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    enum MockKind {
-        Ping,
-        Pong,
-        Boom,
-    }
-
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    enum MockOp {
-        Ping,
-        Pong,
-        Boom,
-    }
-
-    #[derive(Debug, Clone)]
-    enum MockInvariant {
-        AlwaysHolds,
-    }
-
-    struct MockHarness;
-
-    impl Harness for MockHarness {
-        type Ctx = u32;
-        type World = u32;
-        type Operation = MockOp;
-        type Invariant = MockInvariant;
-        type OpKind = MockKind;
-
-        async fn apply(
-            &self,
-            _ctx: &mut Self::Ctx,
-            world: &mut Self::World,
-            op: &Self::Operation,
-        ) -> Result<Verdict, HarnessError> {
-            *world += 1;
-            match op {
-                MockOp::Ping | MockOp::Pong => Ok(Verdict::Accepted),
-                MockOp::Boom => Err(HarnessError::Bug("boom".to_string())),
-            }
-        }
-
-        fn op_kinds(&self) -> Vec<Self::OpKind> {
-            vec![MockKind::Ping, MockKind::Pong, MockKind::Boom]
-        }
-
-        fn generate_op(
-            &self,
-            _rng: &mut Prng,
-            _world: &Self::World,
-            kind: Self::OpKind,
-        ) -> Self::Operation {
-            match kind {
-                MockKind::Ping => MockOp::Ping,
-                MockKind::Pong => MockOp::Pong,
-                MockKind::Boom => MockOp::Boom,
-            }
-        }
-
-        fn invariants(&self) -> Vec<Self::Invariant> {
-            vec![MockInvariant::AlwaysHolds]
-        }
-
-        async fn check(
-            &self,
-            _ctx: &mut Self::Ctx,
-            _world: &Self::World,
-            _inv: &Self::Invariant,
-        ) -> CheckOutcome {
-            CheckOutcome::Held
-        }
-    }
+    // ----- the shared OpSet mock (`crate::test_mock`): kinds `boom`, `ping` over `Ctx = World = u32` -----
 
     /// Builds the mock's `(Ctx, World)`: the `Ctx` is a trivial `u32` (no live chain), and the
     /// `World` is seeded from the per-case seed the factory supplied, so a run's final world value
@@ -1259,17 +1173,17 @@ mod tests {
 
     #[test]
     fn validate_accepts_known_kind() {
-        let profile = fuzz_profile(1, 1, Some(vec!["Ping".to_string()]), None);
-        assert!(validate_profile::<MockHarness>(&profile).is_ok());
+        let profile = fuzz_profile(1, 1, Some(vec!["ping".to_string()]), None);
+        assert!(validate_profile(&mock_harness(), &profile).is_ok());
     }
 
     #[test]
     fn validate_rejects_unknown_kind_listing_valid_names() {
         let profile = fuzz_profile(1, 1, Some(vec!["Nope".to_string()]), None);
-        let err = validate_profile::<MockHarness>(&profile).unwrap_err();
+        let err = validate_profile(&mock_harness(), &profile).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Ping"), "message was: {msg}");
-        assert!(msg.contains("Pong"), "message was: {msg}");
+        assert!(msg.contains("ping"), "message was: {msg}");
+        assert!(msg.contains("boom"), "message was: {msg}");
     }
 
     #[test]
@@ -1277,8 +1191,8 @@ mod tests {
         let mut weights = BTreeMap::new();
         weights.insert("Nope".to_string(), 5);
         let profile = fuzz_profile(1, 1, None, Some(weights));
-        let err = validate_profile::<MockHarness>(&profile).unwrap_err();
-        assert!(err.to_string().contains("Ping"));
+        let err = validate_profile(&mock_harness(), &profile).unwrap_err();
+        assert!(err.to_string().contains("ping"));
     }
 
     #[test]
@@ -1294,12 +1208,13 @@ mod tests {
     #[test]
     fn kind_selection_weighted_is_sorted_by_kind_name() {
         let mut weights = BTreeMap::new();
-        weights.insert("Pong".to_string(), 1);
-        weights.insert("Ping".to_string(), 2);
-        let selection = parse_kind_selection::<MockHarness>(&None, &Some(weights)).unwrap();
+        weights.insert("ping".to_string(), 1);
+        weights.insert("boom".to_string(), 2);
+        let selection = parse_kind_selection(&mock_harness(), &None, &Some(weights)).unwrap();
         match selection {
+            // `boom` sorts before `ping`, so the weighted pairs come back in that order.
             KindSelection::Weighted(pairs) => {
-                assert_eq!(pairs, vec![(MockKind::Ping, 2), (MockKind::Pong, 1)]);
+                assert_eq!(pairs, vec![("boom", 2), ("ping", 1)]);
             }
             _ => panic!("expected Weighted"),
         }
@@ -1308,16 +1223,16 @@ mod tests {
     #[test]
     fn kind_selection_kinds_is_restricted() {
         let selection =
-            parse_kind_selection::<MockHarness>(&Some(vec!["Pong".to_string()]), &None).unwrap();
+            parse_kind_selection(&mock_harness(), &Some(vec!["ping".to_string()]), &None).unwrap();
         match selection {
-            KindSelection::Restricted(ks) => assert_eq!(ks, vec![MockKind::Pong]),
+            KindSelection::Restricted(ks) => assert_eq!(ks, vec!["ping"]),
             _ => panic!("expected Restricted"),
         }
     }
 
     #[test]
     fn kind_selection_neither_is_all() {
-        let selection = parse_kind_selection::<MockHarness>(&None, &None).unwrap();
+        let selection = parse_kind_selection(&mock_harness(), &None, &None).unwrap();
         assert!(matches!(selection, KindSelection::All));
     }
 
@@ -1326,8 +1241,8 @@ mod tests {
     #[test]
     fn names_lists_every_registered_harness_sorted() {
         let mut registry = Registry::new();
-        registry.register("zeta", || MockHarness, mock_setup);
-        registry.register("alpha", || MockHarness, mock_setup);
+        registry.register("zeta", mock_harness, mock_setup);
+        registry.register("alpha", mock_harness, mock_setup);
         let names: Vec<&str> = registry.names().collect();
         assert_eq!(names, vec!["alpha", "zeta"]);
     }
@@ -1348,12 +1263,12 @@ mod tests {
     #[tokio::test]
     async fn fuzz_run_all_passed_reports_last_case() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         let profile = fuzz_profile(
             3,
             2,
-            Some(vec!["Ping".to_string(), "Pong".to_string()]),
+            Some(vec!["ping".to_string(), "ping".to_string()]),
             None,
         );
         let resolved = resolved(profile);
@@ -1370,9 +1285,9 @@ mod tests {
     #[tokio::test]
     async fn fuzz_run_stops_at_first_failure_and_serializes_history() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
-        let profile = fuzz_profile(5, 3, Some(vec!["Boom".to_string()]), None);
+        let profile = fuzz_profile(5, 3, Some(vec!["boom".to_string()]), None);
         let resolved = resolved(profile);
 
         let report = registry
@@ -1383,7 +1298,16 @@ mod tests {
         let failure = report.failure.expect("must fail");
         assert!(matches!(failure.kind, FailureKind::Bug(ref m) if m == "boom"));
         assert_eq!(failure.step, 1);
-        assert!(failure.op_debug.as_deref() == Some("Boom"));
+        // `DynOperation`'s Debug leads with the registered kind name (`boom`), then the inner
+        // struct's own Debug; the failure dump buckets by that leading token.
+        assert!(
+            failure
+                .op_debug
+                .as_deref()
+                .is_some_and(|d| d.starts_with("boom")),
+            "{:?}",
+            failure.op_debug
+        );
         assert!(failure.history.is_array());
         assert!(!failure.shrunk);
     }
@@ -1391,9 +1315,9 @@ mod tests {
     #[tokio::test]
     async fn invariant_run_reports_mode_and_steps() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
-        let profile = invariant_profile(4, Some(vec!["Ping".to_string()]));
+        let profile = invariant_profile(4, Some(vec!["ping".to_string()]));
         let resolved = resolved(profile);
 
         let report = registry
@@ -1443,8 +1367,9 @@ mod tests {
             ))
     }
 
-    /// A step whose op is a bare unit-variant name (`MockOp` has no data, so a plain TOML string
-    /// deserializes into it exactly like `H::OpKind::deserialize` does for `kinds`/`weights`).
+    /// A step whose op is a bare kind-name string (the mock ops have no data, so a plain string
+    /// decodes through `ConfigOps::decode_op` into an empty-field op, the same bare-string form
+    /// `kinds`/`weights` use).
     fn mock_step(op: &str, expect: harness_config::ExpectStr) -> harness_config::ScenarioStepRaw {
         harness_config::ScenarioStepRaw {
             op: serde_json::Value::String(op.to_string()),
@@ -1457,11 +1382,11 @@ mod tests {
     #[tokio::test]
     async fn scenario_run_drives_to_erased_report_with_scenario_mode() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         let steps = vec![
-            mock_step("Ping", harness_config::ExpectStr::Accepted),
-            mock_step("Pong", harness_config::ExpectStr::Accepted),
+            mock_step("ping", harness_config::ExpectStr::Accepted),
+            mock_step("ping", harness_config::ExpectStr::Accepted),
         ];
         let resolved = resolved(scenario_profile(steps));
 
@@ -1477,10 +1402,10 @@ mod tests {
     #[tokio::test]
     async fn scenario_run_expect_mismatch_fails_with_exact_message() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
-        // Ping is always accepted; expecting a rejection must fail with the exact message.
-        let steps = vec![mock_step("Ping", harness_config::ExpectStr::Rejected)];
+        // ping is always accepted; expecting a rejection must fail with the exact message.
+        let steps = vec![mock_step("ping", harness_config::ExpectStr::Rejected)];
         let resolved = resolved(scenario_profile(steps));
 
         let report = registry
@@ -1501,7 +1426,7 @@ mod tests {
     #[tokio::test]
     async fn scenario_run_rejects_an_op_that_fails_to_deserialize() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         let steps = vec![mock_step("NotAKind", harness_config::ExpectStr::Accepted)];
         let resolved = resolved(scenario_profile(steps));
@@ -1517,18 +1442,18 @@ mod tests {
     //
     // `MockHarness::World` is a plain `u32`, already `Serialize`, so it doubles as the
     // "persistent" harness these tests need without introducing a second mock: `apply` increments
-    // `world` by 1 per applied op (both Ping/Pong are accepted), and `mock_setup` seeds it from
+    // `world` by 1 per applied op (both ping/ping are accepted), and `mock_setup` seeds it from
     // `req.seed`, so the final exported value is deterministic (`seed + accepted-op-count`).
 
     #[tokio::test]
     async fn register_persistent_scenario_run_exports_final_world_as_json() {
         let mut registry = Registry::new();
-        registry.register_persistent("mock", || MockHarness, mock_setup);
+        registry.register_persistent("mock", mock_harness, mock_setup);
 
         let path = temp_export_path("passing");
         let steps = vec![
-            mock_step("Ping", harness_config::ExpectStr::Accepted),
-            mock_step("Pong", harness_config::ExpectStr::Accepted),
+            mock_step("ping", harness_config::ExpectStr::Accepted),
+            mock_step("ping", harness_config::ExpectStr::Accepted),
         ];
         let resolved = resolved(scenario_profile_with_export(steps, path.to_str().unwrap()));
 
@@ -1550,12 +1475,12 @@ mod tests {
     #[tokio::test]
     async fn register_persistent_scenario_run_exports_even_on_failure() {
         let mut registry = Registry::new();
-        registry.register_persistent("mock", || MockHarness, mock_setup);
+        registry.register_persistent("mock", mock_harness, mock_setup);
 
         let path = temp_export_path("failing");
-        // Ping is always accepted; expecting a rejection fails the step, but export_world must
+        // ping is always accepted; expecting a rejection fails the step, but export_world must
         // still write the state the run actually reached.
-        let steps = vec![mock_step("Ping", harness_config::ExpectStr::Rejected)];
+        let steps = vec![mock_step("ping", harness_config::ExpectStr::Rejected)];
         let resolved = resolved(scenario_profile_with_export(steps, path.to_str().unwrap()));
 
         let report = registry
@@ -1567,7 +1492,7 @@ mod tests {
         let raw =
             std::fs::read_to_string(&path).expect("export_world wrote the file even on failure");
         let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
-        assert_eq!(value, serde_json::json!(8), "seed 7 + one applied Ping");
+        assert_eq!(value, serde_json::json!(8), "seed 7 + one applied ping");
 
         std::fs::remove_file(&path).ok();
     }
@@ -1575,9 +1500,9 @@ mod tests {
     #[test]
     fn plain_register_scenario_with_export_world_fails_validate() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
-        let steps = vec![mock_step("Ping", harness_config::ExpectStr::Accepted)];
+        let steps = vec![mock_step("ping", harness_config::ExpectStr::Accepted)];
         let profile = scenario_profile_with_export(steps, "somewhere.json");
 
         let err = registry.validate("mock", &profile).unwrap_err();
@@ -1592,10 +1517,10 @@ mod tests {
     #[tokio::test]
     async fn plain_register_scenario_with_export_world_fails_run() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         let path = temp_export_path("rejected-by-plain-register");
-        let steps = vec![mock_step("Ping", harness_config::ExpectStr::Accepted)];
+        let steps = vec![mock_step("ping", harness_config::ExpectStr::Accepted)];
         let resolved = resolved(scenario_profile_with_export(steps, path.to_str().unwrap()));
 
         let err = registry
@@ -1612,9 +1537,9 @@ mod tests {
     #[tokio::test]
     async fn ops_and_cases_overrides_from_run_options_win() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
-        let profile = fuzz_profile(1, 1, Some(vec!["Ping".to_string()]), None);
+        let profile = fuzz_profile(1, 1, Some(vec!["ping".to_string()]), None);
         let resolved = resolved(profile);
         let opts = RunOptions {
             ops: Some(5),
@@ -1664,12 +1589,12 @@ mod tests {
     #[tokio::test]
     async fn endurance_run_over_mock_harness_reports_endurance_mode() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         let profile = endurance_profile(
             Some(std::time::Duration::from_millis(20)),
             None,
-            Some(vec!["Ping".to_string()]),
+            Some(vec!["ping".to_string()]),
         );
         let resolved = resolved(profile);
 
@@ -1685,14 +1610,14 @@ mod tests {
     #[tokio::test]
     async fn endurance_max_ops_bounds_the_run_independent_of_duration() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         // A generous duration but a tight max_ops, no delay: max_ops must be what stops the run,
         // and it must stop at exactly that count.
         let profile = endurance_profile(
             Some(std::time::Duration::from_secs(5)),
             Some(3),
-            Some(vec!["Ping".to_string()]),
+            Some(vec!["ping".to_string()]),
         );
         let resolved = resolved(profile);
 
@@ -1706,12 +1631,12 @@ mod tests {
     #[tokio::test]
     async fn endurance_run_options_ops_override_wins_as_max_ops() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         let profile = endurance_profile(
             Some(std::time::Duration::from_secs(5)),
             Some(100),
-            Some(vec!["Ping".to_string()]),
+            Some(vec!["ping".to_string()]),
         );
         let resolved = resolved(profile);
         let opts = RunOptions {
@@ -1729,11 +1654,11 @@ mod tests {
     #[tokio::test]
     async fn endurance_missing_duration_with_max_ops_still_stops_at_max_ops() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         // No duration at all: the registry's defensive fallback must not panic or hang, and
         // max_ops alone must govern.
-        let profile = endurance_profile(None, Some(4), Some(vec!["Ping".to_string()]));
+        let profile = endurance_profile(None, Some(4), Some(vec!["ping".to_string()]));
         let resolved = resolved(profile);
 
         let report = registry
@@ -1745,9 +1670,9 @@ mod tests {
 
     // ----- shrink-on-failure integration (Task 12) -----
     //
-    // `MockHarness::Boom` fails the exact same way ("boom", state-independent) no matter what
-    // Pings preceded it, so any failing history containing a Boom must shrink down to exactly
-    // `[Boom]` — the single-op pass drops every other op and each drop still reproduces the same
+    // `MockHarness::boom` fails the exact same way ("boom", state-independent) no matter what
+    // Pings preceded it, so any failing history containing a boom must shrink down to exactly
+    // `[boom]` — the single-op pass drops every other op and each drop still reproduces the same
     // `FailureKind::Bug("boom")`. This makes the minimized length ("1") a deterministic assertion
     // independent of the seeded rng stream, unlike asserting an exact *raw* history length would
     // be.
@@ -1755,12 +1680,12 @@ mod tests {
     #[tokio::test]
     async fn fuzz_shrink_true_minimizes_the_failing_history_and_marks_it_shrunk() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         let profile = fuzz_profile(
             1,
             20,
-            Some(vec!["Ping".to_string(), "Boom".to_string()]),
+            Some(vec!["ping".to_string(), "boom".to_string()]),
             None,
         );
 
@@ -1784,7 +1709,7 @@ mod tests {
         let shrunk_len = failure.history.as_array().expect("array").len();
         assert_eq!(
             shrunk_len, 1,
-            "a lone Boom already reproduces; must shrink to it"
+            "a lone boom already reproduces; must shrink to it"
         );
         assert!(shrunk_len <= raw_len);
     }
@@ -1792,12 +1717,12 @@ mod tests {
     #[tokio::test]
     async fn fuzz_shrink_false_leaves_the_raw_history_unshrunk() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         let profile = fuzz_profile(
             1,
             20,
-            Some(vec!["Ping".to_string(), "Boom".to_string()]),
+            Some(vec!["ping".to_string(), "boom".to_string()]),
             None,
         );
         let resolved = resolved(profile);
@@ -1812,9 +1737,9 @@ mod tests {
     #[tokio::test]
     async fn invariant_shrink_true_minimizes_the_failing_history() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
-        let profile = invariant_profile(20, Some(vec!["Ping".to_string(), "Boom".to_string()]));
+        let profile = invariant_profile(20, Some(vec!["ping".to_string(), "boom".to_string()]));
         let resolved = resolved_with_shrink(profile, true, 256);
 
         let report = registry
@@ -1829,12 +1754,12 @@ mod tests {
     #[tokio::test]
     async fn tiny_shrink_limit_still_returns_a_reproducing_sequence() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         let profile = fuzz_profile(
             1,
             20,
-            Some(vec!["Ping".to_string(), "Boom".to_string()]),
+            Some(vec!["ping".to_string(), "boom".to_string()]),
             None,
         );
         // A budget of 1 replay attempt: shrink_inner must still return *some* sequence (possibly
@@ -1854,12 +1779,12 @@ mod tests {
     #[tokio::test]
     async fn endurance_shrink_defaults_to_false_and_never_shrinks() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         let profile = endurance_profile(
             Some(std::time::Duration::from_secs(5)),
             None,
-            Some(vec!["Ping".to_string(), "Boom".to_string()]),
+            Some(vec!["ping".to_string(), "boom".to_string()]),
         );
         // `resolved()` hardcodes `shrink: false`, matching endurance's mode default (spec section
         // 4.3: `shrink` defaults to `false` for endurance, unlike fuzz/invariant).
@@ -1876,12 +1801,12 @@ mod tests {
     #[tokio::test]
     async fn endurance_shrink_true_shrinks_when_explicitly_enabled() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         let profile = endurance_profile(
             Some(std::time::Duration::from_secs(5)),
             None,
-            Some(vec!["Ping".to_string(), "Boom".to_string()]),
+            Some(vec!["ping".to_string(), "boom".to_string()]),
         );
         let resolved = resolved_with_shrink(profile, true, 256);
 
@@ -1912,11 +1837,11 @@ mod tests {
     #[tokio::test]
     async fn passing_donor_stashes_and_inheritor_continues_from_it() {
         let mut registry = Registry::new();
-        registry.register_persistent("mock", || MockHarness, mock_setup);
+        registry.register_persistent("mock", mock_harness, mock_setup);
 
-        // Donor: invariant, 3 Ping ops, seed fixed at 7 by `resolved` -> world 7 + 3 = 10.
+        // Donor: invariant, 3 ping ops, seed fixed at 7 by `resolved` -> world 7 + 3 = 10.
         let donor = resolved_pipeline(
-            invariant_profile(3, Some(vec!["Ping".to_string()])),
+            invariant_profile(3, Some(vec!["ping".to_string()])),
             harness_config::WorldSource::Fresh,
             true,
         );
@@ -1926,10 +1851,10 @@ mod tests {
             .unwrap();
         assert!(report.failure.is_none());
 
-        // Inheritor: scenario with one Ping, exporting the final world. Starting from the
+        // Inheritor: scenario with one ping, exporting the final world. Starting from the
         // stashed 10 (NOT from a fresh setup's seed), the export must be 11.
         let path = temp_export_path("inherited");
-        let steps = vec![mock_step("Ping", harness_config::ExpectStr::Accepted)];
+        let steps = vec![mock_step("ping", harness_config::ExpectStr::Accepted)];
         let inheritor = resolved_pipeline(
             scenario_profile_with_export(steps, path.to_str().unwrap()),
             harness_config::WorldSource::Inherit,
@@ -1942,16 +1867,16 @@ mod tests {
         assert!(report.failure.is_none());
         let value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value, serde_json::json!(11), "10 stashed by donor, +1 Ping");
+        assert_eq!(value, serde_json::json!(11), "10 stashed by donor, +1 ping");
         std::fs::remove_file(&path).ok();
     }
 
     #[tokio::test]
     async fn inherit_with_empty_slot_is_invalid() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
         let inheritor = resolved_pipeline(
-            invariant_profile(1, Some(vec!["Ping".to_string()])),
+            invariant_profile(1, Some(vec!["ping".to_string()])),
             harness_config::WorldSource::Inherit,
             false,
         );
@@ -1965,12 +1890,12 @@ mod tests {
     #[tokio::test]
     async fn failing_donor_stashes_nothing() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
-        // Donor: invariant over Boom (always a Bug). stash_world = true, but the run fails, so
+        // Donor: invariant over boom (always a Bug). stash_world = true, but the run fails, so
         // nothing is stashed.
         let donor = resolved_pipeline(
-            invariant_profile(1, Some(vec!["Boom".to_string()])),
+            invariant_profile(1, Some(vec!["boom".to_string()])),
             harness_config::WorldSource::Fresh,
             true,
         );
@@ -1982,7 +1907,7 @@ mod tests {
 
         // The inheritor must get RunError::Invalid because the slot stayed empty.
         let inheritor = resolved_pipeline(
-            invariant_profile(1, Some(vec!["Ping".to_string()])),
+            invariant_profile(1, Some(vec!["ping".to_string()])),
             harness_config::WorldSource::Inherit,
             false,
         );
@@ -1996,11 +1921,11 @@ mod tests {
     #[tokio::test]
     async fn multi_case_fuzz_cannot_inherit_or_stash() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         // fuzz cases=5 with world_source=Inherit -> RunError::Invalid
         let inheriting = resolved_pipeline(
-            fuzz_profile(5, 1, Some(vec!["Ping".to_string()]), None),
+            fuzz_profile(5, 1, Some(vec!["ping".to_string()]), None),
             harness_config::WorldSource::Inherit,
             false,
         );
@@ -2017,7 +1942,7 @@ mod tests {
 
         // fuzz cases=5 with stash_world=true -> RunError::Invalid
         let stashing = resolved_pipeline(
-            fuzz_profile(5, 1, Some(vec!["Ping".to_string()]), None),
+            fuzz_profile(5, 1, Some(vec!["ping".to_string()]), None),
             harness_config::WorldSource::Fresh,
             true,
         );
@@ -2031,12 +1956,12 @@ mod tests {
     #[tokio::test]
     async fn single_case_fuzz_participates_in_handoff() {
         let mut registry = Registry::new();
-        registry.register_persistent("mock", || MockHarness, mock_setup);
+        registry.register_persistent("mock", mock_harness, mock_setup);
 
-        // fuzz cases=1, ops=2, kinds=["Ping"], stash_world=true. The single case does a fresh
+        // fuzz cases=1, ops=2, kinds=["ping"], stash_world=true. The single case does a fresh
         // setup at sub_seed(7, 0), so world = sub_seed(7, 0) as u32 + 2 accepted ops.
         let donor = resolved_pipeline(
-            fuzz_profile(1, 2, Some(vec!["Ping".to_string()]), None),
+            fuzz_profile(1, 2, Some(vec!["ping".to_string()]), None),
             harness_config::WorldSource::Fresh,
             true,
         );
@@ -2046,9 +1971,9 @@ mod tests {
             .unwrap();
         assert!(report.failure.is_none());
 
-        // Inheritor scenario with one Ping: exported value = donor world + 1.
+        // Inheritor scenario with one ping: exported value = donor world + 1.
         let path = temp_export_path("fuzz-handoff");
-        let steps = vec![mock_step("Ping", harness_config::ExpectStr::Accepted)];
+        let steps = vec![mock_step("ping", harness_config::ExpectStr::Accepted)];
         let inheritor = resolved_pipeline(
             scenario_profile_with_export(steps, path.to_str().unwrap()),
             harness_config::WorldSource::Inherit,
@@ -2069,11 +1994,11 @@ mod tests {
     #[tokio::test]
     async fn inherited_phase_forces_shrink_off() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
 
         // Stash a world with a passing donor.
         let donor = resolved_pipeline(
-            invariant_profile(3, Some(vec!["Ping".to_string()])),
+            invariant_profile(3, Some(vec!["ping".to_string()])),
             harness_config::WorldSource::Fresh,
             true,
         );
@@ -2083,13 +2008,13 @@ mod tests {
             .unwrap();
         assert!(report.failure.is_none());
 
-        // Inheritor invariant over Boom with shrink=true: a shrink rebuild would start from a
+        // Inheritor invariant over boom with shrink=true: a shrink rebuild would start from a
         // fresh setup, not the inherited world, so shrink is forced off. The failure stands but
         // is not marked shrunk.
         let inheritor = ResolvedProfile {
             world_source: harness_config::WorldSource::Inherit,
             ..resolved_with_shrink(
-                invariant_profile(3, Some(vec!["Boom".to_string()])),
+                invariant_profile(3, Some(vec!["boom".to_string()])),
                 true,
                 256,
             )
@@ -2108,13 +2033,13 @@ mod tests {
         // shrink `rebuild` does a fresh, unpatched setup and never re-applies the patch, so a
         // "still fails" verdict would be judged against a different starting world than the one
         // the failure surfaced under (the same apples-to-oranges hazard the Inherit guard
-        // prevents). Boom always fails regardless of the world value, so pre-fix this run would
+        // prevents). boom always fails regardless of the world value, so pre-fix this run would
         // have shrunk happily and marked `shrunk = true`; the guard is what keeps it false, so
         // the assertion genuinely discriminates.
         let mut registry = Registry::new();
         registry.register_with_patch(
             "mock",
-            || MockHarness,
+            mock_harness,
             mock_setup,
             |world: &mut u32, params: &toml::Table| {
                 if let Some(n) = params.get("add").and_then(|v| v.as_integer()) {
@@ -2124,12 +2049,12 @@ mod tests {
             },
         );
 
-        // Fresh invariant over Boom with shrink = true and phase_params add = 5: the fresh world
+        // Fresh invariant over boom with shrink = true and phase_params add = 5: the fresh world
         // is patched before the run, so shrink is forced off. The failure stands, unshrunk.
         let mut run = ResolvedProfile {
             world_source: harness_config::WorldSource::Fresh,
             ..resolved_with_shrink(
-                invariant_profile(3, Some(vec!["Boom".to_string()])),
+                invariant_profile(3, Some(vec!["boom".to_string()])),
                 true,
                 256,
             )
@@ -2149,14 +2074,14 @@ mod tests {
     #[tokio::test]
     async fn scenario_donor_hands_world_to_invariant_inheritor() {
         let mut registry = Registry::new();
-        registry.register_persistent("mock", || MockHarness, mock_setup);
+        registry.register_persistent("mock", mock_harness, mock_setup);
 
-        // Donor: scenario with 2 Ping steps. Fresh setup seeds world 7 (seed fixed at 7),
+        // Donor: scenario with 2 ping steps. Fresh setup seeds world 7 (seed fixed at 7),
         // 2 accepted Pings -> 9 stashed.
         let donor = resolved_pipeline(
             scenario_profile(vec![
-                mock_step("Ping", harness_config::ExpectStr::Accepted),
-                mock_step("Ping", harness_config::ExpectStr::Accepted),
+                mock_step("ping", harness_config::ExpectStr::Accepted),
+                mock_step("ping", harness_config::ExpectStr::Accepted),
             ]),
             harness_config::WorldSource::Fresh,
             true,
@@ -2167,9 +2092,9 @@ mod tests {
             .unwrap();
         assert!(report.failure.is_none(), "{:?}", report.failure);
 
-        // Middle: invariant, 3 Ping ops, inheriting the stashed 9, stashing 9 + 3 = 12.
+        // Middle: invariant, 3 ping ops, inheriting the stashed 9, stashing 9 + 3 = 12.
         let middle = resolved_pipeline(
-            invariant_profile(3, Some(vec!["Ping".to_string()])),
+            invariant_profile(3, Some(vec!["ping".to_string()])),
             harness_config::WorldSource::Inherit,
             true,
         );
@@ -2179,10 +2104,10 @@ mod tests {
             .unwrap();
         assert!(report.failure.is_none(), "{:?}", report.failure);
 
-        // Final: scenario with one Ping, exporting the world inherited from the invariant
+        // Final: scenario with one ping, exporting the world inherited from the invariant
         // phase. 7 fresh + 2 scenario + 3 invariant + 1 scenario = 13.
         let path = temp_export_path("scenario-to-invariant");
-        let steps = vec![mock_step("Ping", harness_config::ExpectStr::Accepted)];
+        let steps = vec![mock_step("ping", harness_config::ExpectStr::Accepted)];
         let inheritor = resolved_pipeline(
             scenario_profile_with_export(steps, path.to_str().unwrap()),
             harness_config::WorldSource::Inherit,
@@ -2206,13 +2131,13 @@ mod tests {
     #[tokio::test]
     async fn scenario_donor_hands_world_to_single_case_fuzz() {
         let mut registry = Registry::new();
-        registry.register_persistent("mock", || MockHarness, mock_setup);
+        registry.register_persistent("mock", mock_harness, mock_setup);
 
         // Donor: scenario 2 Pings, fresh setup seeds world 7 -> 9 stashed.
         let donor = resolved_pipeline(
             scenario_profile(vec![
-                mock_step("Ping", harness_config::ExpectStr::Accepted),
-                mock_step("Ping", harness_config::ExpectStr::Accepted),
+                mock_step("ping", harness_config::ExpectStr::Accepted),
+                mock_step("ping", harness_config::ExpectStr::Accepted),
             ]),
             harness_config::WorldSource::Fresh,
             true,
@@ -2223,10 +2148,10 @@ mod tests {
             .unwrap();
         assert!(report.failure.is_none(), "{:?}", report.failure);
 
-        // Middle: fuzz cases = 1, ops = 2, kinds = ["Ping"], inheriting the stashed 9 (NOT a
+        // Middle: fuzz cases = 1, ops = 2, kinds = ["ping"], inheriting the stashed 9 (NOT a
         // fresh setup, since world_source = Inherit), 2 accepted ops -> 11 stashed.
         let middle = resolved_pipeline(
-            fuzz_profile(1, 2, Some(vec!["Ping".to_string()]), None),
+            fuzz_profile(1, 2, Some(vec!["ping".to_string()]), None),
             harness_config::WorldSource::Inherit,
             true,
         );
@@ -2236,10 +2161,10 @@ mod tests {
             .unwrap();
         assert!(report.failure.is_none(), "{:?}", report.failure);
 
-        // Final: scenario with one Ping, exporting the world inherited from the fuzz phase.
+        // Final: scenario with one ping, exporting the world inherited from the fuzz phase.
         // 9 stashed + 2 fuzz ops + 1 scenario = 12.
         let path = temp_export_path("scenario-to-fuzz");
-        let steps = vec![mock_step("Ping", harness_config::ExpectStr::Accepted)];
+        let steps = vec![mock_step("ping", harness_config::ExpectStr::Accepted)];
         let inheritor = resolved_pipeline(
             scenario_profile_with_export(steps, path.to_str().unwrap()),
             harness_config::WorldSource::Inherit,
@@ -2267,7 +2192,7 @@ mod tests {
         let mut registry = Registry::new();
         registry.register_persistent_with_patch(
             "mock",
-            || MockHarness,
+            mock_harness,
             mock_setup,
             |world: &mut u32, params: &toml::Table| {
                 if let Some(n) = params.get("add").and_then(|v| v.as_integer()) {
@@ -2276,9 +2201,9 @@ mod tests {
                 Ok(())
             },
         );
-        // Donor: invariant, 3 Ping ops, seed 7 -> world 10, stashed.
+        // Donor: invariant, 3 ping ops, seed 7 -> world 10, stashed.
         let donor = resolved_pipeline(
-            invariant_profile(3, Some(vec!["Ping".to_string()])),
+            invariant_profile(3, Some(vec!["ping".to_string()])),
             harness_config::WorldSource::Fresh,
             true,
         );
@@ -2287,9 +2212,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Inheritor: params add = 5 patch the stashed 10 to 15 before one Ping lands: 16.
+        // Inheritor: params add = 5 patch the stashed 10 to 15 before one ping lands: 16.
         let path = temp_export_path("patched");
-        let steps = vec![mock_step("Ping", harness_config::ExpectStr::Accepted)];
+        let steps = vec![mock_step("ping", harness_config::ExpectStr::Accepted)];
         let mut inheritor = resolved_pipeline(
             scenario_profile_with_export(steps, path.to_str().unwrap()),
             harness_config::WorldSource::Inherit,
@@ -2305,7 +2230,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!(16),
-            "10 stashed + 5 patched + 1 Ping"
+            "10 stashed + 5 patched + 1 ping"
         );
         std::fs::remove_file(&path).ok();
     }
@@ -2315,7 +2240,7 @@ mod tests {
         let mut registry = Registry::new();
         registry.register_persistent_with_patch(
             "mock",
-            || MockHarness,
+            mock_harness,
             mock_setup,
             |world: &mut u32, params: &toml::Table| {
                 if let Some(n) = params.get("add").and_then(|v| v.as_integer()) {
@@ -2325,10 +2250,10 @@ mod tests {
             },
         );
 
-        // A Fresh scenario (one Ping) with phase_params add = 5: fresh setup seeds world 7 (the
-        // profile's fixed seed), the patch makes 12, one Ping makes 13. Observed via export.
+        // A Fresh scenario (one ping) with phase_params add = 5: fresh setup seeds world 7 (the
+        // profile's fixed seed), the patch makes 12, one ping makes 13. Observed via export.
         let path = temp_export_path("fresh-patched");
-        let steps = vec![mock_step("Ping", harness_config::ExpectStr::Accepted)];
+        let steps = vec![mock_step("ping", harness_config::ExpectStr::Accepted)];
         let mut run = resolved_pipeline(
             scenario_profile_with_export(steps, path.to_str().unwrap()),
             harness_config::WorldSource::Fresh,
@@ -2341,16 +2266,16 @@ mod tests {
             .unwrap();
         let value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value, serde_json::json!(13), "7 fresh + 5 patched + 1 Ping");
+        assert_eq!(value, serde_json::json!(13), "7 fresh + 5 patched + 1 ping");
         std::fs::remove_file(&path).ok();
     }
 
     #[tokio::test]
     async fn phase_params_without_a_patch_fn_are_invalid() {
         let mut registry = Registry::new();
-        registry.register("mock", || MockHarness, mock_setup);
+        registry.register("mock", mock_harness, mock_setup);
         let mut run = resolved_pipeline(
-            invariant_profile(1, Some(vec!["Ping".to_string()])),
+            invariant_profile(1, Some(vec!["ping".to_string()])),
             harness_config::WorldSource::Fresh,
             false,
         );
@@ -2367,12 +2292,12 @@ mod tests {
         let mut registry = Registry::new();
         registry.register_with_patch(
             "mock",
-            || MockHarness,
+            mock_harness,
             mock_setup,
             |_world: &mut u32, _params: &toml::Table| Err("bad params".to_string()),
         );
         let mut run = resolved_pipeline(
-            invariant_profile(1, Some(vec!["Ping".to_string()])),
+            invariant_profile(1, Some(vec!["ping".to_string()])),
             harness_config::WorldSource::Fresh,
             false,
         );
@@ -2399,13 +2324,13 @@ mod tests {
         let mut registry = Registry::new();
         registry.register_with_patch(
             "mock",
-            || MockHarness,
+            mock_harness,
             mock_setup,
             |_world: &mut u32, _params: &toml::Table| Err("patched".to_string()),
         );
 
         let mut run = resolved_pipeline(
-            fuzz_profile(1, 2, Some(vec!["Ping".to_string()]), None),
+            fuzz_profile(1, 2, Some(vec!["ping".to_string()]), None),
             harness_config::WorldSource::Fresh,
             false,
         );
@@ -2426,7 +2351,7 @@ mod tests {
         let mut registry = Registry::new();
         registry.register_with_patch(
             "mock",
-            || MockHarness,
+            mock_harness,
             mock_setup,
             |world: &mut u32, params: &toml::Table| {
                 if let Some(n) = params.get("add").and_then(|v| v.as_integer()) {
@@ -2439,7 +2364,7 @@ mod tests {
         // fuzz cases=5 with phase_params -> RunError::Invalid (fuzz does a fresh setup per case,
         // so there is no single world to patch).
         let mut run = resolved_pipeline(
-            fuzz_profile(5, 1, Some(vec!["Ping".to_string()]), None),
+            fuzz_profile(5, 1, Some(vec!["ping".to_string()]), None),
             harness_config::WorldSource::Fresh,
             false,
         );

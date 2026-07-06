@@ -52,10 +52,8 @@ pub mod test_bridge {
         case: Option<usize>,
         expected_cases: Option<usize>,
     ) where
-        H: crate::harness::Harness<Ctx = crate::harness::Ctx> + 'static,
+        H: crate::harness::ConfigOps + crate::harness::Harness<Ctx = crate::harness::Ctx> + 'static,
         H::World: 'static,
-        H::Operation: serde::Serialize + serde::de::DeserializeOwned + 'static,
-        H::OpKind: serde::Serialize + serde::de::DeserializeOwned + Copy + 'static,
         F: Fn() -> H + 'static,
         S: Fn(super::SetupRequest) -> super::SetupFuture<'static, H::World> + 'static,
     {

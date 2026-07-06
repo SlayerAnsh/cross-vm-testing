@@ -14,11 +14,11 @@
 
 use cross_vm_macros::config_runner;
 
-use cross_vm_tests::vault::{vault_config_setup, VaultHarness};
+use cross_vm_tests::vault::{vault_config_setup, vault_harness};
 
 #[config_runner(
     config = "vault.cross-vm.toml",
-    harness = VaultHarness,
+    harness = vault_harness(),
     setup = vault_config_setup,
     profile = "smoke"
 )]

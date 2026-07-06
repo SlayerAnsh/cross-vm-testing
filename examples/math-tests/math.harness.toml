@@ -21,10 +21,10 @@ ops = 200
 mode = "scenario"
 
   [[profile.steps.steps]]
-  op = { Add = 5 }
+  op = { add = { n = 5 } }
 
   [[profile.steps.steps]]
-  op = { Add = -3 }
+  op = { add = { n = -3 } }
 
 [suite.all]
 profiles = ["smoke", "invariants", "steps"]

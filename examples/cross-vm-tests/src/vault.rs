@@ -27,7 +27,7 @@ use crate::support::{fund_user, test_wallets, Vault};
 /// `deserialize_*` up through `u64`/`i64` (see its `forward_to_deserialize_any!` list); a bare
 /// `u128` field's derived `Deserialize` always hits serde's default `deserialize_u128`, which
 /// errors `"u128 is not supported"` regardless of the value's actual magnitude. Every scenario
-/// `amount` in practice fits a `u64` (see the [`VaultOp`] docs); deserialize as `u64` and widen,
+/// `amount` in practice fits a `u64` (see the op struct docs); deserialize as `u64` and widen,
 /// so a `[[profile.<name>.steps]]` TOML step round-trips.
 fn deserialize_u128_from_u64<'de, D>(deserializer: D) -> Result<u128, D::Error>
 where
@@ -43,76 +43,363 @@ const USERS: [&str; 2] = ["alice", "bob"];
 /// Loan-to-value ceiling, in basis points (50%).
 const LTV_BPS: u128 = 5000;
 
-/// One vault action: deposit, withdraw, borrow, or repay a given `amount` for `user` on `chain`.
-///
-/// Externally tagged (serde default) so a TOML scenario step writes
-/// `op = { Deposit = { chain = "eth", user = 0, amount = 1000 } }` (spec section 7.1). `amount` is
-/// `u128`; TOML cannot hold a `u128` literal directly, but every scenario amount in practice fits
-/// a `u64` (see [`deserialize_u128_from_u64`]), and fuzz/invariant-generated amounts are never
-/// round-tripped through TOML (they are only ever serialized into the JSON failure-history
-/// artifact, which handles `u128` natively — the `deserialize_with` below only narrows the TOML
-/// read path, `Serialize` is untouched).
+// Each op is externally tagged by its kind name so a TOML scenario step writes
+// `op = { deposit = { chain = "eth", user = 0, amount = 1000 } }` (spec section 7.1). `amount` is
+// `u128`; TOML cannot hold a `u128` literal directly, but every scenario amount in practice fits
+// a `u64` (see `deserialize_u128_from_u64`), and fuzz/invariant-generated amounts are never
+// round-tripped through TOML (they are only ever serialized into the JSON failure-history
+// artifact, which handles `u128` natively; the `deserialize_with` below only narrows the TOML
+// read path, `Serialize` is untouched).
+
+/// Credit `amount` of collateral to `user` on `chain`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum VaultOp {
-    /// Credit `amount` of collateral to `user` on `chain`.
-    Deposit {
-        /// The chain label (an injected `MultiChainEnv` key).
-        chain: String,
-        /// Index into the user roster (0 = alice, 1 = bob).
-        user: usize,
-        /// The amount to deposit.
-        #[serde(deserialize_with = "deserialize_u128_from_u64")]
-        amount: u128,
-    },
-    /// Withdraw `amount` of free collateral for `user` on `chain`.
-    Withdraw {
-        /// The chain label (an injected `MultiChainEnv` key).
-        chain: String,
-        /// Index into the user roster (0 = alice, 1 = bob).
-        user: usize,
-        /// The amount to withdraw.
-        #[serde(deserialize_with = "deserialize_u128_from_u64")]
-        amount: u128,
-    },
-    /// Borrow `amount` of debt against `user`'s collateral on `chain`.
-    Borrow {
-        /// The chain label (an injected `MultiChainEnv` key).
-        chain: String,
-        /// Index into the user roster (0 = alice, 1 = bob).
-        user: usize,
-        /// The amount to borrow.
-        #[serde(deserialize_with = "deserialize_u128_from_u64")]
-        amount: u128,
-    },
-    /// Repay `amount` of `user`'s debt on `chain`.
-    Repay {
-        /// The chain label (an injected `MultiChainEnv` key).
-        chain: String,
-        /// Index into the user roster (0 = alice, 1 = bob).
-        user: usize,
-        /// The amount to repay.
-        #[serde(deserialize_with = "deserialize_u128_from_u64")]
-        amount: u128,
-    },
+pub struct Deposit {
+    /// The chain label (an injected `MultiChainEnv` key).
+    pub chain: String,
+    /// Index into the user roster (0 = alice, 1 = bob).
+    pub user: usize,
+    /// The amount to deposit.
+    #[serde(deserialize_with = "deserialize_u128_from_u64")]
+    pub amount: u128,
 }
 
-/// The invariants [`VaultHarness`] checks after each op.
-///
-/// `pub` only because it is `Harness::Invariant` for the `pub` [`VaultHarness`] impl (an
-/// associated-type leak, not a type callers construct); its variants carry no data callers need.
+impl DynOp<Ctx, VaultWorld> for Deposit {
+    fn kind(&self) -> &'static str {
+        "deposit"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a mut Ctx,
+        w: &'a mut VaultWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            // Invalidate any prior deposit snapshot; re-armed at the end so the transition
+            // invariant applies to exactly this op.
+            w.pre = None;
+            let vault = vault_handle(ctx, w, &self.chain)?;
+            // Snapshot pre-state for the transition invariant (async query, stashed in World).
+            let before = vault
+                .collateral_of(USERS[self.user])
+                .await
+                .map_err(HarnessError::infra)?;
+            let res = vault.deposit(USERS[self.user], self.amount).await;
+            let verdict = classify(
+                true,
+                res,
+                || w.models.get_mut(&self.chain).unwrap().collateral[self.user] += self.amount,
+                "",
+                "valid deposit reverted",
+            )?;
+            w.pre = Some(DepositSnapshot {
+                chain: self.chain.clone(),
+                user: self.user,
+                before,
+                amount: self.amount,
+            });
+            Ok(verdict)
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<Ctx, VaultWorld>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
+    }
+}
+
+/// Withdraw `amount` of free collateral for `user` on `chain`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Withdraw {
+    /// The chain label (an injected `MultiChainEnv` key).
+    pub chain: String,
+    /// Index into the user roster (0 = alice, 1 = bob).
+    pub user: usize,
+    /// The amount to withdraw.
+    #[serde(deserialize_with = "deserialize_u128_from_u64")]
+    pub amount: u128,
+}
+
+impl DynOp<Ctx, VaultWorld> for Withdraw {
+    fn kind(&self) -> &'static str {
+        "withdraw"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a mut Ctx,
+        w: &'a mut VaultWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            w.pre = None;
+            let ok = w.models[&self.chain].can_withdraw(self.user, self.amount);
+            let vault = vault_handle(ctx, w, &self.chain)?;
+            let res = vault.withdraw(USERS[self.user], self.amount).await;
+            classify(
+                ok,
+                res,
+                || w.models.get_mut(&self.chain).unwrap().collateral[self.user] -= self.amount,
+                "over-withdraw was accepted",
+                "valid withdraw reverted",
+            )
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<Ctx, VaultWorld>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
+    }
+}
+
+/// Borrow `amount` of debt against `user`'s collateral on `chain`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Borrow {
+    /// The chain label (an injected `MultiChainEnv` key).
+    pub chain: String,
+    /// Index into the user roster (0 = alice, 1 = bob).
+    pub user: usize,
+    /// The amount to borrow.
+    #[serde(deserialize_with = "deserialize_u128_from_u64")]
+    pub amount: u128,
+}
+
+impl DynOp<Ctx, VaultWorld> for Borrow {
+    fn kind(&self) -> &'static str {
+        "borrow"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a mut Ctx,
+        w: &'a mut VaultWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            w.pre = None;
+            let ok = w.models[&self.chain].can_borrow(self.user, self.amount);
+            let vault = vault_handle(ctx, w, &self.chain)?;
+            let res = vault.borrow(USERS[self.user], self.amount).await;
+            classify(
+                ok,
+                res,
+                || w.models.get_mut(&self.chain).unwrap().debt[self.user] += self.amount,
+                "over-borrow was accepted (bad debt)",
+                "valid borrow reverted",
+            )
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<Ctx, VaultWorld>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
+    }
+}
+
+/// Repay `amount` of `user`'s debt on `chain`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Repay {
+    /// The chain label (an injected `MultiChainEnv` key).
+    pub chain: String,
+    /// Index into the user roster (0 = alice, 1 = bob).
+    pub user: usize,
+    /// The amount to repay.
+    #[serde(deserialize_with = "deserialize_u128_from_u64")]
+    pub amount: u128,
+}
+
+impl DynOp<Ctx, VaultWorld> for Repay {
+    fn kind(&self) -> &'static str {
+        "repay"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a mut Ctx,
+        w: &'a mut VaultWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            w.pre = None;
+            let ok = w.models[&self.chain].can_repay(self.user, self.amount);
+            let vault = vault_handle(ctx, w, &self.chain)?;
+            let res = vault.repay(USERS[self.user], self.amount).await;
+            classify(
+                ok,
+                res,
+                || w.models.get_mut(&self.chain).unwrap().debt[self.user] -= self.amount,
+                "over-repay was accepted",
+                "valid repay reverted",
+            )
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<Ctx, VaultWorld>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
+    }
+}
+
+/// Per-user chain collateral/debt equals the shadow model.
 #[derive(Clone, Debug)]
-pub enum VaultInv {
-    /// Per-user chain collateral/debt equals the shadow model.
-    ModelMatches,
-    /// No user's debt exceeds the LTV limit on their collateral.
-    NoBadDebt,
-    /// Aggregate debt is backed by aggregate collateral.
-    Solvency,
-    /// Transition invariant: after a `Deposit`, the depositor's on-chain collateral rose by exactly
-    /// the deposited amount. Compares live post-state against a snapshot `apply` took just before
-    /// the op (see `DepositSnapshot`); [`Skipped`](CheckOutcome::Skipped) when the last op was not
-    /// a deposit.
-    DepositTransition,
+pub struct ModelMatches;
+
+impl DynInvariant<Ctx, VaultWorld> for ModelMatches {
+    fn check<'a>(&'a self, ctx: &'a mut Ctx, w: &'a VaultWorld) -> OpFuture<'a, CheckOutcome> {
+        Box::pin(async move {
+            for label in LABELS {
+                let vault = match vault_handle(ctx, w, label) {
+                    Ok(v) => v,
+                    Err(e) => return CheckOutcome::violated(e.to_string()),
+                };
+                let model = &w.models[label];
+                for (i, user) in USERS.iter().enumerate() {
+                    let c = match vault.collateral_of(user).await {
+                        Ok(c) => c,
+                        Err(e) => return CheckOutcome::violated(e.to_string()),
+                    };
+                    let d = match vault.debt_of(user).await {
+                        Ok(d) => d,
+                        Err(e) => return CheckOutcome::violated(e.to_string()),
+                    };
+                    if c != model.collateral[i] || d != model.debt[i] {
+                        return CheckOutcome::violated(format!(
+                            "{label}/{user}: chain (c={c}, d={d}) != model (c={}, d={})",
+                            model.collateral[i], model.debt[i]
+                        ));
+                    }
+                }
+            }
+            CheckOutcome::Held
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynInvariant<Ctx, VaultWorld>> {
+        Box::new(self.clone())
+    }
+}
+
+/// No user's debt exceeds the LTV limit on their collateral.
+#[derive(Clone, Debug)]
+pub struct NoBadDebt;
+
+impl DynInvariant<Ctx, VaultWorld> for NoBadDebt {
+    fn check<'a>(&'a self, ctx: &'a mut Ctx, w: &'a VaultWorld) -> OpFuture<'a, CheckOutcome> {
+        Box::pin(async move {
+            for label in LABELS {
+                let vault = match vault_handle(ctx, w, label) {
+                    Ok(v) => v,
+                    Err(e) => return CheckOutcome::violated(e.to_string()),
+                };
+                for user in USERS {
+                    let c = match vault.collateral_of(user).await {
+                        Ok(c) => c,
+                        Err(e) => return CheckOutcome::violated(e.to_string()),
+                    };
+                    let d = match vault.debt_of(user).await {
+                        Ok(d) => d,
+                        Err(e) => return CheckOutcome::violated(e.to_string()),
+                    };
+                    if d > VaultModel::max_debt(c) {
+                        return CheckOutcome::violated(format!(
+                            "{label}/{user}: debt {d} exceeds max {}",
+                            VaultModel::max_debt(c)
+                        ));
+                    }
+                }
+            }
+            CheckOutcome::Held
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynInvariant<Ctx, VaultWorld>> {
+        Box::new(self.clone())
+    }
+}
+
+/// Aggregate debt is backed by aggregate collateral.
+#[derive(Clone, Debug)]
+pub struct Solvency;
+
+impl DynInvariant<Ctx, VaultWorld> for Solvency {
+    fn check<'a>(&'a self, ctx: &'a mut Ctx, w: &'a VaultWorld) -> OpFuture<'a, CheckOutcome> {
+        Box::pin(async move {
+            for label in LABELS {
+                let vault = match vault_handle(ctx, w, label) {
+                    Ok(v) => v,
+                    Err(e) => return CheckOutcome::violated(e.to_string()),
+                };
+                let (mut tot_c, mut tot_d) = (0u128, 0u128);
+                for user in USERS {
+                    match vault.collateral_of(user).await {
+                        Ok(c) => tot_c += c,
+                        Err(e) => return CheckOutcome::violated(e.to_string()),
+                    }
+                    match vault.debt_of(user).await {
+                        Ok(d) => tot_d += d,
+                        Err(e) => return CheckOutcome::violated(e.to_string()),
+                    }
+                }
+                if tot_d > VaultModel::max_debt(tot_c) {
+                    return CheckOutcome::violated(format!(
+                        "{label}: total debt {tot_d} exceeds max {}",
+                        VaultModel::max_debt(tot_c)
+                    ));
+                }
+            }
+            CheckOutcome::Held
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynInvariant<Ctx, VaultWorld>> {
+        Box::new(self.clone())
+    }
+}
+
+/// Transition invariant: after a `deposit`, the depositor's on-chain collateral rose by exactly
+/// the deposited amount. Compares live post-state against a snapshot `apply` took just before the
+/// op (see [`DepositSnapshot`]); [`skipped`](CheckOutcome::skipped) when the last op was not a
+/// deposit.
+#[derive(Clone, Debug)]
+pub struct DepositTransition;
+
+impl DynInvariant<Ctx, VaultWorld> for DepositTransition {
+    fn check<'a>(&'a self, ctx: &'a mut Ctx, w: &'a VaultWorld) -> OpFuture<'a, CheckOutcome> {
+        Box::pin(async move {
+            let Some(snap) = &w.pre else {
+                return CheckOutcome::skipped("last op was not a deposit");
+            };
+            let vault = match vault_handle(ctx, w, &snap.chain) {
+                Ok(v) => v,
+                Err(e) => return CheckOutcome::violated(e.to_string()),
+            };
+            let post = match vault.collateral_of(USERS[snap.user]).await {
+                Ok(c) => c,
+                Err(e) => return CheckOutcome::violated(e.to_string()),
+            };
+            let expected = snap.before + snap.amount;
+            if post == expected {
+                CheckOutcome::Held
+            } else {
+                CheckOutcome::violated(format!(
+                    "{}/{}: post-deposit collateral {post} != pre {} + amount {}",
+                    snap.chain, USERS[snap.user], snap.before, snap.amount
+                ))
+            }
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynInvariant<Ctx, VaultWorld>> {
+        Box::new(self.clone())
+    }
 }
 
 /// A pre-op snapshot for the [`VaultInv::DepositTransition`] invariant, captured inside `apply`
@@ -125,23 +412,6 @@ struct DepositSnapshot {
     before: u128,
     /// The amount deposited.
     amount: u128,
-}
-
-/// The data-free kinds of [`VaultOp`], for per-kind fuzzing.
-///
-/// `Copy` (required by the registry's `ConfigHarness` bound) plus externally tagged serde so a
-/// TOML profile can restrict/weight kinds by name (`kinds = ["Deposit", "Withdraw"]`,
-/// `weights = { Deposit = 40, ... }`, spec section 4.4).
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-pub enum VaultOpKind {
-    /// See [`VaultOp::Deposit`].
-    Deposit,
-    /// See [`VaultOp::Withdraw`].
-    Withdraw,
-    /// See [`VaultOp::Borrow`].
-    Borrow,
-    /// See [`VaultOp::Repay`].
-    Repay,
 }
 
 /// Per-chain shadow model.
@@ -183,255 +453,115 @@ pub struct VaultWorld {
     pre: Option<DepositSnapshot>,
 }
 
-/// The DeFi vault [`Harness`]: drives deposit/withdraw/borrow/repay across every chain in
-/// [`VaultWorld`] and checks solvency / no-bad-debt / model-match invariants.
-pub struct VaultHarness;
-
-impl VaultHarness {
-    /// Rebuild a `Vault` handle bound to the deployed instance on `label`.
-    fn vault(ctx: &Ctx, world: &VaultWorld, label: &str) -> Result<Vault, HarnessError> {
-        let chain = ctx.chain(label)?;
-        let addr = world
-            .addrs
-            .get(label)
-            .cloned()
-            .ok_or_else(|| HarnessError::infra(format!("no vault deployed on {label}")))?;
-        Ok(Vault::instance(chain, addr))
-    }
+/// Rebuild a `Vault` handle bound to the deployed instance on `label`.
+fn vault_handle(ctx: &Ctx, world: &VaultWorld, label: &str) -> Result<Vault, HarnessError> {
+    let chain = ctx.chain(label)?;
+    let addr = world
+        .addrs
+        .get(label)
+        .cloned()
+        .ok_or_else(|| HarnessError::infra(format!("no vault deployed on {label}")))?;
+    Ok(Vault::instance(chain, addr))
 }
 
-impl Harness for VaultHarness {
-    type Ctx = Ctx;
-    type World = VaultWorld;
-    type Operation = VaultOp;
-    type Invariant = VaultInv;
-    type OpKind = VaultOpKind;
+/// Pick a random `(chain, user)` for a generated op: the shared preamble of every generator.
+fn random_target(rng: &mut Prng) -> (String, usize) {
+    let chain = LABELS[rng.index(LABELS.len())].to_string();
+    let user = rng.index(USERS.len());
+    (chain, user)
+}
 
-    async fn apply(
-        &self,
-        ctx: &mut Ctx,
-        w: &mut VaultWorld,
-        op: &VaultOp,
-    ) -> Result<Verdict, HarnessError> {
-        // Invalidate any prior deposit snapshot; the Deposit arm re-arms it below. This makes the
-        // transition invariant apply to exactly the op that just ran.
-        w.pre = None;
-        match op {
-            VaultOp::Deposit {
-                chain,
-                user,
-                amount,
-            } => {
-                let vault = Self::vault(ctx, w, chain)?;
-                // Snapshot pre-state for the transition invariant (async query, stashed in World).
-                let before = vault
-                    .collateral_of(USERS[*user])
-                    .await
-                    .map_err(HarnessError::infra)?;
-                let res = vault.deposit(USERS[*user], *amount).await;
-                let verdict = classify(
-                    true,
-                    res,
-                    || w.models.get_mut(chain).unwrap().collateral[*user] += *amount,
-                    "",
-                    "valid deposit reverted",
-                )?;
-                w.pre = Some(DepositSnapshot {
-                    chain: chain.clone(),
-                    user: *user,
-                    before,
-                    amount: *amount,
-                });
-                Ok(verdict)
-            }
-            VaultOp::Withdraw {
-                chain,
-                user,
-                amount,
-            } => {
-                let ok = w.models[chain].can_withdraw(*user, *amount);
-                let vault = Self::vault(ctx, w, chain)?;
-                let res = vault.withdraw(USERS[*user], *amount).await;
-                classify(
-                    ok,
-                    res,
-                    || w.models.get_mut(chain).unwrap().collateral[*user] -= *amount,
-                    "over-withdraw was accepted",
-                    "valid withdraw reverted",
-                )
-            }
-            VaultOp::Borrow {
-                chain,
-                user,
-                amount,
-            } => {
-                let ok = w.models[chain].can_borrow(*user, *amount);
-                let vault = Self::vault(ctx, w, chain)?;
-                let res = vault.borrow(USERS[*user], *amount).await;
-                classify(
-                    ok,
-                    res,
-                    || w.models.get_mut(chain).unwrap().debt[*user] += *amount,
-                    "over-borrow was accepted (bad debt)",
-                    "valid borrow reverted",
-                )
-            }
-            VaultOp::Repay {
-                chain,
-                user,
-                amount,
-            } => {
-                let ok = w.models[chain].can_repay(*user, *amount);
-                let vault = Self::vault(ctx, w, chain)?;
-                let res = vault.repay(USERS[*user], *amount).await;
-                classify(
-                    ok,
-                    res,
-                    || w.models.get_mut(chain).unwrap().debt[*user] -= *amount,
-                    "over-repay was accepted",
-                    "valid repay reverted",
-                )
-            }
-        }
-    }
+fn gen_deposit(rng: &mut Prng, _w: &VaultWorld) -> Box<dyn DynOp<Ctx, VaultWorld>> {
+    let (chain, user) = random_target(rng);
+    Box::new(Deposit {
+        chain,
+        user,
+        amount: rng.range(1, 1_000_000),
+    })
+}
 
-    fn op_kinds(&self) -> Vec<VaultOpKind> {
-        vec![
-            VaultOpKind::Deposit,
-            VaultOpKind::Withdraw,
-            VaultOpKind::Borrow,
-            VaultOpKind::Repay,
-        ]
-    }
+fn gen_withdraw(rng: &mut Prng, w: &VaultWorld) -> Box<dyn DynOp<Ctx, VaultWorld>> {
+    let (chain, user) = random_target(rng);
+    // Span past free collateral so some withdraws are (correctly) rejected.
+    let amount = rng.range(1, w.models[&chain].collateral[user].max(1) * 2 + 2);
+    Box::new(Withdraw {
+        chain,
+        user,
+        amount,
+    })
+}
 
-    fn generate_op(&self, rng: &mut Prng, w: &VaultWorld, kind: VaultOpKind) -> VaultOp {
-        let chain = LABELS[rng.index(LABELS.len())].to_string();
-        let user = rng.index(USERS.len());
-        let model = &w.models[&chain];
-        match kind {
-            VaultOpKind::Deposit => VaultOp::Deposit {
-                chain,
-                user,
-                amount: rng.range(1, 1_000_000),
-            },
-            VaultOpKind::Withdraw => VaultOp::Withdraw {
-                // Span past free collateral so some withdraws are (correctly) rejected.
-                chain,
-                user,
-                amount: rng.range(1, model.collateral[user].max(1) * 2 + 2),
-            },
-            VaultOpKind::Borrow => VaultOp::Borrow {
-                chain,
-                user,
-                amount: rng.range(1, VaultModel::max_debt(model.collateral[user]).max(1) + 2),
-            },
-            VaultOpKind::Repay => VaultOp::Repay {
-                chain,
-                user,
-                amount: rng.range(1, model.debt[user].max(1) + 2),
-            },
-        }
-    }
+fn gen_borrow(rng: &mut Prng, w: &VaultWorld) -> Box<dyn DynOp<Ctx, VaultWorld>> {
+    let (chain, user) = random_target(rng);
+    let amount = rng.range(
+        1,
+        VaultModel::max_debt(w.models[&chain].collateral[user]).max(1) + 2,
+    );
+    Box::new(Borrow {
+        chain,
+        user,
+        amount,
+    })
+}
 
-    // Deposit-heavy kind mix; `generate_op` still owns all per-kind data.
-    fn weight(&self, _ctx: &Ctx, _w: &VaultWorld, kind: VaultOpKind) -> u32 {
-        match kind {
-            VaultOpKind::Deposit => 40,
-            VaultOpKind::Withdraw => 25,
-            VaultOpKind::Borrow => 20,
-            VaultOpKind::Repay => 15,
-        }
-    }
+fn gen_repay(rng: &mut Prng, w: &VaultWorld) -> Box<dyn DynOp<Ctx, VaultWorld>> {
+    let (chain, user) = random_target(rng);
+    let amount = rng.range(1, w.models[&chain].debt[user].max(1) + 2);
+    Box::new(Repay {
+        chain,
+        user,
+        amount,
+    })
+}
 
-    fn invariants(&self) -> Vec<VaultInv> {
-        vec![
-            VaultInv::ModelMatches,
-            VaultInv::NoBadDebt,
-            VaultInv::Solvency,
-            VaultInv::DepositTransition,
-        ]
-    }
+// Deposit-heavy kind mix; the generators still own all per-kind data.
+fn weight_deposit(_ctx: &Ctx, _w: &VaultWorld) -> u32 {
+    40
+}
 
-    async fn advance(&self, ctx: &mut Ctx, blocks: u64) -> Result<(), HarnessError> {
+fn weight_withdraw(_ctx: &Ctx, _w: &VaultWorld) -> u32 {
+    25
+}
+
+fn weight_borrow(_ctx: &Ctx, _w: &VaultWorld) -> u32 {
+    20
+}
+
+fn weight_repay(_ctx: &Ctx, _w: &VaultWorld) -> u32 {
+    15
+}
+
+fn advance(ctx: &mut Ctx, blocks: u64) -> OpFuture<'_, Result<(), HarnessError>> {
+    Box::pin(async move {
         ctx.advance_all(blocks).await;
         Ok(())
-    }
+    })
+}
 
-    async fn check(&self, ctx: &mut Ctx, w: &VaultWorld, inv: &VaultInv) -> CheckOutcome {
-        // Transition invariant: diff live post-state against the snapshot `apply` stashed in World.
-        if let VaultInv::DepositTransition = inv {
-            let Some(snap) = &w.pre else {
-                return CheckOutcome::skipped("last op was not a deposit");
-            };
-            let vault = match Self::vault(ctx, w, &snap.chain) {
-                Ok(v) => v,
-                Err(e) => return CheckOutcome::violated(e.to_string()),
-            };
-            let post = match vault.collateral_of(USERS[snap.user]).await {
-                Ok(c) => c,
-                Err(e) => return CheckOutcome::violated(e.to_string()),
-            };
-            let expected = snap.before + snap.amount;
-            return if post == expected {
-                CheckOutcome::Held
-            } else {
-                CheckOutcome::violated(format!(
-                    "{}/{}: post-deposit collateral {post} != pre {} + amount {}",
-                    snap.chain, USERS[snap.user], snap.before, snap.amount
-                ))
-            };
-        }
-        for label in LABELS {
-            let vault = match Self::vault(ctx, w, label) {
-                Ok(v) => v,
-                Err(e) => return CheckOutcome::violated(e.to_string()),
-            };
-            let model = &w.models[label];
-            let (mut tot_c, mut tot_d) = (0u128, 0u128);
-            for (i, user) in USERS.iter().enumerate() {
-                let c = match vault.collateral_of(user).await {
-                    Ok(c) => c,
-                    Err(e) => return CheckOutcome::violated(e.to_string()),
-                };
-                let d = match vault.debt_of(user).await {
-                    Ok(d) => d,
-                    Err(e) => return CheckOutcome::violated(e.to_string()),
-                };
-                tot_c += c;
-                tot_d += d;
-                match inv {
-                    VaultInv::ModelMatches => {
-                        if c != model.collateral[i] || d != model.debt[i] {
-                            return CheckOutcome::violated(format!(
-                                "{label}/{user}: chain (c={c}, d={d}) != model (c={}, d={})",
-                                model.collateral[i], model.debt[i]
-                            ));
-                        }
-                    }
-                    VaultInv::NoBadDebt => {
-                        if d > VaultModel::max_debt(c) {
-                            return CheckOutcome::violated(format!(
-                                "{label}/{user}: debt {d} exceeds max {}",
-                                VaultModel::max_debt(c)
-                            ));
-                        }
-                    }
-                    VaultInv::Solvency => {}
-                    // Handled before the per-chain loop; unreachable here.
-                    VaultInv::DepositTransition => {}
-                }
-            }
-            if let VaultInv::Solvency = inv {
-                if tot_d > VaultModel::max_debt(tot_c) {
-                    return CheckOutcome::violated(format!(
-                        "{label}: total debt {tot_d} exceeds max {}",
-                        VaultModel::max_debt(tot_c)
-                    ));
-                }
-            }
-        }
-        CheckOutcome::Held
-    }
+/// The DeFi vault harness: drives deposit/withdraw/borrow/repay across every chain in
+/// [`VaultWorld`] and checks solvency / no-bad-debt / model-match / deposit-transition invariants.
+pub fn vault_harness() -> OpSetHarness<Ctx, VaultWorld> {
+    OpSetHarness::new()
+        .register(
+            OpDef::new("deposit", gen_deposit, decode_json_op::<Deposit, _, _>)
+                .with_weight(weight_deposit),
+        )
+        .register(
+            OpDef::new("withdraw", gen_withdraw, decode_json_op::<Withdraw, _, _>)
+                .with_weight(weight_withdraw),
+        )
+        .register(
+            OpDef::new("borrow", gen_borrow, decode_json_op::<Borrow, _, _>)
+                .with_weight(weight_borrow),
+        )
+        .register(
+            OpDef::new("repay", gen_repay, decode_json_op::<Repay, _, _>).with_weight(weight_repay),
+        )
+        .invariant(Box::new(ModelMatches))
+        .invariant(Box::new(NoBadDebt))
+        .invariant(Box::new(Solvency))
+        .invariant(Box::new(DepositTransition))
+        .with_advance(advance)
 }
 
 /// Fund both users and deploy a fresh `Vault` on `label`, priming `addrs`/`models` for it.

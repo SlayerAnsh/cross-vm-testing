@@ -9,11 +9,11 @@ name = "boom"
 seed = 1
 check_every = 1
 
-# Mixes Noop/Boom so the failing history has real Noops to shrink away; shrink is on, so the CLI
+# Mixes noop/boom so the failing history has real Noops to shrink away; shrink is on, so the CLI
 # both writes a minimized artifact and the JSON report's failure.shrunk = true.
 [profile.fails]
 mode = "fuzz"
 cases = 1
 ops = 20
-kinds = ["Noop", "Boom"]
+kinds = ["noop", "boom"]
 shrink = true

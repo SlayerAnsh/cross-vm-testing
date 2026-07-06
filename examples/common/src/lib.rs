@@ -7,7 +7,7 @@
 //! and hand-copied discriminators.
 //!
 //! [`contracts`] holds the reusable contract *wrappers* and their harnesses (e.g. the `Counter`
-//! wrapper + `CounterHarness`), gated the same per-VM way so a single-VM crate compiles only its VM.
+//! wrapper + `counter_harness`), gated the same per-VM way so a single-VM crate compiles only its VM.
 //!
 //! [`wallets`] holds the shared wallet factory and per-VM funding helpers, and [`init_tracing`]
 //! installs a libtest-friendly tracing subscriber. Both are ungated and used by every test crate.

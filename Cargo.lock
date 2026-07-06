@@ -2303,6 +2303,7 @@ dependencies = [
  "cw-multi-test",
  "ping-pong",
  "serde",
+ "serde_json",
  "solana-instruction",
  "solana-system-interface 2.0.0",
  "tracing-subscriber 0.3.23",

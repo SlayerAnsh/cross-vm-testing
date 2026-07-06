@@ -258,16 +258,18 @@ fn a_failing_fuzz_profile_writes_a_shrunk_replay_artifact() {
     );
 
     let text = std::fs::read_to_string(&artifact_path).expect("read artifact");
-    // `boom.cross-vm.toml`'s `fails` profile sets `shrink = true` and mixes Noop/Boom over 20
-    // ops; Boom fails the exact same way regardless of any Noops before it, so the artifact's
+    // `boom.cross-vm.toml`'s `fails` profile sets `shrink = true` and mixes noop/boom over 20
+    // ops; boom fails the exact same way regardless of any noops before it, so the artifact's
     // history must be minimized down to the one op that actually matters.
     assert!(text.contains("shrunk = true"), "{text}");
     assert_eq!(
-        text.matches("op = ").count(),
+        text.matches("[[profile.replay.steps]]").count(),
         1,
         "shrink must minimize the history to a single step: {text}"
     );
-    assert!(text.contains(r#"op = "Boom""#), "{text}");
+    // The op is externally tagged by its lowercase kind name; an empty-field op serializes as a
+    // sub-table keyed by the kind (`[profile.replay.steps.op.boom]`).
+    assert!(text.contains("op.boom"), "{text}");
 
     // The artifact must be a valid config on its own: `cross-vm validate` never touches a chain.
     let validate_out = cross_vm(&["validate", artifact_path.to_str().unwrap()]);
@@ -463,13 +465,13 @@ check_every = 1
 mode = "fuzz"
 cases = 8
 ops = 5
-kinds = ["Noop"]
+kinds = ["noop"]
 
 [profile.inheritor]
 mode = "fuzz"
 cases = 1
 ops = 5
-kinds = ["Noop"]
+kinds = ["noop"]
 
 [suite.bad]
 

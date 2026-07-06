@@ -4,7 +4,7 @@
 //! The vault harness (`crate::vault`) has no reachable bug: every fuzz/invariant run over it is
 //! expected to pass, so it cannot exercise "the CLI writes a replay artifact on a generative
 //! failure, then `cross-vm replay <artifact>` reproduces it" as a real subprocess test without
-//! deliberately introducing a fake vault-contract bug. [`BoomHarness`] sidesteps that: `Boom`
+//! deliberately introducing a fake vault-contract bug. The `boom_harness` sidesteps that: `boom`
 //! always fails the same way, and `Noop` always passes, so a fuzz profile mixing the two kinds
 //! gives `tests/cli_e2e.rs` a small, real, deterministic failure to write an artifact for and
 //! replay, without touching the vault's own (deliberately correct) contract logic.
@@ -12,86 +12,106 @@
 use cross_vm_framework::config::{SetupFuture, SetupRequest};
 use cross_vm_framework::prelude::*;
 
-/// The two [`BoomOp`] kinds, for `kinds`/`weights` restriction in a config profile.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-pub enum BoomOpKind {
-    /// See [`BoomOp::Noop`].
-    Noop,
-    /// See [`BoomOp::Boom`].
-    Boom,
-}
-
-/// One [`BoomHarness`] operation: `Noop` always passes, `Boom` always fails the exact same way.
+/// Always accepted; advances `steps` without doing anything else.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum BoomOp {
-    /// Always accepted; advances `steps` without doing anything else.
-    Noop,
-    /// Always a [`HarnessError::Bug`] with a fixed, state-independent message.
-    Boom,
+pub struct Noop {}
+
+impl DynOp<Ctx, ()> for Noop {
+    fn kind(&self) -> &'static str {
+        "noop"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        _ctx: &'a mut Ctx,
+        _world: &'a mut (),
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move { Ok(Verdict::Accepted) })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<Ctx, ()>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
+    }
 }
 
-/// [`BoomHarness`]'s only invariant; it always holds (the harness's failure mode is `apply`
+/// Always a [`HarnessError::Bug`] with a fixed, state-independent message.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Boom {}
+
+impl DynOp<Ctx, ()> for Boom {
+    fn kind(&self) -> &'static str {
+        "boom"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        _ctx: &'a mut Ctx,
+        _world: &'a mut (),
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            Err(HarnessError::Bug(
+                "boom: deterministic failure for replay-loop e2e coverage".to_string(),
+            ))
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<Ctx, ()>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
+    }
+}
+
+/// The boom harness's only invariant; it always holds (the harness's failure mode is `apply`
 /// returning `Bug`, never an invariant violation).
 #[derive(Clone, Debug)]
-pub enum BoomInvariant {
-    /// Trivially always holds.
-    AlwaysHolds,
+pub struct AlwaysHolds;
+
+impl DynInvariant<Ctx, ()> for AlwaysHolds {
+    fn check<'a>(&'a self, _ctx: &'a mut Ctx, _world: &'a ()) -> OpFuture<'a, CheckOutcome> {
+        Box::pin(async move { CheckOutcome::Held })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynInvariant<Ctx, ()>> {
+        Box::new(self.clone())
+    }
 }
 
-/// A harness with exactly one way to fail: `apply`-ing a [`BoomOp::Boom`] always returns the same
-/// [`HarnessError::Bug`], regardless of anything that came before it. This makes shrink's
-/// "still fails the same way" check trivially satisfiable by any sequence containing a `Boom`,
-/// which is exactly what a replay-artifact/shrink end-to-end test needs: a real, reproducible
-/// failure with no dependency on live chain state.
-pub struct BoomHarness;
+fn gen_noop(_rng: &mut Prng, _world: &()) -> Box<dyn DynOp<Ctx, ()>> {
+    Box::new(Noop {})
+}
 
-impl Harness for BoomHarness {
-    type Ctx = Ctx;
-    type World = ();
-    type Operation = BoomOp;
-    type Invariant = BoomInvariant;
-    type OpKind = BoomOpKind;
+fn gen_boom(_rng: &mut Prng, _world: &()) -> Box<dyn DynOp<Ctx, ()>> {
+    Box::new(Boom {})
+}
 
-    async fn apply(
-        &self,
-        _ctx: &mut Ctx,
-        _world: &mut (),
-        op: &BoomOp,
-    ) -> Result<Verdict, HarnessError> {
-        match op {
-            BoomOp::Noop => Ok(Verdict::Accepted),
-            BoomOp::Boom => Err(HarnessError::Bug(
-                "boom: deterministic failure for replay-loop e2e coverage".to_string(),
-            )),
-        }
-    }
-
-    fn op_kinds(&self) -> Vec<BoomOpKind> {
-        vec![BoomOpKind::Noop, BoomOpKind::Boom]
-    }
-
-    fn generate_op(&self, _rng: &mut Prng, _world: &(), kind: BoomOpKind) -> BoomOp {
-        match kind {
-            BoomOpKind::Noop => BoomOp::Noop,
-            BoomOpKind::Boom => BoomOp::Boom,
-        }
-    }
-
-    fn invariants(&self) -> Vec<BoomInvariant> {
-        vec![BoomInvariant::AlwaysHolds]
-    }
-
-    async fn advance(&self, ctx: &mut Ctx, blocks: u64) -> Result<(), HarnessError> {
+fn advance(ctx: &mut Ctx, blocks: u64) -> OpFuture<'_, Result<(), HarnessError>> {
+    Box::pin(async move {
         ctx.advance_all(blocks).await;
         Ok(())
-    }
-
-    async fn check(&self, _ctx: &mut Ctx, _world: &(), _inv: &BoomInvariant) -> CheckOutcome {
-        CheckOutcome::Held
-    }
+    })
 }
 
-/// The config-driven setup for [`BoomHarness`]: no chains at all (an empty wallet roster, no
+/// A harness with exactly one way to fail: `apply`-ing a `boom` op always returns the same
+/// [`HarnessError::Bug`], regardless of anything that came before it. This makes shrink's
+/// "still fails the same way" check trivially satisfiable by any sequence containing a `boom`,
+/// which is exactly what a replay-artifact/shrink end-to-end test needs: a real, reproducible
+/// failure with no dependency on live chain state.
+pub fn boom_harness() -> OpSetHarness<Ctx, ()> {
+    OpSetHarness::new()
+        .register(OpDef::new("noop", gen_noop, decode_json_op::<Noop, _, _>))
+        .register(OpDef::new("boom", gen_boom, decode_json_op::<Boom, _, _>))
+        .invariant(Box::new(AlwaysHolds))
+        .with_advance(advance)
+}
+
+/// The config-driven setup for [`boom_harness`]: no chains at all (an empty wallet roster, no
 /// `MultiChainEnv` injections), since `apply` never touches `Ctx`.
 pub fn boom_setup(_req: SetupRequest) -> SetupFuture<'static, ()> {
     Box::pin(async move {

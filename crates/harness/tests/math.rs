@@ -1,5 +1,8 @@
 //! Standalone example: drive `harness-core` against a small math library with `Ctx = ()`.
 //!
+//! This file pins the runner contract through a raw `Harness` impl; it is not the developer-facing
+//! pattern, which is `OpSetHarness` plus `DynOp` structs (see `tests/opset.rs`).
+//!
 //! Nothing here depends on any chain crate. The system under test is a `Calculator` (an `i32`
 //! accumulator with checked add, sub, mul, and divide), checked against an `i64` shadow model
 //! that predicts, for each operation, whether the `i32` calculator should accept it (result in

@@ -166,18 +166,18 @@ Each crate has unit tests (chain metadata, account creation, balance set/get, bl
   * Solana: `include_bytes!` loads `contracts/solana/target/deploy/counter.so` (`cargo-build-sbf`).
   * `tests/cli_e2e.rs` drives the `cross-vm` binary itself as a subprocess (`Command::new(env!("CARGO_BIN_EXE_cross-vm"))`) against `vault.cross-vm.toml` and `vault.no-chains.cross-vm.toml`, checking exit codes and seed reproducibility exactly as a user would see them. See "The `cross-vm` CLI binary" below.
 
-## Dyn-op registry (`opset`)
+## Defining a harness (`OpSetHarness`)
 
-`harness-core` offers a second way to assemble a harness. Instead of one `Operation` enum with match arms spread across `apply`, `generate_op`, and `weight`, each operation is a standalone struct implementing `DynOp<C, W>`, registered into an `OpSetHarness<C, W>`:
+A harness is a set of registered operation structs plus invariants. Each operation is a standalone struct implementing `DynOp<C, W>` (its data fields plus `kind`, `apply`, `clone_box`, `to_data`); each op struct derives `Serialize`/`Deserialize`, and every `OpDef` carries a decoder (`decode_json_op::<TheOp, _, _>`), so any registered harness works with config, CLI, scenario, and replay. Invariants follow the same shape via `DynInvariant<C, W>`. Assemble them into an `OpSetHarness<C, W>`:
 
 ```rust
 let harness = OpSetHarness::new()
-    .register(OpDef::new("add", gen_add))
-    .register(OpDef::new("sub", gen_sub).with_weight(sub_weight))
+    .register(OpDef::new("add", gen_add, decode_json_op::<Add, _, _>))
+    .register(OpDef::new("sub", gen_sub, decode_json_op::<Sub, _, _>).with_weight(sub_weight))
     .invariant(Box::new(MatchesModel));
 ```
 
-`OpSetHarness` implements the normal `Harness` trait (`Operation = Box<dyn DynOp<C, W>>`, `OpKind = &'static str`), so every runner mode, shrinking, and replay work unchanged, and kind names match config `weights` keys directly. Ops are unit-testable without a runner (call `apply` on the struct directly). See `crates/harness/tests/opset.rs` for the complete worked example. The enum path remains preferred for small harnesses (two or three ops); the registry pays off as the op count grows or when ops are shared across harnesses.
+`OpSetHarness` implements the internal `Harness` trait (`Operation = DynOperation<C, W>`, `OpKind = &'static str`), the runner seam every mode drives through, so fuzz, invariant, endurance, scenario, shrinking, and replay all work unchanged, and kind names (the lowercase `OpDef` names) match config `kinds`/`weights` keys and scenario `op` tags directly. Adding an operation touches one `OpDef`, and an op is unit-testable without a runner (call `apply` on the struct directly). See `crates/harness/tests/opset.rs` for a complete worked example, and `examples/math-tests` for the config-and-CLI wiring. Most developers never implement the `Harness` trait by hand; it is the runner contract `OpSetHarness` satisfies, which a few internal tests pin directly (`crates/harness/tests/pure_function.rs`, `math.rs`).
 
 ## The `cross-vm` CLI binary
 

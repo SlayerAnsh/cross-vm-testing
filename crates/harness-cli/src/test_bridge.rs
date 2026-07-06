@@ -22,10 +22,7 @@
 
 use std::path::Path;
 
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-
-use harness_core::Harness;
+use harness_core::ConfigOps;
 
 use crate::domain::{CliDomain, SetupFuture};
 use crate::registry::{self, Registry};
@@ -72,11 +69,9 @@ pub async fn run_profile_for_test<D, H, F, SF>(
     expected_cases: Option<usize>,
 ) where
     D: CliDomain,
-    H: Harness + 'static,
+    H: ConfigOps + 'static,
     H::Ctx: 'static,
     H::World: 'static,
-    H::Operation: Serialize + DeserializeOwned + 'static,
-    H::OpKind: Serialize + DeserializeOwned + Copy + 'static,
     F: Fn() -> H + 'static,
     SF: Fn(D::Setup) -> SetupFuture<'static, H::Ctx, H::World> + 'static,
 {
@@ -111,7 +106,8 @@ pub async fn run_profile_for_test<D, H, F, SF>(
             }
 
             let ops = p.ops;
-            let selection = registry::parse_kind_selection::<H>(&p.kinds, &p.weights)
+            let codec = harness();
+            let selection = registry::parse_kind_selection(&codec, &p.kinds, &p.weights)
                 .unwrap_or_else(|e| panic!("run_profile_for_test: {e}"));
             let base_seed = registry::resolve_base_seed(resolved.seed);
 

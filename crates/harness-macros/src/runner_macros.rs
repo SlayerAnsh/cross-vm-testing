@@ -8,11 +8,11 @@
 //! fans the test out into one `#[tokio::test]` per case (seeded by `sub_seed(seed, i)`).
 //!
 //! ```ignore
-//! #[fuzz_runner(harness = VaultHarness, seed = 11, cases = 50)]
-//! async fn vault_deposit(#[runner] mut r: FuzzRunner<VaultHarness>) {
+//! #[fuzz_runner(harness = vault_harness(), seed = 11, cases = 50)]
+//! async fn vault_deposit(#[runner] mut r: FuzzRunner<OpSetHarness<Ctx, VaultWorld>>) {
 //!     let (ctx, world) = vault_deposit_setup(r.seed()).await.expect("setup");
 //!     r.setup(ctx, world);
-//!     let report = r.run(1, Some(&[VaultOpKind::Deposit]), 1).await;
+//!     let report = r.run(1, Some(&["deposit"]), 1).await;
 //!     assert!(report.passed(), "{:?}", report.failure);
 //! }
 //! // -> tests vault_deposit_case_0 .. vault_deposit_case_49

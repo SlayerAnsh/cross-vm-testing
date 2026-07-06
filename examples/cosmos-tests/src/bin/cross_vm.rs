@@ -9,13 +9,13 @@
 //! `current_thread` is required: the erased registry layer, and every mock VM, are `!Send` by
 //! design (see `cross_vm_framework::cli::Cli::main`'s docs).
 
-use cosmos_tests::counter::{counter_config_setup, CounterHarness};
+use cosmos_tests::counter::{counter_config_setup, counter_harness};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::process::ExitCode {
     cross_vm_framework::cli::Cli::new()
         .env_file(".env")
-        .register("counter", || CounterHarness, counter_config_setup)
+        .register("counter", counter_harness, counter_config_setup)
         .main()
         .await
 }

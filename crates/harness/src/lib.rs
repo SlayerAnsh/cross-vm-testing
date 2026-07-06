@@ -1,14 +1,15 @@
 //! Property-style testing over a user-defined `(Ctx, World)` pair.
 //!
-//! A developer implements one [`Harness`] over two cleanly separated pieces:
+//! A developer describes one system under test over two cleanly separated pieces:
 //! - [`Ctx`](Harness::Ctx): the live system-under-test, threaded by `&mut` through every step.
 //! - [`World`](Harness::World): persisted bookkeeping only (an in-memory shadow model, flags, and
 //!   any identifiers learned so far).
 //!
-//! Plus an `Operation` enum, an `Invariant` enum, and the functions that apply an operation,
-//! generate operations, and check invariants. `Ctx` is the live system-under-test, `World` is
-//! persisted bookkeeping; the developer builds both and loads them into a mode-typed [`Runner`]
-//! with [`Runner::setup`]. That single harness implementation then drives every run mode:
+//! Operations are standalone structs: each implements [`DynOp`] (its data plus its own `apply`)
+//! and registers into an [`OpSetHarness`] through one [`OpDef`] (kind name, generator, decoder,
+//! optional weight); invariants follow the same shape via [`DynInvariant`]. The assembled
+//! `OpSetHarness` is the value the developer builds and loads into a mode-typed [`Runner`] with
+//! [`Runner::setup`]. That single harness then drives every run mode:
 //!
 //! - **Fuzz** ([`FuzzRunner`]): a short random sequence over the loaded ctx+world; the
 //!   `#[fuzz_runner]` attribute fans one `#[tokio::test]` out per case, each with its own setup.
@@ -26,10 +27,11 @@
 //! The same `apply` is reused by every mode: no test logic is written twice. An invariant whose
 //! precondition has not occurred yet returns [`CheckOutcome::Skipped`] instead of failing.
 //!
-//! Operations can alternatively be assembled without an enum: implement [`DynOp`] on standalone
-//! op structs and register them into an [`OpSetHarness`] (one [`OpDef`] per kind, invariants via
-//! [`DynInvariant`]). The registry implements [`Harness`] with boxed ops, so every runner mode,
-//! shrinking, and replay work unchanged; see `tests/opset.rs` for a complete worked example.
+//! [`OpSetHarness`] implements the [`Harness`] trait (its `Operation` is a boxed [`DynOp`], its
+//! `OpKind` is the `&'static str` kind name), which is the runner seam every mode, shrinking, and
+//! replay drive through. Most developers never implement [`Harness`] directly; advanced users who
+//! need a hand-written runner contract still can. See `tests/opset.rs` for a complete worked
+//! example, and [`ConfigOps`] for the codec that carries a harness through config and CLI runs.
 
 mod opset;
 mod outcome;
@@ -40,7 +42,8 @@ mod stats;
 #[cfg(feature = "macros")]
 pub use harness_core_macros::{endurance_runner, fuzz_runner, invariant_runner};
 pub use opset::{
-    AdvanceFn, DynInvariant, DynOp, GenerateFn, OpDef, OpFuture, OpSetHarness, WeightFn,
+    decode_json_op, AdvanceFn, ConfigOps, DecodeFn, DynInvariant, DynOp, DynOperation, GenerateFn,
+    OpDef, OpFuture, OpSetHarness, WeightFn,
 };
 pub use outcome::{
     CheckOutcome, Coverage, Failure, FailureKind, HarnessError, InvCoverage, RunReport, Verdict,
@@ -56,8 +59,10 @@ pub use runner::{
 };
 pub use stats::{op_label, OpStat, Stats};
 
-/// A developer-defined property-test subject. One implementation drives fuzz, invariant,
-/// endurance, and rstest-matrix runs.
+/// The runner seam for a property-test subject: one value drives fuzz, invariant, endurance, and
+/// rstest-matrix runs. Most developers never implement this trait directly; they assemble an
+/// [`OpSetHarness`] from [`DynOp`] structs, which implements it. Implement it by hand only to pin
+/// a custom runner contract.
 ///
 /// The live system-under-test and the bookkeeping are kept apart:
 /// - [`Ctx`](Self::Ctx) is the live system-under-test, threaded by `&mut` through every step.
@@ -89,15 +94,17 @@ pub trait Harness {
     type World;
 
     /// One complete developer-defined action (swap, deposit, increment, ...). `Clone` for
-    /// replay; `Debug` for the failure dump.
+    /// replay; `Debug` for the failure dump. For [`OpSetHarness`] this is [`DynOperation`], a
+    /// boxed [`DynOp`] whose `Debug` leads with the registered kind name.
     type Operation: Clone + core::fmt::Debug;
 
-    /// One named property that must always hold. An enum so a failure can name which broke.
+    /// One named property that must always hold, so a failure can name which broke. For
+    /// [`OpSetHarness`] this is a boxed [`DynInvariant`].
     type Invariant: Clone + core::fmt::Debug;
 
     /// The set of operation *kinds* (an [`Operation`](Self::Operation) without its data), used to
-    /// drive per-kind fuzzing and to restrict which kinds a combination run draws from. Usually a
-    /// small fieldless enum mirroring the `Operation` variants.
+    /// drive per-kind fuzzing and to restrict which kinds a combination run draws from. For
+    /// [`OpSetHarness`] this is the `&'static str` kind name each [`OpDef`] is registered under.
     type OpKind: Clone + Copy + core::fmt::Debug;
 
     /// Apply a single operation. The one function reused by every mode.

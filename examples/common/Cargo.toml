@@ -39,8 +39,10 @@ cross-vm-solidity  = { path = "../../crates/solidity" }
 # `#[cross_vm_contract]` generates the shared `Counter` wrapper in `contracts::counter`.
 cross-vm-macros = { path = "../../crates/macros" }
 tracing-subscriber.workspace = true
-# `CounterOp` / `CounterOpKind` derive `Serialize`/`Deserialize` for the config-driven op shape.
+# The counter op structs derive `Serialize`/`Deserialize` for the config-driven op shape;
+# `to_data` renders each op through `serde_json`.
 serde.workspace = true
+serde_json.workspace = true
 
 # Per-VM chain crates + instruction builders, gated to the matching feature so a single-VM crate
 # pulls only its VM (the `Counter` hooks for other VMs fall back to `#[cross_vm_contract]` defaults).

@@ -3,7 +3,7 @@
 //! `cross_vm_framework::config::test_bridge::run_profile_for_test`.
 //!
 //! ```ignore
-//! #[config_runner(config = "vault.cross-vm.toml", harness = VaultHarness, setup = vault_config_setup, profile = "smoke")]
+//! #[config_runner(config = "vault.cross-vm.toml", harness = vault_harness(), setup = vault_config_setup, profile = "smoke")]
 //! async fn vault_smoke_config() {}
 //! ```
 //!

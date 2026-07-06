@@ -1,4 +1,4 @@
-//! DeFi harness example: property tests over the [`VaultHarness`] moved to the library crate
+//! DeFi harness example: property tests over the vault harness (see `cross_vm_tests::vault`) moved to the library crate
 //! (`src/vault.rs`, P2 vault migration) so the `cross-vm` bin can also register and drive it.
 //!
 //! This file keeps only the test fns: the runner-macro tests (which call `vault_setup` directly
@@ -11,13 +11,13 @@ use std::time::Duration;
 
 use cross_vm_framework::prelude::*;
 
-#[cfg(feature = "fuzz")]
-use cross_vm_tests::vault::VaultOpKind;
-use cross_vm_tests::vault::{vault_setup, VaultHarness, VaultOp};
+#[cfg(any(feature = "fuzz", feature = "invariant", feature = "endurance"))]
+use cross_vm_tests::vault::VaultWorld;
+use cross_vm_tests::vault::{vault_harness, vault_setup, Borrow, Deposit, Repay, Withdraw};
 
 #[cfg(feature = "invariant")]
-#[invariant_runner(harness = VaultHarness, seed = 42)]
-async fn vault_invariant_mode(#[runner] mut r: InvariantRunner<VaultHarness>) {
+#[invariant_runner(harness = vault_harness(), seed = 42)]
+async fn vault_invariant_mode(#[runner] mut r: InvariantRunner<OpSetHarness<Ctx, VaultWorld>>) {
     let (ctx, world) = vault_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
     let report = r.run(120, None, 1).await;
@@ -27,8 +27,8 @@ async fn vault_invariant_mode(#[runner] mut r: InvariantRunner<VaultHarness>) {
 
 // Combination fuzz over all kinds: one short random sequence per case, fanned out per case.
 #[cfg(feature = "fuzz")]
-#[fuzz_runner(harness = VaultHarness, seed = 7, cases = 4)]
-async fn vault_fuzz_combination(#[runner] mut r: FuzzRunner<VaultHarness>) {
+#[fuzz_runner(harness = vault_harness(), seed = 7, cases = 4)]
+async fn vault_fuzz_combination(#[runner] mut r: FuzzRunner<OpSetHarness<Ctx, VaultWorld>>) {
     let (ctx, world) = vault_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
     let report = r.run(20, None, 1).await;
@@ -37,30 +37,28 @@ async fn vault_fuzz_combination(#[runner] mut r: FuzzRunner<VaultHarness>) {
 
 // Per-op fuzz: hammer a single operation kind with many randomized inputs, one fresh world per case.
 #[cfg(feature = "fuzz")]
-#[fuzz_runner(harness = VaultHarness, seed = 11, cases = 50)]
-async fn vault_fuzz_single_deposit(#[runner] mut r: FuzzRunner<VaultHarness>) {
+#[fuzz_runner(harness = vault_harness(), seed = 11, cases = 50)]
+async fn vault_fuzz_single_deposit(#[runner] mut r: FuzzRunner<OpSetHarness<Ctx, VaultWorld>>) {
     let (ctx, world) = vault_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
-    let report = r.run(1, Some(&[VaultOpKind::Deposit]), 1).await;
+    let report = r.run(1, Some(&["deposit"]), 1).await;
     assert!(report.passed(), "{:#?}", report.failure);
     assert_eq!(report.steps, 1);
 }
 
 // Combination fuzz restricted to a subset of kinds: only deposits and withdraws participate.
 #[cfg(feature = "fuzz")]
-#[fuzz_runner(harness = VaultHarness, seed = 5, cases = 3)]
-async fn vault_fuzz_combination_subset(#[runner] mut r: FuzzRunner<VaultHarness>) {
+#[fuzz_runner(harness = vault_harness(), seed = 5, cases = 3)]
+async fn vault_fuzz_combination_subset(#[runner] mut r: FuzzRunner<OpSetHarness<Ctx, VaultWorld>>) {
     let (ctx, world) = vault_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
-    let report = r
-        .run(15, Some(&[VaultOpKind::Deposit, VaultOpKind::Withdraw]), 1)
-        .await;
+    let report = r.run(15, Some(&["deposit", "withdraw"]), 1).await;
     assert!(report.passed(), "{:#?}", report.failure);
 }
 
 #[cfg(feature = "endurance")]
-#[endurance_runner(harness = VaultHarness, seed = 3)]
-async fn vault_endurance_mode(#[runner] mut r: EnduranceRunner<VaultHarness>) {
+#[endurance_runner(harness = vault_harness(), seed = 3)]
+async fn vault_endurance_mode(#[runner] mut r: EnduranceRunner<OpSetHarness<Ctx, VaultWorld>>) {
     let (ctx, world) = vault_setup(r.seed()).await.expect("setup");
     r.setup(ctx, world);
     let report = r
@@ -79,30 +77,30 @@ async fn vault_endurance_mode(#[runner] mut r: EnduranceRunner<VaultHarness>) {
 #[tokio::test]
 async fn vault_per_chain_matrix(#[values("osmosis", "eth", "solana")] chain: &str) {
     let (ctx, world) = vault_setup(0).await.expect("setup");
-    let mut r = Runner::scenario(VaultHarness, 0);
+    let mut r = Runner::scenario(vault_harness(), 0);
     r.setup(ctx, world);
     let report = r
         .run_scenario(vec![
-            VaultOp::Deposit {
+            DynOperation(Box::new(Deposit {
                 chain: chain.into(),
                 user: 0,
                 amount: 1_000,
-            },
-            VaultOp::Borrow {
+            })),
+            DynOperation(Box::new(Borrow {
                 chain: chain.into(),
                 user: 0,
                 amount: 400,
-            },
-            VaultOp::Repay {
+            })),
+            DynOperation(Box::new(Repay {
                 chain: chain.into(),
                 user: 0,
                 amount: 400,
-            },
-            VaultOp::Withdraw {
+            })),
+            DynOperation(Box::new(Withdraw {
                 chain: chain.into(),
                 user: 0,
                 amount: 1_000,
-            },
+            })),
         ])
         .await;
     assert!(report.passed(), "{:#?}", report.failure);
@@ -112,20 +110,20 @@ async fn vault_per_chain_matrix(#[values("osmosis", "eth", "solana")] chain: &st
 #[tokio::test]
 async fn over_withdraw_is_rejected_not_a_failure() {
     let (ctx, world) = vault_setup(0).await.expect("setup");
-    let mut r = Runner::scenario(VaultHarness, 0);
+    let mut r = Runner::scenario(vault_harness(), 0);
     r.setup(ctx, world);
     let report = r
         .run_scenario(vec![
-            VaultOp::Deposit {
+            DynOperation(Box::new(Deposit {
                 chain: "eth".into(),
                 user: 0,
                 amount: 100,
-            },
-            VaultOp::Withdraw {
+            })),
+            DynOperation(Box::new(Withdraw {
                 chain: "eth".into(),
                 user: 0,
                 amount: 1_000,
-            },
+            })),
         ])
         .await;
     assert!(report.passed(), "{:#?}", report.failure);

@@ -13,20 +13,21 @@ tracing.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 arbitrary = { workspace = true, optional = true }
-serde = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 harness-core-macros = { workspace = true, optional = true }
 
 [features]
 # Enables `sample_arbitrary` for stateless op generation.
 fuzz = ["dep:arbitrary"]
-# Serialize impls on outcome/stats types (reports, JSON output).
-serde = ["dep:serde"]
+# The dependency is now unconditional (the dyn-op codec needs it); the feature
+# still gates the Serialize impls on outcome/stats types.
+serde = []
 # Re-exports the runner attribute macros for standalone use.
 macros = ["dep:harness-core-macros"]
 
 [dev-dependencies]
 tokio.workspace = true
-serde_json.workspace = true
 
 [lints]
 workspace = true

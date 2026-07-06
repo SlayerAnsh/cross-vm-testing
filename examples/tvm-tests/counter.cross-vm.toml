@@ -27,7 +27,7 @@ check_every = 1
 mode = "fuzz"
 cases = 4
 ops = 20
-kinds = ["Increment", "IncrementTwice"]
+kinds = ["increment", "increment_twice"]
 
 # A single longer invariant run, checked every 5 ops.
 [profile.invariant-long]
@@ -40,9 +40,9 @@ check_every = 5
 mode = "scenario"
 
   [[profile.steps.steps]]
-  op = "Increment"
+  op = "increment"
   expect = "accepted"
 
   [[profile.steps.steps]]
-  op = "IncrementTwice"
+  op = "increment_twice"
   expect = "accepted"

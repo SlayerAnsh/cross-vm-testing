@@ -32,8 +32,8 @@ pub fn fuzz_runner(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Emit one `#[tokio::test]` that injects a seeded `InvariantRunner` shell.
 ///
 /// ```ignore
-/// #[invariant_runner(harness = VaultHarness, seed = 42)]
-/// async fn vault_invariant(#[runner] mut r: InvariantRunner<VaultHarness>) {
+/// #[invariant_runner(harness = vault_harness(), seed = 42)]
+/// async fn vault_invariant(#[runner] mut r: InvariantRunner<OpSetHarness<Ctx, VaultWorld>>) {
 ///     let (ctx, world) = vault_setup(r.seed()).await.expect("setup");
 ///     r.setup(ctx, world);
 ///     let report = r.run(120, None, 1).await;
