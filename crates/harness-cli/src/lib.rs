@@ -11,6 +11,8 @@ mod registry;
 mod report;
 mod resolve;
 pub mod test_bridge;
+#[cfg(test)]
+mod test_mock;
 
 pub use artifact::write_replay_artifact;
 pub use cli::{

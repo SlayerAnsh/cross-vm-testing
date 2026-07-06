@@ -32,8 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use harness_config::{ConfigExt, Profile, RunConfig, WorldSource};
-use harness_core::{FailureKind, Harness};
-use serde::de::DeserializeOwned;
+use harness_core::{ConfigOps, FailureKind};
 
 use crate::artifact::write_replay_artifact;
 use crate::domain::{CliDomain, SetupFuture};
@@ -79,14 +78,14 @@ impl<D: CliDomain> Cli<D> {
     /// Registers a harness under `name`, delegating to
     /// [`Registry::register`](crate::Registry::register) (same bounds: `harness` builds a fresh
     /// `H` per run, `setup` builds the live `(H::Ctx, H::World)` from the domain's
-    /// [`Setup`](CliDomain::Setup) value).
+    /// [`Setup`](CliDomain::Setup) value). `H` must implement [`ConfigOps`], which
+    /// [`OpSetHarness`](harness_core::OpSetHarness) does: that codec is what lets a profile's
+    /// `kinds`/`weights`/scenario `op`s type-check and a failing history serialize.
     pub fn register<H, F, SF>(mut self, name: &str, harness: F, setup: SF) -> Self
     where
-        H: Harness + 'static,
+        H: ConfigOps + 'static,
         H::Ctx: 'static,
         H::World: 'static,
-        H::Operation: serde::Serialize + DeserializeOwned + 'static,
-        H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
         F: Fn() -> H + 'static,
         SF: Fn(D::Setup) -> SetupFuture<'static, H::Ctx, H::World> + 'static,
     {
@@ -101,11 +100,9 @@ impl<D: CliDomain> Cli<D> {
     /// fails both `validate` and `run` with a clear error.
     pub fn register_persistent<H, F, SF>(mut self, name: &str, harness: F, setup: SF) -> Self
     where
-        H: Harness + 'static,
+        H: ConfigOps + 'static,
         H::Ctx: 'static,
         H::World: serde::Serialize + 'static,
-        H::Operation: serde::Serialize + DeserializeOwned + 'static,
-        H::OpKind: serde::Serialize + DeserializeOwned + Copy + 'static,
         F: Fn() -> H + 'static,
         SF: Fn(D::Setup) -> SetupFuture<'static, H::Ctx, H::World> + 'static,
     {
@@ -1003,8 +1000,8 @@ fn log_profile_result(report: &ErasedReport) {
 mod tests {
     use super::*;
     use crate::domain::{BasicSetup, GenericDomain, NoArgs};
+    use crate::test_mock::mock_harness;
     use clap::Parser;
-    use harness_core::{CheckOutcome, HarnessError, Prng, Verdict};
 
     // -----------------------------------------------------------------------------------------
     // exit_code_for / exit_code_for_run_error / combine
@@ -1391,84 +1388,16 @@ stop_on_failure = true
     // end-to-end through the CLI dispatch helpers, over a mock harness (cheap: no injected chain)
     // -----------------------------------------------------------------------------------------
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    enum MockKind {
-        Ping,
-        Boom,
-    }
-
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    enum MockOp {
-        Ping,
-        Boom,
-    }
-
-    #[derive(Debug, Clone)]
-    enum MockInvariant {
-        AlwaysHolds,
-    }
-
-    struct MockHarness;
-
-    impl Harness for MockHarness {
-        type Ctx = u32;
-        type World = u32;
-        type Operation = MockOp;
-        type Invariant = MockInvariant;
-        type OpKind = MockKind;
-
-        async fn apply(
-            &self,
-            _ctx: &mut Self::Ctx,
-            world: &mut Self::World,
-            op: &Self::Operation,
-        ) -> Result<Verdict, HarnessError> {
-            *world += 1;
-            match op {
-                MockOp::Ping => Ok(Verdict::Accepted),
-                MockOp::Boom => Err(HarnessError::Bug("boom".to_string())),
-            }
-        }
-
-        fn op_kinds(&self) -> Vec<Self::OpKind> {
-            vec![MockKind::Ping, MockKind::Boom]
-        }
-
-        fn generate_op(
-            &self,
-            _rng: &mut Prng,
-            _world: &Self::World,
-            kind: Self::OpKind,
-        ) -> Self::Operation {
-            match kind {
-                MockKind::Ping => MockOp::Ping,
-                MockKind::Boom => MockOp::Boom,
-            }
-        }
-
-        fn invariants(&self) -> Vec<Self::Invariant> {
-            vec![MockInvariant::AlwaysHolds]
-        }
-
-        async fn check(
-            &self,
-            _ctx: &mut Self::Ctx,
-            _world: &Self::World,
-            _inv: &Self::Invariant,
-        ) -> CheckOutcome {
-            CheckOutcome::Held
-        }
-    }
-
     /// Builds the mock's `(Ctx, World)`: the `Ctx` is a trivial `u32` (no live chain), and the
     /// `World` is seeded from the per-case seed the [`BasicSetup`] carries, so a run's final world
-    /// value is deterministic (`seed + accepted-op-count`).
+    /// value is deterministic (`seed + accepted-op-count`). The mock harness itself is the shared
+    /// OpSet mock (`crate::test_mock`), with kinds `boom` and `ping`.
     fn mock_setup(req: BasicSetup) -> SetupFuture<'static, u32, u32> {
         Box::pin(async move { Ok((0u32, req.seed as u32)) })
     }
 
     fn cli_with_mock() -> Cli<GenericDomain> {
-        Cli::<GenericDomain>::new().register("vault", || MockHarness, mock_setup)
+        Cli::<GenericDomain>::new().register("vault", mock_harness, mock_setup)
     }
 
     #[tokio::test]
@@ -1531,7 +1460,7 @@ name = "vault"
 mode = "fuzz"
 cases = 1
 ops = 2
-kinds = ["Ping"]
+kinds = ["ping"]
 "#,
         );
         let cli = cli_with_mock();
@@ -1553,11 +1482,11 @@ name = "vault"
 mode = "fuzz"
 cases = 1
 ops = 1
-kinds = ["Boom"]
+kinds = ["boom"]
 "#,
         );
         let cli = cli_with_mock();
-        // This run fails on `Boom`, so `run_selected` writes a replay artifact; pin its dir to a
+        // This run fails on `boom`, so `run_selected` writes a replay artifact; pin its dir to a
         // gitignored `tests_result` path so it never leaks into the source-tree `target/`.
         let args = RunArgs {
             artifacts_dir: Some(
@@ -1584,7 +1513,7 @@ kinds = ["Boom"]
 
     #[tokio::test]
     async fn run_with_config_multi_profile_reports_worst_code() {
-        // `smoke` passes, `deep` (invariant, Boom-only) fails with Bug -> combined code is 1.
+        // `smoke` passes, `deep` (invariant, boom-only) fails with Bug -> combined code is 1.
         let cfg = load(
             r#"
 [harness]
@@ -1594,16 +1523,16 @@ name = "vault"
 mode = "fuzz"
 cases = 1
 ops = 1
-kinds = ["Ping"]
+kinds = ["ping"]
 
 [profile.deep]
 mode = "invariant"
 ops = 1
-kinds = ["Boom"]
+kinds = ["boom"]
 "#,
         );
         let cli = cli_with_mock();
-        // `deep` fails on `Boom`, so a replay artifact is written; pin its dir to a gitignored
+        // `deep` fails on `boom`, so a replay artifact is written; pin its dir to a gitignored
         // `tests_result` path so it never leaks into the source-tree `target/`.
         let args = RunArgs {
             profile: vec!["smoke".to_string(), "deep".to_string()],
@@ -1628,7 +1557,7 @@ name = "vault"
 [profile.smoke]
 mode = "invariant"
 ops = 1
-kinds = ["Ping"]
+kinds = ["ping"]
 "#,
         );
         let cli = cli_with_mock();
@@ -1710,12 +1639,12 @@ name = "vault"
 mode = "fuzz"
 cases = 1
 ops = 1
-kinds = ["Ping"]
+kinds = ["ping"]
 
 [profile.deep]
 mode = "invariant"
 ops = 1
-kinds = ["Ping"]
+kinds = ["ping"]
 "#,
         );
         let cli = cli_with_mock();
@@ -1753,8 +1682,8 @@ kinds = ["Ping"]
 
     #[tokio::test]
     async fn run_with_config_no_json_report_flag_writes_nothing() {
-        // `kinds = ["Ping"]` (unlike `SINGLE_PROFILE`) so the run is deterministically a pass: this
-        // test asserts absence of a file, which a stray `Boom`-triggered exit code 1 must not be
+        // `kinds = ["ping"]` (unlike `SINGLE_PROFILE`) so the run is deterministically a pass: this
+        // test asserts absence of a file, which a stray `boom`-triggered exit code 1 must not be
         // able to cause a false failure on.
         let cfg = load(
             r#"
@@ -1765,7 +1694,7 @@ name = "vault"
 mode = "fuzz"
 cases = 1
 ops = 1
-kinds = ["Ping"]
+kinds = ["ping"]
 "#,
         );
         let cli = cli_with_mock();
@@ -1815,7 +1744,7 @@ name = "vault"
 mode = "fuzz"
 cases = 1
 ops = 1
-kinds = ["Boom"]
+kinds = ["boom"]
 "#,
         );
         let cli = cli_with_mock();
@@ -1860,7 +1789,7 @@ name = "vault"
 mode = "fuzz"
 cases = 1
 ops = 1
-kinds = ["Ping"]
+kinds = ["ping"]
 "#,
         );
         let cli = cli_with_mock();
@@ -1888,7 +1817,7 @@ name = "vault"
 mode = "fuzz"
 cases = 1
 ops = 1
-kinds = ["Boom"]
+kinds = ["boom"]
 "#,
         );
         let cli = cli_with_mock();
@@ -1915,7 +1844,7 @@ kinds = ["Boom"]
                 ..Default::default()
             })
             .await;
-        assert_eq!(code, 1, "the recorded Boom must still reproduce on replay");
+        assert_eq!(code, 1, "the recorded boom must still reproduce on replay");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1927,7 +1856,7 @@ kinds = ["Boom"]
     /// A `Cli` whose mock harness is registered persistently, so a scenario profile's `export_world`
     /// key works and a pipeline phase can stash/inherit a world.
     fn cli_with_persistent_mock() -> Cli<GenericDomain> {
-        Cli::<GenericDomain>::new().register_persistent("vault", || MockHarness, mock_setup)
+        Cli::<GenericDomain>::new().register_persistent("vault", mock_harness, mock_setup)
     }
 
     /// A fresh, gitignored `export_world` path under `<CARGO_MANIFEST_DIR>/tests_result/`, unique per
@@ -1948,7 +1877,7 @@ kinds = ["Boom"]
 
     #[tokio::test]
     async fn pipeline_suite_skips_dependents_of_a_failed_phase() {
-        // Phase `boom` (invariant over Boom) fails with a Bug; phase `after` (a scenario that would
+        // Phase `boom` (invariant over boom) fails with a Bug; phase `after` (a scenario that would
         // export its world) `needs = ["boom"]`, so a failed dependency must skip it entirely. The
         // export file is our run-count proxy: if `after` had run, it would exist.
         let export = temp_export_path("skip-dependents");
@@ -1960,13 +1889,13 @@ name = "vault"
 [profile.boom]
 mode = "invariant"
 ops = 1
-kinds = ["Boom"]
+kinds = ["boom"]
 
 [profile.after]
 mode = "scenario"
 export_world = "{}"
 [[profile.after.steps]]
-op = "Ping"
+op = "ping"
 
 [[suite.p.phases]]
 profile = "boom"
@@ -1998,8 +1927,8 @@ needs = ["boom"]
 
     #[tokio::test]
     async fn pipeline_suite_hands_world_forward_end_to_end() {
-        // Donor (invariant, seed 100, 3 Ping ops) ends with world 100 + 3 = 103 and stashes it; the
-        // inheritor (scenario, 1 Ping) starts from 103 (NOT a fresh setup) and exports 104.
+        // Donor (invariant, seed 100, 3 ping ops) ends with world 100 + 3 = 103 and stashes it; the
+        // inheritor (scenario, 1 ping) starts from 103 (NOT a fresh setup) and exports 104.
         let export = temp_export_path("hands-forward");
         let cfg = load(&format!(
             r#"
@@ -2009,14 +1938,14 @@ name = "vault"
 [profile.donor]
 mode = "invariant"
 ops = 3
-kinds = ["Ping"]
+kinds = ["ping"]
 seed = 100
 
 [profile.inheritor]
 mode = "scenario"
 export_world = "{}"
 [[profile.inheritor.steps]]
-op = "Ping"
+op = "ping"
 
 [[suite.p.phases]]
 profile = "donor"
@@ -2041,7 +1970,7 @@ world = "inherit"
         assert_eq!(
             value,
             serde_json::json!(104),
-            "seed 100 + 3 donor Pings + 1 inheritor Ping"
+            "seed 100 + 3 donor Pings + 1 inheritor ping"
         );
 
         std::fs::remove_file(&export).ok();
@@ -2060,13 +1989,13 @@ name = "vault"
 [profile.first]
 mode = "invariant"
 ops = 1
-kinds = ["Boom"]
+kinds = ["boom"]
 
 [profile.second]
 mode = "scenario"
 export_world = "{}"
 [[profile.second.steps]]
-op = "Ping"
+op = "ping"
 
 [suite.p]
 stop_on_failure = true
@@ -2111,12 +2040,12 @@ name = "vault"
 mode = "fuzz"
 cases = 1
 ops = 1
-kinds = ["Ping"]
+kinds = ["ping"]
 
 [profile.b]
 mode = "invariant"
 ops = 1
-kinds = ["Ping"]
+kinds = ["ping"]
 
 [suite.legacy]
 profiles = ["a", "b"]

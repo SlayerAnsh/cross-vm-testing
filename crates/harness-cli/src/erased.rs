@@ -73,46 +73,38 @@ pub struct ErasedFailure {
     pub shrunk: bool,
 }
 
-/// Converts a monomorphized `RunReport<Op>` into a harness-agnostic [`ErasedReport`].
+/// Converts a monomorphized `RunReport<H::Operation>` into a harness-agnostic [`ErasedReport`].
 ///
 /// Copies `seed`/`steps`/`skipped`/`coverage` verbatim and maps `failure` into an
 /// [`ErasedFailure`]: `op_debug` is the `Debug` rendering of the failing op (if any), and
-/// `history` is the full op history serialized with `serde_json` (requires `Op: Serialize`, the
-/// bound [`super::registry::Registry::register`] provides).
-///
-/// Errors only if `Op`'s `Serialize` impl fails on the failure history (an out-of-range integer,
-/// a non-string map key, ...); a well-behaved op enum never hits this.
+/// `history` is the full op history encoded through the harness's own [`ConfigOps::encode_op`]
+/// codec (externally tagged single-key objects), so the replay artifact it feeds round-trips
+/// back through the same decoder. Encoding cannot fail, so this function is infallible.
 ///
 /// `shrunk` is the caller's own determination (`crate::registry`'s `maybe_shrink`): `true`
 /// when `report.failure.history` is already the auto-shrunk sequence, `false` when it is the raw
 /// history (shrink disabled, or this profile's mode never shrinks). This function does not shrink
 /// anything itself; it only stamps the flag onto the erased failure.
-pub(crate) fn erase_report<Op>(
-    report: RunReport<Op>,
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn erase_report<H: harness_core::ConfigOps>(
+    codec: &H,
+    report: RunReport<H::Operation>,
     harness: String,
     profile: String,
     mode: String,
     stats: Option<Stats>,
     elapsed: std::time::Duration,
     shrunk: bool,
-) -> Result<ErasedReport, serde_json::Error>
-where
-    Op: serde::Serialize + core::fmt::Debug,
-{
-    let failure = report
-        .failure
-        .map(|f| -> Result<ErasedFailure, serde_json::Error> {
-            Ok(ErasedFailure {
-                step: f.step,
-                op_debug: f.op.as_ref().map(|o| format!("{o:?}")),
-                history: serde_json::to_value(&f.history)?,
-                kind: f.kind,
-                shrunk,
-            })
-        })
-        .transpose()?;
+) -> ErasedReport {
+    let failure = report.failure.map(|f| ErasedFailure {
+        step: f.step,
+        op_debug: f.op.as_ref().map(|o| format!("{o:?}")),
+        history: serde_json::Value::Array(f.history.iter().map(|op| codec.encode_op(op)).collect()),
+        kind: f.kind,
+        shrunk,
+    });
 
-    Ok(ErasedReport {
+    ErasedReport {
         harness,
         profile,
         mode,
@@ -123,5 +115,5 @@ where
         stats,
         elapsed,
         failure,
-    })
+    }
 }
