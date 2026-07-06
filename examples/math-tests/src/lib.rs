@@ -12,7 +12,10 @@
 //! The whole thing is wired to config and CLI through [`math_config_setup`] and the `math-cli`
 //! binary (`src/bin/math_cli.rs`): `harness run math.harness.toml --profile smoke`.
 
-use harness_core::{CheckOutcome, Harness, HarnessError, Prng, Verdict};
+use harness_core::{
+    decode_json_op, CheckOutcome, DynInvariant, DynOp, HarnessError, OpDef, OpFuture, OpSetHarness,
+    Prng, Verdict,
+};
 use serde::{Deserialize, Serialize};
 
 /// The system under test: an `i32` accumulator whose four operations reject on overflow and on
@@ -59,155 +62,241 @@ impl Calculator {
     }
 }
 
-/// One operation applied to the calculator. Tuple variants carry the operand; the serde shape of
-/// `Op::Add(5)` is `{"Add": 5}` (a single-key object), which the scenario config mirrors as
-/// `op = { Add = 5 }`. Derives `Serialize`/`Deserialize` because the CLI registry bounds require
-/// operations to round-trip through config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Op {
-    /// Add the operand.
-    Add(i32),
-    /// Subtract the operand.
-    Sub(i32),
-    /// Multiply by the operand.
-    Mul(i32),
-    /// Divide by the operand.
-    Div(i32),
-}
-
-/// The classes of operation the fuzzer/invariant modes draw from. `Copy` + serde are demanded by
-/// the CLI registry bounds.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum OpKind {
-    /// Generate an [`Op::Add`].
-    Add,
-    /// Generate an [`Op::Sub`].
-    Sub,
-    /// Generate an [`Op::Mul`].
-    Mul,
-    /// Generate an [`Op::Div`].
-    Div,
-}
-
-/// The invariants the harness checks after each step.
-#[derive(Debug, Clone)]
-pub enum Inv {
-    /// The calculator's value always equals the shadow model.
-    MatchesModel,
-}
-
-/// World = the calculator plus its shadow model. The harness `Ctx` is `()`: there is no external
-/// live system to hold.
+/// World = the calculator plus its shadow model, plus the bug-injection switch.
 #[derive(Debug, Default)]
 pub struct MathWorld {
     /// The system under test.
     pub sut: Calculator,
-    /// The exact running value in `i64`. It always fits `i32` (every accepted op keeps it in
-    /// range), so it stays equal to `sut.value`; the wider type is only used to predict overflow.
+    /// The exact running value in `i64` (used to predict overflow).
     pub model: i64,
-}
-
-/// The math harness. `buggy` injects a wrong subtract (subtract that actually adds) so a
-/// bug-injection test can prove the harness catches a real discrepancy instead of rubber stamping.
-/// `Default` gives `buggy: false`, the shape the CLI binary and config tests use.
-#[derive(Debug, Default)]
-pub struct MathHarness {
-    /// When set, subtract actually adds; the shadow model still predicts a real subtraction, so
-    /// the two diverge and the `MatchesModel` invariant fires.
+    /// When set, `sub` actually adds; the shadow model still predicts a real subtraction, so
+    /// the `MatchesModel` invariant fires. Lives in the world because dyn ops carry no harness
+    /// state.
     pub buggy: bool,
 }
 
-impl Harness for MathHarness {
-    type Ctx = ();
-    type World = MathWorld;
-    type Operation = Op;
-    type Invariant = Inv;
-    type OpKind = OpKind;
+/// Classify one applied operation against the model's prediction (`wide` is the exact i64
+/// result the op should produce). Mirrors the old enum harness's `apply` tail exactly.
+fn classify(
+    world: &mut MathWorld,
+    result: Result<(), String>,
+    wide: i64,
+) -> Result<Verdict, HarnessError> {
+    let expected_ok = (i32::MIN as i64..=i32::MAX as i64).contains(&wide);
+    match (result, expected_ok) {
+        (Ok(()), true) => {
+            world.model = wide;
+            Ok(Verdict::Accepted)
+        }
+        (Ok(()), false) => Err(HarnessError::bug(format!(
+            "out of range result {wide} was accepted"
+        ))),
+        (Err(reason), false) => Ok(Verdict::Rejected { reason }),
+        (Err(e), true) => Err(HarnessError::bug(format!(
+            "a valid operation was rejected: {e}"
+        ))),
+    }
+}
 
-    async fn apply(
-        &self,
-        _ctx: &mut Self::Ctx,
-        world: &mut Self::World,
-        op: &Self::Operation,
-    ) -> Result<Verdict, HarnessError> {
-        let current = world.model;
+/// Add the operand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Add {
+    /// The operand.
+    pub n: i32,
+}
 
-        // Divide by zero is handled first: the model cannot compute it, and the calculator must
-        // reject it. A calculator that accepts it is a bug.
-        if let Op::Div(0) = op {
-            return match world.sut.div(0) {
-                Err(reason) => Ok(Verdict::Rejected { reason }),
-                Ok(()) => Err(HarnessError::bug("divide by zero was accepted")),
+impl DynOp<(), MathWorld> for Add {
+    fn kind(&self) -> &'static str {
+        "add"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        _ctx: &'a mut (),
+        world: &'a mut MathWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            let wide = world.model + self.n as i64;
+            let result = world.sut.add(self.n);
+            classify(world, result, wide)
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<(), MathWorld>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
+    }
+}
+
+/// Subtract the operand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sub {
+    /// The operand.
+    pub n: i32,
+}
+
+impl DynOp<(), MathWorld> for Sub {
+    fn kind(&self) -> &'static str {
+        "sub"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        _ctx: &'a mut (),
+        world: &'a mut MathWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            let wide = world.model - self.n as i64;
+            // The injected bug: a "subtract" that actually adds. The model still predicts a real
+            // subtraction, so the two diverge and the MatchesModel invariant fires.
+            let result = if world.buggy {
+                world.sut.add(self.n)
+            } else {
+                world.sut.sub(self.n)
             };
-        }
+            classify(world, result, wide)
+        })
+    }
 
-        // (calculator result, exact i64 result the operation should produce)
-        let (result, wide) = match op {
-            Op::Add(n) => (world.sut.add(*n), current + *n as i64),
-            Op::Sub(n) => {
-                // The injected bug: a "subtract" that actually adds. The model still predicts a
-                // real subtraction, so the two diverge and the MatchesModel invariant fires.
-                let res = if self.buggy {
-                    world.sut.add(*n)
-                } else {
-                    world.sut.sub(*n)
+    fn clone_box(&self) -> Box<dyn DynOp<(), MathWorld>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
+    }
+}
+
+/// Multiply by the operand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Mul {
+    /// The operand.
+    pub n: i32,
+}
+
+impl DynOp<(), MathWorld> for Mul {
+    fn kind(&self) -> &'static str {
+        "mul"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        _ctx: &'a mut (),
+        world: &'a mut MathWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            let wide = world.model * self.n as i64;
+            let result = world.sut.mul(self.n);
+            classify(world, result, wide)
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynOp<(), MathWorld>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
+    }
+}
+
+/// Divide by the operand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Div {
+    /// The operand.
+    pub n: i32,
+}
+
+impl DynOp<(), MathWorld> for Div {
+    fn kind(&self) -> &'static str {
+        "div"
+    }
+
+    fn apply<'a>(
+        &'a self,
+        _ctx: &'a mut (),
+        world: &'a mut MathWorld,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            // Divide by zero is handled first: the model cannot compute it, and the calculator
+            // must reject it. A calculator that accepts it is a bug.
+            if self.n == 0 {
+                return match world.sut.div(0) {
+                    Err(reason) => Ok(Verdict::Rejected { reason }),
+                    Ok(()) => Err(HarnessError::bug("divide by zero was accepted")),
                 };
-                (res, current - *n as i64)
             }
-            Op::Mul(n) => (world.sut.mul(*n), current * *n as i64),
-            Op::Div(n) => (world.sut.div(*n), current / *n as i64),
-        };
+            let wide = world.model / self.n as i64;
+            let result = world.sut.div(self.n);
+            classify(world, result, wide)
+        })
+    }
 
-        let expected_ok = (i32::MIN as i64..=i32::MAX as i64).contains(&wide);
-        match (result, expected_ok) {
-            (Ok(()), true) => {
-                world.model = wide;
-                Ok(Verdict::Accepted)
+    fn clone_box(&self) -> Box<dyn DynOp<(), MathWorld>> {
+        Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
+    }
+}
+
+/// The calculator's value always equals the shadow model.
+#[derive(Debug, Clone)]
+pub struct MatchesModel;
+
+impl DynInvariant<(), MathWorld> for MatchesModel {
+    fn check<'a>(&'a self, _ctx: &'a mut (), world: &'a MathWorld) -> OpFuture<'a, CheckOutcome> {
+        Box::pin(async move {
+            if world.sut.value as i64 == world.model {
+                CheckOutcome::Held
+            } else {
+                CheckOutcome::violated(format!(
+                    "calculator {} does not equal model {}",
+                    world.sut.value, world.model
+                ))
             }
-            (Ok(()), false) => Err(HarnessError::bug(format!(
-                "out of range result {wide} was accepted"
-            ))),
-            (Err(reason), false) => Ok(Verdict::Rejected { reason }),
-            (Err(e), true) => Err(HarnessError::bug(format!(
-                "a valid operation was rejected: {e}"
-            ))),
-        }
+        })
     }
 
-    fn op_kinds(&self) -> Vec<Self::OpKind> {
-        vec![OpKind::Add, OpKind::Sub, OpKind::Mul, OpKind::Div]
+    fn clone_box(&self) -> Box<dyn DynInvariant<(), MathWorld>> {
+        Box::new(self.clone())
     }
+}
 
-    fn generate_op(&self, rng: &mut Prng, _world: &Self::World, kind: Self::OpKind) -> Op {
-        // Operands span negatives, zero, and positives, so overflow (via repeated mul) and divide
-        // by zero are both reachable.
-        let n = rng.below(201) as i32 - 100;
-        match kind {
-            OpKind::Add => Op::Add(n),
-            OpKind::Sub => Op::Sub(n),
-            OpKind::Mul => Op::Mul(n),
-            OpKind::Div => Op::Div(n),
-        }
-    }
+// Operands span negatives, zero, and positives, so overflow (via repeated mul) and divide by zero
+// are both reachable.
+fn operand(rng: &mut Prng) -> i32 {
+    rng.below(201) as i32 - 100
+}
 
-    fn invariants(&self) -> Vec<Self::Invariant> {
-        vec![Inv::MatchesModel]
-    }
+fn gen_add(rng: &mut Prng, _w: &MathWorld) -> Box<dyn DynOp<(), MathWorld>> {
+    Box::new(Add { n: operand(rng) })
+}
 
-    async fn check(
-        &self,
-        _ctx: &mut Self::Ctx,
-        world: &Self::World,
-        inv: &Self::Invariant,
-    ) -> CheckOutcome {
-        match inv {
-            Inv::MatchesModel if world.sut.value as i64 == world.model => CheckOutcome::Held,
-            Inv::MatchesModel => CheckOutcome::violated(format!(
-                "calculator {} does not equal model {}",
-                world.sut.value, world.model
-            )),
-        }
-    }
+fn gen_sub(rng: &mut Prng, _w: &MathWorld) -> Box<dyn DynOp<(), MathWorld>> {
+    Box::new(Sub { n: operand(rng) })
+}
+
+fn gen_mul(rng: &mut Prng, _w: &MathWorld) -> Box<dyn DynOp<(), MathWorld>> {
+    Box::new(Mul { n: operand(rng) })
+}
+
+fn gen_div(rng: &mut Prng, _w: &MathWorld) -> Box<dyn DynOp<(), MathWorld>> {
+    Box::new(Div { n: operand(rng) })
+}
+
+/// Assemble the math harness.
+pub fn math_harness() -> OpSetHarness<(), MathWorld> {
+    OpSetHarness::new()
+        .register(OpDef::new("add", gen_add, decode_json_op::<Add, _, _>))
+        .register(OpDef::new("sub", gen_sub, decode_json_op::<Sub, _, _>))
+        .register(OpDef::new("mul", gen_mul, decode_json_op::<Mul, _, _>))
+        .register(OpDef::new("div", gen_div, decode_json_op::<Div, _, _>))
+        .invariant(Box::new(MatchesModel))
 }
 
 /// Config-driven setup: builds a fresh calculator and model world. The [`harness_cli::BasicSetup`]
@@ -218,9 +307,8 @@ pub fn math_config_setup(
 ) -> harness_cli::SetupFuture<'static, (), MathWorld> {
     Box::pin(async move {
         // The env `buggy` flag is surfaced here to show config-driven setup; the correctness
-        // harness ignores it, so the wired-up profiles stay green. (A bug-injection demonstration
-        // lives in the `#[tokio::test]` below, which constructs `MathHarness { buggy: true }`
-        // directly.)
+        // profiles keep it off, so they stay green. (A bug-injection demonstration lives in the
+        // `#[tokio::test]` below, which builds a `MathWorld { buggy: true, .. }` directly.)
         let _buggy = req.env["buggy"].as_bool().unwrap_or(false);
         Ok(((), MathWorld::default()))
     })
@@ -230,18 +318,22 @@ pub fn math_config_setup(
 mod tests {
     use super::*;
 
-    /// Pins the serde shape of `Op::Add(5)` so the scenario TOML (`op = { Add = 5 }`) stays in
-    /// step with the enum. If the enum representation ever changes, this fails loudly.
+    /// Pins the externally tagged, lowercase op shape so the scenario TOML (`op = { add = { n = 5 } }`)
+    /// stays in step with the harness. Decodes and re-encodes through the `ConfigOps` codec.
     #[test]
-    fn op_add_serializes_as_single_key_object() {
-        let value = serde_json::to_value(Op::Add(5)).expect("serializable");
-        assert_eq!(value, serde_json::json!({ "Add": 5 }));
+    fn op_add_encodes_externally_tagged_lowercase() {
+        use harness_core::ConfigOps;
+        let h = math_harness();
+        let op = h
+            .decode_op(&serde_json::json!({ "add": { "n": 5 } }))
+            .expect("decodes");
+        assert_eq!(h.encode_op(&op), serde_json::json!({ "add": { "n": 5 } }));
     }
 
     /// A correct math library holds its `MatchesModel` invariant across a fuzz run.
     #[tokio::test]
     async fn fuzz_correct_math_lib_holds_invariants() {
-        let mut r = harness_core::Runner::fuzz(MathHarness { buggy: false }, 42);
+        let mut r = harness_core::Runner::fuzz(math_harness(), 42);
         r.setup((), MathWorld::default());
         let report = r.run(500, None, 1).await;
         assert!(report.passed(), "{:?}", report.failure);
@@ -251,8 +343,14 @@ mod tests {
     /// A buggy subtract is caught: proof the correctness assertions above are not vacuous.
     #[tokio::test]
     async fn fuzz_catches_a_buggy_subtract() {
-        let mut r = harness_core::Runner::fuzz(MathHarness { buggy: true }, 42);
-        r.setup((), MathWorld::default());
+        let mut r = harness_core::Runner::fuzz(math_harness(), 42);
+        r.setup(
+            (),
+            MathWorld {
+                buggy: true,
+                ..Default::default()
+            },
+        );
         let report = r.run(500, None, 1).await;
         assert!(!report.passed(), "a buggy subtract must be caught");
         assert!(report.failure.is_some(), "the failure should be recorded");

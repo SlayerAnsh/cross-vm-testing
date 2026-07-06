@@ -4,12 +4,12 @@
 //! no extra flags) and hands off to the shared CLI. This is the whole binary; everything else is
 //! config.
 
-use math_tests::{math_config_setup, MathHarness};
+use math_tests::{math_config_setup, math_harness};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::process::ExitCode {
     harness_cli::Cli::<harness_cli::GenericDomain>::new()
-        .register("math", MathHarness::default, math_config_setup)
+        .register("math", math_harness, math_config_setup)
         .main()
         .await
 }
