@@ -11,4 +11,4 @@ mode = "fuzz"
 seed = 7
 cases = 2
 ops = 10
-kinds = ["Deposit", "Withdraw"]
+kinds = ["deposit", "withdraw"]

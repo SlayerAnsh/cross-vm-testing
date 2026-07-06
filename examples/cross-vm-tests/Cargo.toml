@@ -48,9 +48,10 @@ tokio.workspace = true
 alloy = { workspace = true }
 solana-instruction = "3"
 solana-system-interface = { version = "2", features = ["bincode"] }
-# `VaultOp`/`VaultOpKind` derive `Serialize`/`Deserialize` (spec section 7.1's externally tagged
-# TOML op shape).
+# The vault/boom op structs derive `Serialize`/`Deserialize` (spec section 7.1's externally
+# tagged TOML op shape); `to_data` renders each op through `serde_json`.
 serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 # Proc-macro attributes must be imported from the proc-macro crate directly so rust-analyzer

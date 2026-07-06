@@ -59,14 +59,14 @@ check_every = 1
 mode = "fuzz"
 cases = 8
 ops = 20
-kinds = ["Deposit", "Withdraw"]
+kinds = ["deposit", "withdraw"]
 
 # A deeper fuzz profile over the full op mix, weighted toward deposits.
 [profile.deep]
 mode = "fuzz"
 cases = 200
 ops = 50
-weights = { Deposit = 40, Withdraw = 25, Borrow = 20, Repay = 15 }
+weights = { deposit = 40, withdraw = 25, borrow = 20, repay = 15 }
 
 # A single long invariant run, checked every 5 ops.
 [profile.invariant-long]
@@ -83,7 +83,7 @@ check_every = 5
 mode = "fuzz"
 cases = 4
 ops = 10
-kinds = ["Deposit", "Withdraw"]
+kinds = ["deposit", "withdraw"]
 env = { targets = { osmosis = "rpc" } }
 
 # Scenario mode demo (spec section 6.3): a concrete, ordered step sequence with per-step
@@ -93,11 +93,11 @@ env = { targets = { osmosis = "rpc" } }
 mode = "scenario"
 
   [[profile.deposit-then-overdraw.steps]]
-  op = { Deposit = { chain = "osmosis", user = 0, amount = 1000 } }
+  op = { deposit = { chain = "osmosis", user = 0, amount = 1000 } }
   expect = "accepted"
 
   [[profile.deposit-then-overdraw.steps]]
-  op = { Withdraw = { chain = "osmosis", user = 0, amount = 5000 } }
+  op = { withdraw = { chain = "osmosis", user = 0, amount = 5000 } }
   expect = "rejected"
 
 # Progressive pipeline (dependency gated phases with world handoff): prove deposits
@@ -106,12 +106,12 @@ mode = "scenario"
 [profile.deposit-soak]
 mode = "invariant"
 ops = 200
-kinds = ["Deposit"]
+kinds = ["deposit"]
 
 [profile.mixed-after-deposits]
 mode = "invariant"
 ops = 150
-weights = { Withdraw = 40, Borrow = 30, Repay = 30 }
+weights = { withdraw = 40, borrow = 30, repay = 30 }
 
 [suite.progressive]
 
@@ -129,9 +129,9 @@ weights = { Withdraw = 40, Borrow = 30, Repay = 30 }
 [profile.seed-liquidity]
 mode = "scenario"
 steps = [
-  { op = { Deposit = { chain = "eth", user = 0, amount = 500000 } } },
-  { op = { Deposit = { chain = "osmosis", user = 1, amount = 300000 } } },
-  { op = { Borrow = { chain = "eth", user = 0, amount = 100000 } } },
+  { op = { deposit = { chain = "eth", user = 0, amount = 500000 } } },
+  { op = { deposit = { chain = "osmosis", user = 1, amount = 300000 } } },
+  { op = { borrow = { chain = "eth", user = 0, amount = 100000 } } },
 ]
 
 [profile.random-mix]
