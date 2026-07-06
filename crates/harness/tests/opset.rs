@@ -3,8 +3,8 @@
 //! instead of a hand-written enum harness.
 
 use harness_core::{
-    CheckOutcome, DynInvariant, DynOp, Harness, HarnessError, OpDef, OpFuture, OpSetHarness, Prng,
-    Runner, Verdict,
+    decode_json_op, CheckOutcome, DynInvariant, DynOp, DynOperation, Harness, HarnessError, OpDef,
+    OpFuture, OpSetHarness, Prng, Runner, Verdict,
 };
 
 /// The system under test: a u8 counter with saturating add and a subtract that
@@ -48,12 +48,16 @@ fn fresh_world() -> World {
 }
 
 /// Saturating add of `n`: one standalone operation carrying its own `apply`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Add {
     n: u8,
 }
 
 impl DynOp<(), World> for Add {
+    fn kind(&self) -> &'static str {
+        "add"
+    }
+
     fn apply<'a>(
         &'a self,
         _ctx: &'a mut (),
@@ -61,7 +65,7 @@ impl DynOp<(), World> for Add {
     ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
         Box::pin(async move {
             if world.first_op.is_none() {
-                world.first_op = Some("Add");
+                world.first_op = Some("add");
             }
             world.sut.add(self.n).map_err(HarnessError::infra)?;
             world.model = (world.model + self.n as i32).min(u8::MAX as i32);
@@ -71,6 +75,10 @@ impl DynOp<(), World> for Add {
 
     fn clone_box(&self) -> Box<dyn DynOp<(), World>> {
         Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
     }
 }
 
@@ -84,18 +92,19 @@ async fn op_runs_standalone_without_runner() {
     assert!(matches!(verdict, Verdict::Accepted));
     assert_eq!(world.model, 5);
     assert_eq!(world.sut.value, 5);
-    assert_eq!(world.first_op, Some("Add"));
+    assert_eq!(world.first_op, Some("add"));
 }
 
 #[tokio::test]
 async fn boxed_op_clones_and_debugs() {
-    let op: Box<dyn DynOp<(), World>> = Box::new(Add { n: 7 });
-    // Stats and failure dumps bucket by the leading Debug token, so it must be the struct name.
-    assert!(format!("{op:?}").starts_with("Add"), "{op:?}");
+    // What the runner shows: an op flows inside `DynOperation`, whose Debug leads with the
+    // registered kind name. Stats and failure dumps bucket by that leading token.
+    let op = DynOperation(Box::new(Add { n: 7 }));
+    assert!(format!("{op:?}").starts_with("add"), "{op:?}");
     let cloned = op.clone();
-    assert!(format!("{cloned:?}").starts_with("Add"), "{cloned:?}");
+    assert!(format!("{cloned:?}").starts_with("add"), "{cloned:?}");
     let mut world = fresh_world();
-    cloned.apply(&mut (), &mut world).await.expect("apply");
+    cloned.0.apply(&mut (), &mut world).await.expect("apply");
     assert_eq!(world.model, 7);
 }
 
@@ -148,7 +157,7 @@ fn zero_weight(_ctx: &(), _world: &World) -> u32 {
 
 #[test]
 fn opdef_default_weight_is_one_and_overridable() {
-    let def = OpDef::new("add", gen_add);
+    let def = OpDef::new("add", gen_add, decode_json_op::<Add, _, _>);
     assert_eq!(def.name(), "add");
 
     let mut rng = Prng::seed_from_u64(1);
@@ -157,17 +166,21 @@ fn opdef_default_weight_is_one_and_overridable() {
     assert!(format!("{op:?}").starts_with("Add"), "{op:?}");
     assert_eq!(def.weight(&(), &world), 1);
 
-    let gated = OpDef::new("add", gen_add).with_weight(zero_weight);
+    let gated = OpDef::new("add", gen_add, decode_json_op::<Add, _, _>).with_weight(zero_weight);
     assert_eq!(gated.weight(&(), &world), 0);
 }
 
 /// Subtract `n`, expecting rejection on underflow: the op that produces both verdicts.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Sub {
     n: u8,
 }
 
 impl DynOp<(), World> for Sub {
+    fn kind(&self) -> &'static str {
+        "sub"
+    }
+
     fn apply<'a>(
         &'a self,
         _ctx: &'a mut (),
@@ -175,7 +188,7 @@ impl DynOp<(), World> for Sub {
     ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
         Box::pin(async move {
             if world.first_op.is_none() {
-                world.first_op = Some("Sub");
+                world.first_op = Some("sub");
             }
             let expected_ok = world.model >= self.n as i32;
             match (world.sut.sub(self.n), expected_ok) {
@@ -192,6 +205,10 @@ impl DynOp<(), World> for Sub {
 
     fn clone_box(&self) -> Box<dyn DynOp<(), World>> {
         Box::new(self.clone())
+    }
+
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
     }
 }
 
@@ -215,8 +232,8 @@ fn sub_weight(_ctx: &(), world: &World) -> u32 {
 /// still yield kinds in sorted name order for seed determinism.
 fn build_harness() -> OpSetHarness<(), World> {
     OpSetHarness::new()
-        .register(OpDef::new("sub", gen_sub).with_weight(sub_weight))
-        .register(OpDef::new("add", gen_add))
+        .register(OpDef::new("sub", gen_sub, decode_json_op::<Sub, _, _>).with_weight(sub_weight))
+        .register(OpDef::new("add", gen_add, decode_json_op::<Add, _, _>))
         .invariant(Box::new(MatchesModel))
 }
 
@@ -224,8 +241,8 @@ fn build_harness() -> OpSetHarness<(), World> {
 #[should_panic(expected = "duplicate op kind")]
 fn duplicate_op_name_panics() {
     let _ = OpSetHarness::<(), World>::new()
-        .register(OpDef::new("add", gen_add))
-        .register(OpDef::new("add", gen_add));
+        .register(OpDef::new("add", gen_add, decode_json_op::<Add, _, _>))
+        .register(OpDef::new("add", gen_add, decode_json_op::<Add, _, _>));
 }
 
 #[test]
@@ -272,11 +289,11 @@ async fn scenario_run_with_boxed_ops() {
     let mut r = Runner::scenario(build_harness(), 0);
     r.setup((), fresh_world());
     // Sub(200) on a model of 3 is a legitimate rejection, not a failure.
-    let ops: Vec<Box<dyn DynOp<(), World>>> = vec![
-        Box::new(Add { n: 1 }),
-        Box::new(Add { n: 2 }),
-        Box::new(Sub { n: 200 }),
-        Box::new(Add { n: 3 }),
+    let ops: Vec<DynOperation<(), World>> = vec![
+        DynOperation(Box::new(Add { n: 1 })),
+        DynOperation(Box::new(Add { n: 2 })),
+        DynOperation(Box::new(Sub { n: 200 })),
+        DynOperation(Box::new(Add { n: 3 })),
     ];
     let report = r.run_scenario(ops).await;
     assert!(report.passed(), "{:?}", report.failure);
@@ -289,8 +306,8 @@ async fn zero_weight_gates_sub_until_first_add() {
     r.setup((), fresh_world());
     let report = r.run(50, None, 1).await;
     assert!(report.passed(), "{:?}", report.failure);
-    // The model starts at 0, so "sub" weighs 0 at the first draw: op 1 must be an Add.
-    assert_eq!(r.world().first_op, Some("Add"));
+    // The model starts at 0, so "sub" weighs 0 at the first draw: op 1 must be an add.
+    assert_eq!(r.world().first_op, Some("add"));
 }
 
 #[tokio::test]
@@ -299,7 +316,7 @@ async fn restricted_run_draws_only_named_kind() {
     r.setup((), fresh_world());
     let report = r.run(20, Some(&["add"]), 1).await;
     assert!(report.passed(), "{:?}", report.failure);
-    assert_eq!(r.world().first_op, Some("Add"));
+    assert_eq!(r.world().first_op, Some("add"));
 }
 
 fn bump<'a>(ctx: &'a mut u64, blocks: u64) -> OpFuture<'a, Result<(), HarnessError>> {
@@ -320,4 +337,44 @@ async fn advance_hook_runs_when_set_and_defaults_to_noop() {
     let mut ctx = 0u64;
     without.advance(&mut ctx, 3).await.expect("advance");
     assert_eq!(ctx, 0);
+}
+
+#[test]
+fn config_ops_roundtrip_encode_decode() {
+    use harness_core::ConfigOps;
+    let h = build_harness();
+    // decode a single-key table
+    let op = h
+        .decode_op(&serde_json::json!({ "add": { "n": 5 } }))
+        .expect("decodes");
+    assert!(format!("{op:?}").starts_with("add"), "{op:?}");
+    // encode round-trips to the same externally tagged shape
+    assert_eq!(h.encode_op(&op), serde_json::json!({ "add": { "n": 5 } }));
+}
+
+#[test]
+fn config_ops_decodes_bare_string_as_empty_data() {
+    use harness_core::ConfigOps;
+    let h = build_harness();
+    // `sub` has a field, so an empty-data decode must fail with serde's message
+    let err = h
+        .decode_op(&serde_json::Value::String("sub".to_string()))
+        .expect_err("sub requires a field");
+    assert!(err.contains("sub"), "{err}");
+}
+
+#[test]
+fn config_ops_rejects_unknown_kind_listing_available() {
+    use harness_core::ConfigOps;
+    let h = build_harness();
+    let err = h
+        .decode_op(&serde_json::json!({ "nope": {} }))
+        .expect_err("unknown kind");
+    assert!(
+        err.contains("nope") && err.contains("add") && err.contains("sub"),
+        "{err}"
+    );
+    let err = h.parse_kind("nope").expect_err("unknown kind");
+    assert!(err.contains("add") && err.contains("sub"), "{err}");
+    assert_eq!(h.parse_kind("add").expect("known"), "add");
 }
