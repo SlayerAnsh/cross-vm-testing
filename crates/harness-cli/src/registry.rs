@@ -1367,8 +1367,9 @@ mod tests {
             ))
     }
 
-    /// A step whose op is a bare unit-variant name (`MockOp` has no data, so a plain TOML string
-    /// deserializes into it exactly like `H::OpKind::deserialize` does for `kinds`/`weights`).
+    /// A step whose op is a bare kind-name string (the mock ops have no data, so a plain string
+    /// decodes through `ConfigOps::decode_op` into an empty-field op, the same bare-string form
+    /// `kinds`/`weights` use).
     fn mock_step(op: &str, expect: harness_config::ExpectStr) -> harness_config::ScenarioStepRaw {
         harness_config::ScenarioStepRaw {
             op: serde_json::Value::String(op.to_string()),

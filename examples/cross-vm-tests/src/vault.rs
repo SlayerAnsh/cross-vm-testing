@@ -43,15 +43,13 @@ const USERS: [&str; 2] = ["alice", "bob"];
 /// Loan-to-value ceiling, in basis points (50%).
 const LTV_BPS: u128 = 5000;
 
-/// One vault action's shared fields: `amount` for `user` on `chain`.
-///
-/// Each op is externally tagged by its kind name so a TOML scenario step writes
-/// `op = { deposit = { chain = "eth", user = 0, amount = 1000 } }` (spec section 7.1). `amount` is
-/// `u128`; TOML cannot hold a `u128` literal directly, but every scenario amount in practice fits
-/// a `u64` (see [`deserialize_u128_from_u64`]), and fuzz/invariant-generated amounts are never
-/// round-tripped through TOML (they are only ever serialized into the JSON failure-history
-/// artifact, which handles `u128` natively; the `deserialize_with` below only narrows the TOML
-/// read path, `Serialize` is untouched).
+// Each op is externally tagged by its kind name so a TOML scenario step writes
+// `op = { deposit = { chain = "eth", user = 0, amount = 1000 } }` (spec section 7.1). `amount` is
+// `u128`; TOML cannot hold a `u128` literal directly, but every scenario amount in practice fits
+// a `u64` (see `deserialize_u128_from_u64`), and fuzz/invariant-generated amounts are never
+// round-tripped through TOML (they are only ever serialized into the JSON failure-history
+// artifact, which handles `u128` natively; the `deserialize_with` below only narrows the TOML
+// read path, `Serialize` is untouched).
 
 /// Credit `amount` of collateral to `user` on `chain`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

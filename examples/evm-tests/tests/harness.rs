@@ -6,7 +6,9 @@ use cross_vm_framework::prelude::*;
 #[cfg(feature = "endurance")]
 use std::time::Duration;
 
-use evm_tests::counter::{counter_harness, counter_setup, CounterWorld, IncrementTwice};
+#[cfg(any(feature = "fuzz", feature = "invariant", feature = "endurance"))]
+use evm_tests::counter::CounterWorld;
+use evm_tests::counter::{counter_harness, counter_setup, IncrementTwice};
 
 // Style (a), always-on: a concrete scenario step through a `ScenarioRunner`.
 #[tokio::test]
