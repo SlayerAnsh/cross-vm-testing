@@ -397,7 +397,10 @@ impl<C: 'static, W: 'static> ConfigOps for OpSetHarness<C, W> {
             .get_key_value(name)
             .map(|(k, _)| *k)
             .ok_or_else(|| {
-                format!("unknown op kind `{name}`; available: {}", self.available_kinds())
+                format!(
+                    "unknown op kind `{name}`; available: {}",
+                    self.available_kinds()
+                )
             })
     }
 
@@ -420,7 +423,10 @@ impl<C: 'static, W: 'static> ConfigOps for OpSetHarness<C, W> {
             }
         };
         let def = self.ops.get(name).ok_or_else(|| {
-            format!("unknown op kind `{name}`; available: {}", self.available_kinds())
+            format!(
+                "unknown op kind `{name}`; available: {}",
+                self.available_kinds()
+            )
         })?;
         let op = def
             .decode(data)

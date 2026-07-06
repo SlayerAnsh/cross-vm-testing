@@ -175,10 +175,10 @@ fn op_docs_carries_opt_in_help_and_defaults_to_bare_kind() {
     // `with_help` is opt-in: a plain `OpDef::new` carries no docs, and a harness mixing the two
     // surfaces both through `op_docs`, sorted by kind name.
     let harness = OpSetHarness::<(), World>::new()
-        .register(OpDef::new("add", gen_add, decode_json_op::<Add, _, _>).with_help(
-            "increment the counter",
-            &[("n", "amount to add")],
-        ))
+        .register(
+            OpDef::new("add", gen_add, decode_json_op::<Add, _, _>)
+                .with_help("increment the counter", &[("n", "amount to add")]),
+        )
         .register(OpDef::new("sub", gen_sub, decode_json_op::<Sub, _, _>));
 
     let docs = harness.op_docs();

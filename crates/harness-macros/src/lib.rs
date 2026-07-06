@@ -175,7 +175,10 @@ mod op_doc_tests {
         assert!(s.contains("fn doc"), "{s}");
 
         // Struct-level doc harvested.
-        assert!(s.contains(r#"Some ("Move funds between two accounts.")"#), "{s}");
+        assert!(
+            s.contains(r#"Some ("Move funds between two accounts.")"#),
+            "{s}"
+        );
 
         // Field names appear as string literals, paired with their trimmed docs.
         assert!(s.contains(r#"("from" , "Source account id.")"#), "{s}");

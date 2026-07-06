@@ -253,7 +253,10 @@ async fn deploy_and_prime(
         fund_alice(&mut chain).await;
     }
     let counter = Counter::new(chain);
-    counter.setup(signer(label)).await.map_err(HarnessError::infra)?;
+    counter
+        .setup(signer(label))
+        .await
+        .map_err(HarnessError::infra)?;
     let addr = counter
         .address()
         .ok_or_else(|| HarnessError::infra(format!("{label}: setup recorded no address")))?;
