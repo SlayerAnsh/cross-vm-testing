@@ -37,7 +37,7 @@ use harness_core::{ConfigOps, FailureKind};
 use crate::artifact::write_replay_artifact;
 use crate::domain::{CliDomain, SetupFuture};
 use crate::erased::ErasedReport;
-use crate::registry::{Registry, RunError};
+use crate::registry::{HarnessInfo, Registry, RunError};
 use crate::report::write_json_report;
 use crate::resolve::{resolve_profile, ResolvedProfile, RunOptions};
 
@@ -166,6 +166,7 @@ impl<D: CliDomain> Cli<D> {
             Command::Run(run_args) => self.dispatch_run(run_args).await,
             Command::Validate(cfg_args) => self.dispatch_validate(cfg_args),
             Command::List(cfg_args) => self.dispatch_list(cfg_args),
+            Command::Describe(describe_args) => self.dispatch_describe(describe_args),
             Command::Replay(replay_args) => self.dispatch_replay(replay_args).await,
         };
         std::process::ExitCode::from(code)
@@ -342,6 +343,62 @@ impl<D: CliDomain> Cli<D> {
         }
         0
     }
+
+    /// `describe [<name>]`. With no name, prints every registered harness name, one per line. With
+    /// a name, prints that harness's persistent/patchable flags and op kinds (including any opt-in
+    /// [`with_help`](harness_core::OpDef::with_help) docs), one item per line — off the built-in
+    /// registry alone, no config file required. An unknown name is a usage error (exit code `3`),
+    /// logged like `list`'s own unknown-harness path.
+    fn dispatch_describe(&self, args: DescribeArgs) -> u8 {
+        let Some(name) = &args.name else {
+            for harness in self.registry.names() {
+                println!("{harness}");
+            }
+            return 0;
+        };
+        match self.registry.describe(name) {
+            Ok(info) => {
+                print_harness_info(&info);
+                0
+            }
+            Err(e) => {
+                tracing::error!(
+                    harness = %name,
+                    registered = %self.registry.names().collect::<Vec<_>>().join(", "),
+                    error = %e,
+                    "unknown harness"
+                );
+                3
+            }
+        }
+    }
+}
+
+/// Prints one [`HarnessInfo`] for `describe <name>`: the name, `persistent`/`patchable` flags, and
+/// each op kind on its own line, with any opt-in description/field docs indented beneath it.
+fn print_harness_info(info: &HarnessInfo) {
+    println!("{}", info.name);
+    println!("persistent: {}", yes_no(info.persistent));
+    println!("patchable: {}", yes_no(info.patchable));
+    println!("op kinds:");
+    for op in &info.op_kinds {
+        println!("  {}", op.kind);
+        if let Some(description) = &op.description {
+            println!("    {description}");
+        }
+        for (field, doc) in &op.field_docs {
+            println!("    {field}: {doc}");
+        }
+    }
+}
+
+/// `true`/`false` as `yes`/`no` for `describe`'s flag lines.
+fn yes_no(b: bool) -> &'static str {
+    if b {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 impl<D: CliDomain> Default for Cli<D> {
@@ -404,6 +461,9 @@ enum Command<A: clap::Args> {
     Validate(ConfigArgs),
     /// List registered harnesses and a config file's profiles/suites.
     List(ConfigArgs),
+    /// Describe registered harnesses off the built-in registry (no config file): with no name,
+    /// list every registered name; with a name, show its persistent/patchable flags and op kinds.
+    Describe(DescribeArgs),
     /// Replay a `*.replay.toml`/`*.replay.json` artifact: sugar for `run <artifact> --profile
     /// replay` (spec section 10).
     Replay(ReplayArgs<A>),
@@ -414,6 +474,13 @@ enum Command<A: clap::Args> {
 struct ConfigArgs {
     /// Path to the config file.
     config: PathBuf,
+}
+
+/// `describe [<name>]`: an optional harness name to describe; omit to list every registered name.
+#[derive(Debug, Clone, Default, clap::Args)]
+struct DescribeArgs {
+    /// Harness to describe; omit to list every registered harness name, one per line.
+    name: Option<String>,
 }
 
 /// `replay <artifact>` (spec section 10).
@@ -1121,6 +1188,21 @@ mod tests {
     fn list_subcommand_parses() {
         let args = CliArgs::<NoArgs>::try_parse_from(["harness", "list", "f.toml"]).unwrap();
         assert!(matches!(args.command, Command::List(_)));
+    }
+
+    #[test]
+    fn describe_subcommand_parses_with_and_without_name() {
+        let bare = CliArgs::<NoArgs>::try_parse_from(["harness", "describe"]).unwrap();
+        let Command::Describe(args) = bare.command else {
+            panic!("expected Describe subcommand");
+        };
+        assert_eq!(args.name, None);
+
+        let named = CliArgs::<NoArgs>::try_parse_from(["harness", "describe", "vault"]).unwrap();
+        let Command::Describe(args) = named.command else {
+            panic!("expected Describe subcommand");
+        };
+        assert_eq!(args.name.as_deref(), Some("vault"));
     }
 
     #[test]

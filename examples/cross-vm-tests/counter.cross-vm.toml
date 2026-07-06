@@ -1,0 +1,81 @@
+# Config-driven run definitions for the multi-chain counter harness (`cross-vm-tests`).
+#
+# Run with, e.g.:
+#   cargo run -p cross-vm-tests --bin cross-vm -- validate examples/cross-vm-tests/counter.cross-vm.toml
+#   cargo run -p cross-vm-tests --bin cross-vm -- run examples/cross-vm-tests/counter.cross-vm.toml --profile smoke
+#
+# The three [[chain]] declarations mirror the hard coded OSMOSIS / ETHEREUM / SOLANA_DEVNET
+# presets; labels osmosis/eth/solana match counter_setup's mock LABELS exactly. The optional
+# live "base" chain (rpc-endurance feature) is deliberately not declared here; a live run would
+# add a [[chain]] with an rpc_url and promote it via env.targets.
+
+[harness]
+name = "counter"
+
+[[chain]]
+label = "osmosis"
+kind = "cosmwasm"
+chain_id = "osmosis-1"
+name = "Osmosis"
+bech32_prefix = "osmo"
+native_denom = "uosmo"
+native_symbol = "OSMO"
+gas_price = 0.025
+rpc_url = "https://rpc.osmosis.zone:443"
+
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "1"
+name = "Ethereum"
+native_symbol = "ETH"
+spec_id = "cancun"
+
+[[chain]]
+label = "solana"
+kind = "svm"
+chain_id = "devnet"
+name = "Solana Devnet"
+native_symbol = "SOL"
+commitment = "finalized"
+rpc_url = "https://api.devnet.solana.com"
+ws_url = "wss://api.devnet.solana.com"
+
+[env]
+target = "mock"
+chains = ["osmosis", "eth", "solana"]
+
+[defaults]
+seed = 42
+check_every = 1
+
+# A fast, CI-friendly smoke profile over both op kinds.
+[profile.smoke]
+mode = "fuzz"
+cases = 4
+ops = 20
+kinds = ["increment", "increment_on_two_chains"]
+
+# A single longer invariant run, checked every 5 ops.
+[profile.invariant-long]
+mode = "invariant"
+ops = 200
+check_every = 5
+
+# Scenario mode: ordered steps exercising both op kinds. Both ops carry chain-label fields, so
+# every step uses the externally tagged table form (a bare `op = "increment"` cannot supply the
+# required `chain` field).
+[profile.steps]
+mode = "scenario"
+
+  [[profile.steps.steps]]
+  op = { increment = { chain = "osmosis" } }
+  expect = "accepted"
+
+  [[profile.steps.steps]]
+  op = { increment_on_two_chains = { chain_1 = "osmosis", chain_2 = "eth" } }
+  expect = "accepted"
+
+  [[profile.steps.steps]]
+  op = { increment = { chain = "solana" } }
+  expect = "accepted"

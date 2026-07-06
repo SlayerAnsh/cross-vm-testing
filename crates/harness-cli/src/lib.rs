@@ -21,6 +21,7 @@ pub use cli::{
 };
 pub use domain::{BasicSetup, CliDomain, GenericDomain, NoArgs, SetupBuildError, SetupFuture};
 pub use erased::{ErasedFailure, ErasedReport};
-pub use registry::{MakeSetup, Registry, RunError, ValidationError};
+pub use harness_core::OpDoc;
+pub use registry::{HarnessInfo, MakeSetup, Registry, RunError, ValidationError};
 pub use report::{write_json_report, Invocation, JsonReport};
 pub use resolve::{resolve_profile, ResolvedProfile, RunOptions};

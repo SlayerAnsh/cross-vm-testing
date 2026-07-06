@@ -3,8 +3,8 @@
 //! instead of a hand-written enum harness.
 
 use harness_core::{
-    decode_json_op, CheckOutcome, DynInvariant, DynOp, DynOperation, Harness, HarnessError, OpDef,
-    OpFuture, OpSetHarness, Prng, Runner, Verdict,
+    decode_json_op, CheckOutcome, ConfigOps, DynInvariant, DynOp, DynOperation, Harness,
+    HarnessError, OpDef, OpFuture, OpSetHarness, Prng, Runner, Verdict,
 };
 
 /// The system under test: a u8 counter with saturating add and a subtract that
@@ -168,6 +168,33 @@ fn opdef_default_weight_is_one_and_overridable() {
 
     let gated = OpDef::new("add", gen_add, decode_json_op::<Add, _, _>).with_weight(zero_weight);
     assert_eq!(gated.weight(&(), &world), 0);
+}
+
+#[test]
+fn op_docs_carries_opt_in_help_and_defaults_to_bare_kind() {
+    // `with_help` is opt-in: a plain `OpDef::new` carries no docs, and a harness mixing the two
+    // surfaces both through `op_docs`, sorted by kind name.
+    let harness = OpSetHarness::<(), World>::new()
+        .register(OpDef::new("add", gen_add, decode_json_op::<Add, _, _>).with_help(
+            "increment the counter",
+            &[("n", "amount to add")],
+        ))
+        .register(OpDef::new("sub", gen_sub, decode_json_op::<Sub, _, _>));
+
+    let docs = harness.op_docs();
+    let kinds: Vec<&str> = docs.iter().map(|d| d.kind.as_str()).collect();
+    assert_eq!(kinds, vec!["add", "sub"]);
+
+    let add = &docs[0];
+    assert_eq!(add.description.as_deref(), Some("increment the counter"));
+    assert_eq!(
+        add.field_docs,
+        vec![("n".to_string(), "amount to add".to_string())]
+    );
+
+    let sub = &docs[1];
+    assert!(sub.description.is_none());
+    assert!(sub.field_docs.is_empty());
 }
 
 /// Subtract `n`, expecting rejection on underflow: the op that produces both verdicts.

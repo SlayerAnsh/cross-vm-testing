@@ -1,6 +1,7 @@
-//! The `cross-vm` binary: registers the vault harness with the framework's config-driven CLI
-//! (spec `docs/config-runs-spec.md` section 8) and drives it against a `*.cross-vm.toml` config,
-//! e.g. `examples/cross-vm-tests/vault.cross-vm.toml`.
+//! The `cross-vm` binary: registers the counter and vault harnesses with the framework's
+//! config-driven CLI (spec `docs/config-runs-spec.md` section 8) and drives them against a
+//! `*.cross-vm.toml` config, e.g. `examples/cross-vm-tests/counter.cross-vm.toml` or
+//! `examples/cross-vm-tests/vault.cross-vm.toml`.
 //!
 //! ```sh
 //! cargo run -p cross-vm-tests --bin cross-vm -- validate vault.cross-vm.toml
@@ -11,12 +12,14 @@
 //! design (see `cross_vm_framework::cli::Cli::main`'s docs).
 
 use cross_vm_tests::boom::{boom_harness, boom_setup};
+use cross_vm_tests::counter::{counter_config_setup, counter_harness};
 use cross_vm_tests::vault::{vault_config_setup, vault_harness};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::process::ExitCode {
     cross_vm_framework::cli::Cli::new()
         .env_file(".env")
+        .register("counter", counter_harness, counter_config_setup)
         .register("vault", vault_harness, vault_config_setup)
         // A tiny, deterministically-failing harness registered only for `tests/cli_e2e.rs`'s
         // replay-artifact/shrink/`replay`-subcommand coverage (see `boom`'s module docs).

@@ -1,0 +1,60 @@
+# Config-driven counterpart of `deploy_counter/main.rs`: the same two targets (Base Sepolia EVM,
+# Osmosis testnet CosmWasm), driven through the `counter` harness (`cross-vm-tests`'s
+# `counter_config_setup`) instead of the hand-written `run()` flow.
+#
+# Run with, e.g. (note: the runnable `cross-vm` binary lives in `cross-vm-tests`, not in this
+# `scripts` crate; it takes any config path, so this file works unmodified from either crate):
+#   cargo run -p cross-vm-tests --bin cross-vm -- validate examples/scripts/deploy_counter.cross-vm.toml
+#   cargo run -p cross-vm-tests --bin cross-vm -- run examples/scripts/deploy_counter.cross-vm.toml --profile deploy
+#
+# `env.target = "mock"` below keeps the default run (and CI) network-free. `deploy_counter.rs`'s
+# actual live deploy also needs a funded on-chain wallet; this config's `counter_config_setup`
+# always signs with the in-memory `test_wallets()` roster and funds it via `fund_alice`/
+# `set_balance`, which is a mock-only faucet call (see `examples/common/src/wallets.rs`). Flipping
+# `env.target`/`env.targets` to `"rpc"` (mirroring `vault.cross-vm.toml`'s `mixed-targets` demo)
+# would reach these two real testnets, but the funding step would still try to mint balance on
+# them and fail rather than sign with a real funded mnemonic — reaching real deploy_counter.rs
+# parity on live chains needs that funding path wired up too, not just this config file.
+
+[harness]
+name = "counter"
+
+[[chain]]
+label = "osmosis"
+kind = "cosmwasm"
+chain_id = "osmo-test-5"
+name = "Osmosis Testnet"
+bech32_prefix = "osmo"
+native_denom = "uosmo"
+native_symbol = "OSMO"
+gas_price = 0.025
+rpc_url = "https://rpc.testnet.osmosis.zone:443"
+
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "84532"
+name = "Base Sepolia"
+native_symbol = "ETH"
+spec_id = "cancun"
+
+[env]
+target = "mock"
+chains = ["osmosis", "eth"]
+
+[defaults]
+seed = 42
+check_every = 1
+
+# Mirrors deploy_counter.rs's flow: setup (deploy) happens automatically before the first op, then
+# one increment per chain, same as its `counter.increment(wallet)` call.
+[profile.deploy]
+mode = "scenario"
+
+  [[profile.deploy.steps]]
+  op = { increment = { chain = "osmosis" } }
+  expect = "accepted"
+
+  [[profile.deploy.steps]]
+  op = { increment = { chain = "eth" } }
+  expect = "accepted"

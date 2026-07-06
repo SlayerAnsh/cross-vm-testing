@@ -40,7 +40,7 @@ use thiserror::Error;
 
 use harness_core::{
     sub_seed, ConfigOps, Endurance, EnduranceConfig, Expectation, Failure, Fuzz, Harness,
-    Invariant, KindMix, RunReport, Runner, Scenario, ScenarioStep, Stats,
+    Invariant, KindMix, OpDoc, RunReport, Runner, Scenario, ScenarioStep, Stats,
 };
 
 use crate::domain::{SetupBuildError, SetupFuture};
@@ -150,15 +150,39 @@ type WorldPatchFn<W> = Rc<dyn Fn(&mut W, &toml::Table) -> Result<(), String>>;
 /// nothing the design does not already pay for.
 type SessionSlot<C, W> = Rc<RefCell<Option<(C, W)>>>;
 
-/// One registered harness: a validate closure and a run closure, both monomorphized over the
-/// harness type at [`Registry::register`] time. Never exposed to callers directly; [`Registry`]'s
-/// own methods are the whole surface a CLI needs onto a registered harness.
+/// A describe closure's shape: reports a registered harness's introspectable metadata off the
+/// built-in registry alone (no config, no chain). Boxed like [`ValidateFn`]/[`RunFn`] so the
+/// generic `H` it monomorphizes over never leaks into [`Entry`]/[`Registry`].
+type DescribeFn = Box<dyn Fn() -> HarnessInfo>;
+
+/// A registered harness's introspectable metadata, produced by [`Registry::describe`] without
+/// loading a config or touching a chain: its name, whether it was registered persistent
+/// (`register_persistent*`, so a scenario `export_world` is accepted) and/or patchable
+/// (`register_*_with_patch`, so a phase `params` patch is accepted), and its op kinds — each with
+/// any opt-in [`with_help`](harness_core::OpDef::with_help) documentation — sorted by kind name.
+#[derive(Debug, Clone)]
+pub struct HarnessInfo {
+    /// The registered harness name.
+    pub name: String,
+    /// Registered via a `register_persistent*` variant.
+    pub persistent: bool,
+    /// Registered via a `register_*_with_patch` variant.
+    pub patchable: bool,
+    /// Registered op kinds with any opt-in docs, sorted by kind name.
+    pub op_kinds: Vec<OpDoc>,
+}
+
+/// One registered harness: a validate closure, a run closure, and a describe closure, all
+/// monomorphized over the harness type at [`Registry::register`] time. Never exposed to callers
+/// directly; [`Registry`]'s own methods are the whole surface a CLI needs onto a registered harness.
 struct Entry<S> {
     /// Type-check a profile's `kinds`/`weights`/scenario `op`s against `H`'s enums, without
     /// running or touching a chain.
     validate: ValidateFn,
     /// Drive one resolved profile end-to-end (setup, drive, erase).
     run: RunFn<S>,
+    /// Report this harness's introspectable metadata off the registry alone.
+    describe: DescribeFn,
 }
 
 /// The harness registry: every [`Harness`](harness_core::Harness) a binary can drive, keyed by its
@@ -317,6 +341,7 @@ impl<S: 'static> Registry<S> {
         SF: Fn(S) -> SetupFuture<'static, H::Ctx, H::World> + 'static,
     {
         let export_capable = export.is_some();
+        let patch_capable = patch.is_some();
 
         // `Rc`, not a borrow of the closure's own captured fields: the run closure must be
         // callable an arbitrary number of times (once per fuzz case), and each call needs to
@@ -337,6 +362,18 @@ impl<S: 'static> Registry<S> {
             let codec = (harness_for_validate)();
             validate_profile(&codec, profile)?;
             validate_export_world(profile, export_capable)
+        });
+
+        // The describe closure builds a fresh harness (the same cheap registration-only codec the
+        // validate closure uses) purely to read its registered op kinds; the persistent/patchable
+        // flags are captured by copy from this registration's `export`/`patch` presence.
+        let harness_for_describe = Rc::clone(&harness);
+        let describe_name = name.to_string();
+        let describe: DescribeFn = Box::new(move || HarnessInfo {
+            name: describe_name.clone(),
+            persistent: export_capable,
+            patchable: patch_capable,
+            op_kinds: (harness_for_describe)().op_docs(),
         });
 
         // The pipeline handoff slot: one per registered harness, alive for the registry's
@@ -373,14 +410,28 @@ impl<S: 'static> Registry<S> {
             },
         );
 
-        self.entries
-            .insert(name.to_string(), Entry { validate, run });
+        self.entries.insert(
+            name.to_string(),
+            Entry {
+                validate,
+                run,
+                describe,
+            },
+        );
         self
     }
 
     /// Every registered harness name, in sorted (`BTreeMap`) order.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.entries.keys().map(String::as_str)
+    }
+
+    /// This harness's introspectable metadata (name, persistent/patchable flags, op kinds with
+    /// any opt-in docs), off the built-in registry alone — no config loaded, no chain touched.
+    /// Powers `describe <name>`.
+    pub fn describe(&self, harness: &str) -> Result<HarnessInfo, RunError> {
+        let entry = self.lookup(harness)?;
+        Ok((entry.describe)())
     }
 
     /// Type-checks `profile`'s `kinds`/`weights`/scenario `op`s against `harness`'s enums, without
@@ -1245,6 +1296,43 @@ mod tests {
         registry.register("alpha", mock_harness, mock_setup);
         let names: Vec<&str> = registry.names().collect();
         assert_eq!(names, vec!["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn describe_reports_flags_and_sorted_op_kinds() {
+        let mut registry = Registry::new();
+        registry.register("plain", mock_harness, mock_setup);
+        registry.register_persistent("persistent", mock_harness, mock_setup);
+        registry.register_with_patch(
+            "patched",
+            mock_harness,
+            mock_setup,
+            |_world: &mut u32, _params: &toml::Table| Ok(()),
+        );
+
+        let plain = registry.describe("plain").expect("registered");
+        assert_eq!(plain.name, "plain");
+        assert!(!plain.persistent);
+        assert!(!plain.patchable);
+        // `mock_harness` registers kinds `boom` and `ping`; `BTreeMap` order is sorted.
+        let kinds: Vec<&str> = plain.op_kinds.iter().map(|o| o.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["boom", "ping"]);
+        // No call site sets `with_help`, so the common case carries no per-op docs.
+        assert!(plain
+            .op_kinds
+            .iter()
+            .all(|o| o.description.is_none() && o.field_docs.is_empty()));
+
+        let persistent = registry.describe("persistent").expect("registered");
+        assert!(persistent.persistent);
+        assert!(!persistent.patchable);
+
+        let patched = registry.describe("patched").expect("registered");
+        assert!(!patched.persistent);
+        assert!(patched.patchable);
+
+        let err = registry.describe("nope").unwrap_err();
+        assert!(matches!(err, RunError::UnknownHarness(name) if name == "nope"));
     }
 
     #[tokio::test]
