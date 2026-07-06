@@ -1,5 +1,8 @@
 //! End-to-end proof that harness-core drives a plain function with `Ctx = ()`:
 //! a saturating u8 counter (the SUT) checked against an i32 shadow model.
+//!
+//! This file pins the runner contract through a raw `Harness` impl; it is not the developer-facing
+//! pattern, which is `OpSetHarness` plus `DynOp` structs (see `tests/opset.rs`).
 
 use harness_core::{CheckOutcome, EnduranceConfig, Harness, HarnessError, Prng, Runner, Verdict};
 use std::time::Duration;
