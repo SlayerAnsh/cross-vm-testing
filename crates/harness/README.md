@@ -1,14 +1,14 @@
 # harness-core
 
-A standalone, mode-typed property-testing runner. You implement one `Harness` trait over a
-user-defined `(Ctx, World)` pair, and one implementation drives four run shapes: fuzz, invariant,
-endurance, and scenario. The crate has no notion of chains, VMs, or any particular domain; it is
-consumed directly here as `harness-core`, and it is the extraction point behind
+A standalone, mode-typed property-testing runner. You assemble operations into an `OpSetHarness`
+over a user-defined `(Ctx, World)` pair, and that one harness drives four run shapes: fuzz,
+invariant, endurance, and scenario. The crate has no notion of chains, VMs, or any particular
+domain; it is consumed directly here as `harness-core`, and it is the extraction point behind
 `cross-vm-framework`'s property-testing harness (see "Flagship consumer" below).
 
-## The `Harness` trait
+## Operations and the `OpSetHarness`
 
-Two associated types are kept apart on purpose:
+Two pieces are kept apart on purpose:
 
 * `Ctx`: the live system under test, threaded by `&mut` through every step. For a chain framework
   this is a started multi-chain environment; for a plain function or data structure it can simply
@@ -16,10 +16,17 @@ Two associated types are kept apart on purpose:
 * `World`: persisted bookkeeping only (a shadow model, flags, identifiers learned so far). It holds
   no live handles, so a handle is rebuilt on demand from `Ctx` plus a stored identifier.
 
-Alongside those, an `Operation` enum, an `Invariant` enum, an `OpKind` enum (the data free
-operation kinds), and the functions `apply` (run one operation), `generate_op` (build a random
-instance of one kind), and `check` (evaluate one invariant). A provided default `generate` picks a
-kind uniformly and calls `generate_op`; override it only to bias the kind mix.
+Each operation is a standalone struct that implements `DynOp<Ctx, World>`: its data fields plus its
+own `apply` (run the operation), `kind` (its lowercase registered name), `clone_box`, and `to_data`
+(its data as JSON, for reports and replay). You register each op into an `OpSetHarness` with one
+`OpDef` (the kind name, a generator fn that builds a random instance, a decoder, and an optional
+dynamic weight fn). Invariants follow the same shape via `DynInvariant`. The op struct derives
+`Serialize`/`Deserialize`, and registration passes `decode_json_op::<TheOp, _, _>` as the decoder,
+so every registered harness works with config, CLI, scenario, and replay. Adding an operation
+touches one `OpDef`, and an op is unit-testable without a runner (call its `apply` directly).
+
+`OpSetHarness` implements the internal `Harness` trait, the runner seam every mode drives through;
+you rarely name it directly.
 
 ## The four modes
 
@@ -43,53 +50,66 @@ struct World {
     model: i32,
 }
 
-struct CounterHarness;
+/// Saturating add of `n`: one standalone operation carrying its own `apply`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Add {
+    n: u8,
+}
 
-impl Harness for CounterHarness {
-    type Ctx = ();
-    type World = World;
-    type Operation = Op;
-    type Invariant = Inv;
-    type OpKind = OpKind;
+impl DynOp<(), World> for Add {
+    fn kind(&self) -> &'static str { "add" }
 
-    async fn apply(&self, _ctx: &mut (), world: &mut World, op: &Op) -> Result<Verdict, HarnessError> {
-        match op {
-            Op::Add(n) => {
-                world.sut.add(*n).map_err(HarnessError::infra)?;
-                world.model = (world.model + *n as i32).min(u8::MAX as i32);
-                Ok(Verdict::Accepted)
-            }
-            Op::Sub(n) => {
-                let expected_ok = world.model >= *n as i32;
-                match (world.sut.sub(*n), expected_ok) {
-                    (Ok(()), true) => { world.model -= *n as i32; Ok(Verdict::Accepted) }
-                    (Ok(()), false) => Err(HarnessError::bug("underflow was accepted")),
-                    (Err(reason), false) => Ok(Verdict::Rejected { reason }),
-                    (Err(e), true) => Err(HarnessError::bug(format!("valid sub rejected: {e}"))),
-                }
-            }
-        }
+    fn apply<'a>(
+        &'a self,
+        _ctx: &'a mut (),
+        world: &'a mut World,
+    ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+        Box::pin(async move {
+            world.sut.add(self.n).map_err(HarnessError::infra)?;
+            world.model = (world.model + self.n as i32).min(u8::MAX as i32);
+            Ok(Verdict::Accepted)
+        })
     }
 
-    fn op_kinds(&self) -> Vec<OpKind> { vec![OpKind::Add, OpKind::Sub] }
+    fn clone_box(&self) -> Box<dyn DynOp<(), World>> { Box::new(self.clone()) }
 
-    fn generate_op(&self, rng: &mut Prng, _world: &World, kind: OpKind) -> Op {
-        let n = rng.below(300) as u8; // wraps past 255 on purpose
-        match kind { OpKind::Add => Op::Add(n), OpKind::Sub => Op::Sub(n) }
-    }
-
-    fn invariants(&self) -> Vec<Inv> { vec![Inv::MatchesModel, Inv::NeverExceedsMax] }
-
-    async fn check(&self, _ctx: &mut (), world: &World, inv: &Inv) -> CheckOutcome {
-        match inv {
-            Inv::MatchesModel if world.sut.value as i32 == world.model => CheckOutcome::Held,
-            Inv::MatchesModel => CheckOutcome::violated("sut/model mismatch"),
-            Inv::NeverExceedsMax => CheckOutcome::Held,
-        }
+    fn to_data(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("op data serializes")
     }
 }
 
-let mut r = Runner::fuzz(CounterHarness, 42);
+// `Sub` follows the same shape (kind "sub"), producing both an Accepted and a Rejected verdict.
+
+/// Every chain state matches the shadow model: the one invariant of this harness.
+#[derive(Debug, Clone)]
+struct MatchesModel;
+
+impl DynInvariant<(), World> for MatchesModel {
+    fn check<'a>(&'a self, _ctx: &'a mut (), world: &'a World) -> OpFuture<'a, CheckOutcome> {
+        Box::pin(async move {
+            if world.sut.value as i32 == world.model {
+                CheckOutcome::Held
+            } else {
+                CheckOutcome::violated("sut/model mismatch")
+            }
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn DynInvariant<(), World>> { Box::new(self.clone()) }
+}
+
+fn gen_add(rng: &mut Prng, _world: &World) -> Box<dyn DynOp<(), World>> {
+    Box::new(Add { n: rng.below(300) as u8 }) // wraps past 255 on purpose
+}
+
+fn counter_harness() -> OpSetHarness<(), World> {
+    OpSetHarness::new()
+        .register(OpDef::new("add", gen_add, decode_json_op::<Add, _, _>))
+        // .register(OpDef::new("sub", gen_sub, decode_json_op::<Sub, _, _>))
+        .invariant(Box::new(MatchesModel))
+}
+
+let mut r = Runner::fuzz(counter_harness(), 42);
 r.setup((), fresh_world());
 let report = r.run(200, None, 1).await;
 assert!(report.passed(), "{:?}", report.failure);

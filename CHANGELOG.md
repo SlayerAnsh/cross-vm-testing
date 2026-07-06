@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Breaking (dyn ops are the only operation style)
+
+* Enum-based operations are removed as a supported style. `OpSetHarness` (dyn ops) is the one documented way to define operations, and it now works with config and CLI runs end to end.
+* `OpDef::new` takes a required third `decode` argument; ops implement `kind()` and `to_data()` (a `Deserialize`-deriving op struct registers with `decode_json_op::<T, _, _>`).
+* `OpSetHarness::Operation` is the new `DynOperation` newtype, whose `Debug` leads with the registered kind name (stats, coverage, and failure dumps bucket by that name).
+* `harness-cli` registration bounds changed from op serde bounds to `H: ConfigOps` (implemented by `OpSetHarness`). The new `ConfigOps` codec (`parse_kind`, `decode_op`, `encode_op`) replaces the `H::Operation`/`H::OpKind` serde bounds.
+* Config kind names and scenario op tags are the registered lowercase names (`kinds = ["increment"]`, `op = { deposit = { chain = "osmosis", user = 0, amount = 1000 } }`). An unknown kind now errors with `unknown op kind \`x\`; available: ...`.
+
 ### Changed (multi native balance: denom aware `set_balance`)
 
 * **Breaking:** `ChainProvider::set_balance` is now `set_balance(addr, denom, amount)`. CosmWasm mocks mint any bank denom verbatim ("uosmo", "uatom", "ibc/...") and merge it into the account's existing coins instead of overwriting them (setting an amount of 0 clears the denom). EVM, Solana, and Tron have a single native token, so `denom` must equal the chain's `native_symbol`, matched case-insensitively ("ETH", "SOL", "TRX"), and amounts stay in base units (wei, lamports, sun); any other denom is a `Balance` error. Every RPC backend keeps returning `Unimplemented` (a live chain cannot mint).
