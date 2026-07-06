@@ -12,6 +12,8 @@ use cross_vm_cosmwasm::CwChain;
 use cross_vm_solana::SvmChain;
 #[cfg(feature = "evm")]
 use cross_vm_solidity::EvmChain;
+#[cfg(feature = "tron")]
+use cross_vm_tron::TronChain;
 
 use crate::any_chain::AnyChain;
 use crate::env::{MultiChainEnv, Running};
@@ -51,6 +53,12 @@ impl Ctx {
     #[cfg(feature = "solana")]
     pub fn solana(&mut self, label: &str) -> Result<&mut SvmChain, EnvError> {
         self.env.solana(label)
+    }
+
+    /// Borrow the Tron chain under `label`.
+    #[cfg(feature = "tron")]
+    pub fn tron(&mut self, label: &str) -> Result<&mut TronChain, EnvError> {
+        self.env.tron(label)
     }
 
     /// Advance every chain by `n` blocks/slots.
