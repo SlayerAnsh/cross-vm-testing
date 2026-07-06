@@ -1245,7 +1245,7 @@ async fn sweep<H: Harness>(
                 tracing::debug!(invariant = ?inv, "invariant held");
             }
             CheckOutcome::Skipped(why) => {
-                coverage.record_skipped(&name);
+                coverage.record_skipped(&name, &why);
                 tracing::debug!(invariant = ?inv, reason = %why, "invariant skipped");
             }
             CheckOutcome::Violated(v) => {

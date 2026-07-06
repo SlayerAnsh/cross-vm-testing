@@ -187,21 +187,31 @@ impl InvCoverage {
 ///
 /// Serializes transparently as the inner map (`#[serde(transparent)]`): a JSON object keyed by
 /// invariant name, e.g. `{"balances_never_negative": {"held": 12, "skipped": 0, "violated": 0}}`,
-/// rather than being wrapped in a newtype layer.
+/// rather than being wrapped in a newtype layer. `serde(transparent)` requires exactly one
+/// non-skipped field, so `reasons` (diagnostic-only, not part of the JSON contract) is marked
+/// `serde(skip)`: it rides alongside `tallies` without perturbing the serialized shape.
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(transparent))]
-pub struct Coverage(BTreeMap<String, InvCoverage>);
+pub struct Coverage {
+    tallies: BTreeMap<String, InvCoverage>,
+    /// Every [`CheckOutcome::Skipped`] reason for a name, in the order recorded. Not part of the
+    /// serialized shape: skip reasons are for in-process inspection (e.g. a failing scenario
+    /// test explaining *why* an invariant never fired), not the JSON report.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    reasons: BTreeMap<String, Vec<String>>,
+}
 
 impl Coverage {
     /// Pre-insert every invariant name at an all-zero tally so never-checked invariants stay visible.
     pub fn seed(names: impl IntoIterator<Item = String>) -> Self {
-        Self(
-            names
+        Self {
+            tallies: names
                 .into_iter()
                 .map(|n| (n, InvCoverage::default()))
                 .collect(),
-        )
+            reasons: BTreeMap::new(),
+        }
     }
 
     /// Record that `name` held on one check.
@@ -209,9 +219,15 @@ impl Coverage {
         self.entry(name).held += 1;
     }
 
-    /// Record that `name` was skipped on one check.
-    pub fn record_skipped(&mut self, name: &str) {
+    /// Record that `name` was skipped on one check, keeping `reason` for later inspection via
+    /// [`skip_reasons`](Coverage::skip_reasons). A name skipped multiple times across a run
+    /// accumulates every reason, in order; none are discarded in favor of the latest.
+    pub fn record_skipped(&mut self, name: &str, reason: &str) {
         self.entry(name).skipped += 1;
+        self.reasons
+            .entry(name.to_string())
+            .or_default()
+            .push(reason.to_string());
     }
 
     /// Record that `name` was violated on one check.
@@ -221,17 +237,17 @@ impl Coverage {
 
     fn entry(&mut self, name: &str) -> &mut InvCoverage {
         // A seeded name is the common case; only an invariant set that grew mid-run allocates.
-        self.0.entry(name.to_string()).or_default()
+        self.tallies.entry(name.to_string()).or_default()
     }
 
     /// Total skipped checks across all invariants (the aggregate the report also exposes).
     pub fn total_skipped(&self) -> usize {
-        self.0.values().map(|c| c.skipped).sum()
+        self.tallies.values().map(|c| c.skipped).sum()
     }
 
     /// Names of invariants that never ran (a zero total): candidates for a coverage gap.
     pub fn uncovered(&self) -> impl Iterator<Item = &str> {
-        self.0
+        self.tallies
             .iter()
             .filter(|(_, c)| c.total() == 0)
             .map(|(n, _)| n.as_str())
@@ -239,7 +255,21 @@ impl Coverage {
 
     /// Iterate every invariant's tally in name order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &InvCoverage)> {
-        self.0.iter().map(|(n, c)| (n.as_str(), c))
+        self.tallies.iter().map(|(n, c)| (n.as_str(), c))
+    }
+
+    /// The tally for one invariant by its `Debug` name (the [`FailureKind::Invariant::name`] key),
+    /// or `None` if the run never seeded or recorded that name. Returns a copy: [`InvCoverage`]
+    /// is `Copy` and the caller only reads it.
+    pub fn get(&self, name: &str) -> Option<InvCoverage> {
+        self.tallies.get(name).copied()
+    }
+
+    /// Every [`CheckOutcome::Skipped`] reason recorded for `name`, in the order they occurred.
+    /// An empty slice means either the name never skipped or was never seeded/recorded at all;
+    /// distinguishing those two cases is what [`get`](Coverage::get) is for.
+    pub fn skip_reasons(&self, name: &str) -> &[String] {
+        self.reasons.get(name).map_or(&[], |v| v.as_slice())
     }
 }
 
@@ -269,11 +299,174 @@ impl<Op> RunReport<Op> {
     pub fn passed(&self) -> bool {
         self.failure.is_none()
     }
+
+    /// The tally for one invariant by its `Debug` name: sugar over
+    /// [`self.coverage.get(name)`](Coverage::get). `None` means the run never seeded or recorded
+    /// that name (a likely typo, since seeding covers every declared invariant).
+    pub fn invariant(&self, name: &str) -> Option<InvCoverage> {
+        self.coverage.get(name)
+    }
+
+    /// `true` if `name` was skipped (precondition not yet met) at least once on this run.
+    /// A missing name is `false`, same as an all-zero tally.
+    pub fn was_skipped(&self, name: &str) -> bool {
+        self.invariant(name).is_some_and(|c| c.skipped > 0)
+    }
+
+    /// `true` if `name` was applicable and held at least once on this run.
+    /// A missing name is `false`, same as an all-zero tally.
+    pub fn was_held(&self, name: &str) -> bool {
+        self.invariant(name).is_some_and(|c| c.held > 0)
+    }
+
+    /// `true` if `name` was violated at least once on this run.
+    /// A missing name is `false`, same as an all-zero tally.
+    pub fn was_violated(&self, name: &str) -> bool {
+        self.invariant(name).is_some_and(|c| c.violated > 0)
+    }
+
+    /// Names of invariants skipped at least once, in name order (the coverage map is a `BTreeMap`,
+    /// so the order is deterministic).
+    pub fn skipped_invariants(&self) -> Vec<&str> {
+        self.coverage
+            .iter()
+            .filter(|(_, c)| c.skipped > 0)
+            .map(|(n, _)| n)
+            .collect()
+    }
+
+    /// Every skip reason recorded for `name`, in occurrence order: sugar over
+    /// [`self.coverage.skip_reasons(name)`](Coverage::skip_reasons).
+    pub fn skip_reasons(&self, name: &str) -> &[String] {
+        self.coverage.skip_reasons(name)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------------------------
+    // Per-invariant lookup: Coverage::get and the RunReport sugar over it.
+    // -------------------------------------------------------------------------------------
+
+    mod lookup {
+        use super::*;
+
+        fn coverage() -> Coverage {
+            let mut cov = Coverage::seed([
+                "balances_never_negative".to_string(),
+                "supply_conserved".to_string(),
+                "never_ran".to_string(),
+            ]);
+            cov.record_held("balances_never_negative");
+            cov.record_held("balances_never_negative");
+            cov.record_skipped("balances_never_negative", "no counter incremented yet");
+            cov.record_skipped("supply_conserved", "no mint observed yet");
+            cov.record_skipped("supply_conserved", "no burn observed yet");
+            cov.record_violated("supply_conserved");
+            cov
+        }
+
+        fn report() -> RunReport<()> {
+            let coverage = coverage();
+            RunReport {
+                seed: 42,
+                mode: "case",
+                steps: 3,
+                skipped: coverage.total_skipped(),
+                coverage,
+                failure: None,
+            }
+        }
+
+        #[test]
+        fn coverage_get_returns_the_tally_by_name() {
+            let cov = coverage();
+            assert_eq!(
+                cov.get("balances_never_negative"),
+                Some(InvCoverage {
+                    held: 2,
+                    skipped: 1,
+                    violated: 0
+                })
+            );
+            assert_eq!(cov.get("never_ran"), Some(InvCoverage::default()));
+            assert_eq!(cov.get("no_such_invariant"), None);
+        }
+
+        #[test]
+        fn report_invariant_is_sugar_over_coverage_get() {
+            let rep = report();
+            assert_eq!(
+                rep.invariant("supply_conserved"),
+                rep.coverage.get("supply_conserved")
+            );
+            assert_eq!(rep.invariant("no_such_invariant"), None);
+        }
+
+        #[test]
+        fn was_held_skipped_violated_reflect_nonzero_tallies() {
+            let rep = report();
+
+            assert!(rep.was_held("balances_never_negative"));
+            assert!(rep.was_skipped("balances_never_negative"));
+            assert!(!rep.was_violated("balances_never_negative"));
+
+            assert!(!rep.was_held("supply_conserved"));
+            assert!(rep.was_skipped("supply_conserved"));
+            assert!(rep.was_violated("supply_conserved"));
+
+            // An all-zero tally and a missing name both read as "did not happen".
+            assert!(!rep.was_held("never_ran"));
+            assert!(!rep.was_skipped("never_ran"));
+            assert!(!rep.was_violated("never_ran"));
+            assert!(!rep.was_held("no_such_invariant"));
+            assert!(!rep.was_skipped("no_such_invariant"));
+            assert!(!rep.was_violated("no_such_invariant"));
+        }
+
+        #[test]
+        fn skipped_invariants_lists_names_with_nonzero_skips_in_name_order() {
+            let rep = report();
+            assert_eq!(
+                rep.skipped_invariants(),
+                vec!["balances_never_negative", "supply_conserved"]
+            );
+        }
+
+        #[test]
+        fn skip_reasons_accumulate_in_order_across_multiple_skips() {
+            let cov = coverage();
+            assert_eq!(
+                cov.skip_reasons("supply_conserved"),
+                &["no mint observed yet".to_string(), "no burn observed yet".to_string()]
+            );
+            assert_eq!(
+                cov.skip_reasons("balances_never_negative"),
+                &["no counter incremented yet".to_string()]
+            );
+        }
+
+        #[test]
+        fn skip_reasons_is_empty_for_a_never_skipped_or_missing_name() {
+            let cov = coverage();
+            // Seeded, all-zero tally: never held/skipped/violated.
+            assert!(cov.skip_reasons("never_ran").is_empty());
+            // Not seeded or recorded at all.
+            assert!(cov.skip_reasons("no_such_invariant").is_empty());
+        }
+
+        #[test]
+        fn report_skip_reasons_is_sugar_over_coverage_skip_reasons() {
+            let rep = report();
+            assert_eq!(
+                rep.skip_reasons("supply_conserved"),
+                rep.coverage.skip_reasons("supply_conserved")
+            );
+            assert!(rep.skip_reasons("no_such_invariant").is_empty());
+        }
+    }
 
     // -------------------------------------------------------------------------------------
     // serde (spec section 9): Coverage/InvCoverage/FailureKind shapes. Gated on `serde`, the
@@ -290,7 +483,7 @@ mod tests {
             let mut cov = Coverage::seed(["balances_never_negative".to_string()]);
             cov.record_held("balances_never_negative");
             cov.record_held("balances_never_negative");
-            cov.record_skipped("balances_never_negative");
+            cov.record_skipped("balances_never_negative", "no counter incremented yet");
 
             let value = serde_json::to_value(&cov).unwrap();
             // Transparent: a bare object keyed by invariant name, no wrapper/newtype layer.
