@@ -19,24 +19,27 @@ use crate::config::CrossVmDomain;
 /// # async fn demo() -> std::process::ExitCode {
 /// # use cross_vm_framework::cli::Cli;
 /// # use cross_vm_framework::config::{SetupFuture, SetupRequest};
-/// # use cross_vm_framework::harness::{Ctx, HarnessError};
-/// # struct MyHarness;
-/// # impl cross_vm_framework::harness::Harness for MyHarness {
-/// #     type Ctx = Ctx;
-/// #     type World = ();
-/// #     type Operation = ();
-/// #     type Invariant = ();
-/// #     type OpKind = ();
-/// #     async fn apply(&self, _: &mut Ctx, _: &mut (), _: &()) -> Result<cross_vm_framework::harness::Verdict, HarnessError> { unimplemented!() }
-/// #     fn op_kinds(&self) -> Vec<()> { vec![] }
-/// #     fn generate_op(&self, _: &mut cross_vm_framework::harness::Prng, _: &(), _: ()) -> () {}
-/// #     fn invariants(&self) -> Vec<()> { vec![] }
-/// #     async fn check(&self, _: &mut Ctx, _: &(), _: &()) -> cross_vm_framework::harness::CheckOutcome { unimplemented!() }
+/// # use cross_vm_framework::harness::{
+/// #     decode_json_op, Ctx, DynOp, HarnessError, OpDef, OpFuture, OpSetHarness, Prng, Verdict,
+/// # };
+/// # #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// # struct Noop {}
+/// # impl DynOp<Ctx, ()> for Noop {
+/// #     fn kind(&self) -> &'static str { "noop" }
+/// #     fn apply<'a>(&'a self, _: &'a mut Ctx, _: &'a mut ()) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+/// #         Box::pin(async move { Ok(Verdict::Accepted) })
+/// #     }
+/// #     fn clone_box(&self) -> Box<dyn DynOp<Ctx, ()>> { Box::new(self.clone()) }
+/// #     fn to_data(&self) -> serde_json::Value { serde_json::to_value(self).unwrap() }
+/// # }
+/// # fn gen_noop(_: &mut Prng, _: &()) -> Box<dyn DynOp<Ctx, ()>> { Box::new(Noop {}) }
+/// # fn my_harness() -> OpSetHarness<Ctx, ()> {
+/// #     OpSetHarness::new().register(OpDef::new("noop", gen_noop, decode_json_op::<Noop, _, _>))
 /// # }
 /// # fn my_setup(_req: SetupRequest) -> SetupFuture<'static, ()> { unimplemented!() }
 /// Cli::new()
 ///     .env_file(".env")
-///     .register("my-harness", || MyHarness, my_setup)
+///     .register("my-harness", my_harness, my_setup)
 ///     .main()
 ///     .await
 /// # }
@@ -47,7 +50,10 @@ pub type Cli = harness_cli::Cli<CrossVmDomain>;
 mod tests {
     use super::*;
     use crate::config::{SetupFuture, SetupRequest, Target, TargetArgs};
-    use crate::harness::{CheckOutcome, Ctx, Harness, HarnessError, Prng, Verdict};
+    use crate::harness::{
+        decode_json_op, CheckOutcome, Ctx, DynInvariant, DynOp, HarnessError, OpDef, OpFuture,
+        OpSetHarness, Prng, Verdict,
+    };
     use clap::Parser;
     use std::path::PathBuf;
     use std::rc::Rc;
@@ -106,73 +112,88 @@ mod tests {
     // tested in `harness-cli`; here we only prove the cross-vm seam wires together.
     // -----------------------------------------------------------------------------------------
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    enum MockKind {
-        Ping,
-        Boom,
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct Ping {}
+
+    impl DynOp<Ctx, u32> for Ping {
+        fn kind(&self) -> &'static str {
+            "ping"
+        }
+
+        fn apply<'a>(
+            &'a self,
+            _ctx: &'a mut Ctx,
+            world: &'a mut u32,
+        ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+            Box::pin(async move {
+                *world += 1;
+                Ok(Verdict::Accepted)
+            })
+        }
+
+        fn clone_box(&self) -> Box<dyn DynOp<Ctx, u32>> {
+            Box::new(self.clone())
+        }
+
+        fn to_data(&self) -> serde_json::Value {
+            serde_json::to_value(self).expect("op data serializes")
+        }
     }
 
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    enum MockOp {
-        Ping,
-        Boom,
+    struct Boom {}
+
+    impl DynOp<Ctx, u32> for Boom {
+        fn kind(&self) -> &'static str {
+            "boom"
+        }
+
+        fn apply<'a>(
+            &'a self,
+            _ctx: &'a mut Ctx,
+            world: &'a mut u32,
+        ) -> OpFuture<'a, Result<Verdict, HarnessError>> {
+            Box::pin(async move {
+                *world += 1;
+                Err(HarnessError::Bug("boom".to_string()))
+            })
+        }
+
+        fn clone_box(&self) -> Box<dyn DynOp<Ctx, u32>> {
+            Box::new(self.clone())
+        }
+
+        fn to_data(&self) -> serde_json::Value {
+            serde_json::to_value(self).expect("op data serializes")
+        }
     }
 
     #[derive(Debug, Clone)]
-    enum MockInvariant {
-        AlwaysHolds,
+    struct AlwaysHolds;
+
+    impl DynInvariant<Ctx, u32> for AlwaysHolds {
+        fn check<'a>(&'a self, _ctx: &'a mut Ctx, _world: &'a u32) -> OpFuture<'a, CheckOutcome> {
+            Box::pin(async move { CheckOutcome::Held })
+        }
+
+        fn clone_box(&self) -> Box<dyn DynInvariant<Ctx, u32>> {
+            Box::new(self.clone())
+        }
     }
 
-    struct MockHarness;
+    fn gen_ping(_rng: &mut Prng, _world: &u32) -> Box<dyn DynOp<Ctx, u32>> {
+        Box::new(Ping {})
+    }
 
-    impl Harness for MockHarness {
-        type Ctx = Ctx;
-        type World = u32;
-        type Operation = MockOp;
-        type Invariant = MockInvariant;
-        type OpKind = MockKind;
+    fn gen_boom(_rng: &mut Prng, _world: &u32) -> Box<dyn DynOp<Ctx, u32>> {
+        Box::new(Boom {})
+    }
 
-        async fn apply(
-            &self,
-            _ctx: &mut Ctx,
-            world: &mut Self::World,
-            op: &Self::Operation,
-        ) -> Result<Verdict, HarnessError> {
-            *world += 1;
-            match op {
-                MockOp::Ping => Ok(Verdict::Accepted),
-                MockOp::Boom => Err(HarnessError::Bug("boom".to_string())),
-            }
-        }
-
-        fn op_kinds(&self) -> Vec<Self::OpKind> {
-            vec![MockKind::Ping, MockKind::Boom]
-        }
-
-        fn generate_op(
-            &self,
-            _rng: &mut Prng,
-            _world: &Self::World,
-            kind: Self::OpKind,
-        ) -> Self::Operation {
-            match kind {
-                MockKind::Ping => MockOp::Ping,
-                MockKind::Boom => MockOp::Boom,
-            }
-        }
-
-        fn invariants(&self) -> Vec<Self::Invariant> {
-            vec![MockInvariant::AlwaysHolds]
-        }
-
-        async fn check(
-            &self,
-            _ctx: &mut Ctx,
-            _world: &Self::World,
-            _inv: &Self::Invariant,
-        ) -> CheckOutcome {
-            CheckOutcome::Held
-        }
+    fn mock_harness() -> OpSetHarness<Ctx, u32> {
+        OpSetHarness::new()
+            .register(OpDef::new("ping", gen_ping, decode_json_op::<Ping, _, _>))
+            .register(OpDef::new("boom", gen_boom, decode_json_op::<Boom, _, _>))
+            .invariant(Box::new(AlwaysHolds))
     }
 
     async fn mock_ctx() -> Ctx {
@@ -197,7 +218,7 @@ mod tests {
         // framework `SetupFuture` (over `Ctx`) satisfies the generic
         // `Fn(D::Setup) -> harness_cli::SetupFuture<'static, H::Ctx, H::World>` bound with no
         // changes. This is the exact shape every `examples/*/src/bin/cross_vm.rs` relies on.
-        let _cli: Cli = Cli::new().register("vault", || MockHarness, mock_setup);
+        let _cli: Cli = Cli::new().register("vault", mock_harness, mock_setup);
     }
 
     /// A fresh, gitignored config-file path under `<CARGO_MANIFEST_DIR>/tests_result/`, unique per
@@ -235,14 +256,14 @@ name = "vault"
 mode = "fuzz"
 cases = 1
 ops = 2
-kinds = ["Ping"]
+kinds = ["ping"]
 "#,
         )
         .expect("write temp config");
 
         crate::config::test_bridge::run_profile_for_test(
             path.to_str().unwrap(),
-            || MockHarness,
+            mock_harness,
             mock_setup,
             "smoke",
             None,

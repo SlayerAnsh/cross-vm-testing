@@ -42,9 +42,10 @@ pub use ctx::Ctx;
 #[cfg(feature = "fuzz")]
 pub use harness_core::sample_arbitrary;
 pub use harness_core::{
-    op_label, random_seed, sub_seed, CheckOutcome, Coverage, Endurance, EnduranceConfig,
-    EnduranceRunner, Expectation, Failure, FailureKind, Fuzz, FuzzRunner, Harness, HarnessError,
-    InvCoverage, Invariant, InvariantRunner, KindMix, OpStat, Prng, RunMode, RunReport, Runner,
-    Scenario, ScenarioRunner, ScenarioStep, Sequential, Stats, Verdict, Violation,
-    DEFAULT_SHRINK_LIMIT,
+    decode_json_op, op_label, random_seed, sub_seed, AdvanceFn, CheckOutcome, ConfigOps, Coverage,
+    DecodeFn, DynInvariant, DynOp, DynOperation, Endurance, EnduranceConfig, EnduranceRunner,
+    Expectation, Failure, FailureKind, Fuzz, FuzzRunner, GenerateFn, Harness, HarnessError,
+    InvCoverage, Invariant, InvariantRunner, KindMix, OpDef, OpFuture, OpSetHarness, OpStat, Prng,
+    RunMode, RunReport, Runner, Scenario, ScenarioRunner, ScenarioStep, Sequential, Stats, Verdict,
+    Violation, WeightFn, DEFAULT_SHRINK_LIMIT,
 };
