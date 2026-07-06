@@ -2069,4 +2069,95 @@ profiles = ["a", "b"]
 
         std::fs::remove_file(&path).ok();
     }
+
+    // -----------------------------------------------------------------------------------------
+    // End-to-end proof: an OpSet (dyn-op) harness driven through config, CLI, scenario, replay.
+    // -----------------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn scenario_and_replay_roundtrip_dyn_ops() {
+        // A scenario profile drives lowercase-tagged ops in both accepted forms (bare kind-name
+        // string and single-key table), then a `boom` step that returns a Bug. Validate must pass
+        // (every step decodes through the ConfigOps codec), and the run must drive to the boom.
+        let toml = r#"
+[harness]
+name = "vault"
+
+[profile.script]
+mode = "scenario"
+
+  [[profile.script.steps]]
+  op = "ping"
+
+  [[profile.script.steps]]
+  op = { ping = {} }
+
+  [[profile.script.steps]]
+  op = "boom"
+  expect = "any"
+"#;
+        let cfg = load(toml);
+        let cli = cli_with_mock();
+        assert_eq!(cli.validate_with_config(&cfg), 0);
+        let args = RunArgs {
+            config: PathBuf::from("vault.toml"),
+            profile: vec!["script".to_string()],
+            ..Default::default()
+        };
+        // `boom` returns a Bug, and `expect = "any"` only tolerates verdicts (accepted/rejected),
+        // not errors, so the run fails with exit code 1: the point is that decode worked and the
+        // run drove all the way to the boom step.
+        assert_eq!(cli.run_with_config(&cfg, &args).await, 1);
+    }
+
+    #[tokio::test]
+    async fn failing_dyn_run_writes_lowercase_tagged_replay_that_reproduces() {
+        // A failing generative run over the dyn-op mock writes a replay artifact whose steps are
+        // externally tagged by the lowercase kind name (`op = { boom = {} }`); feeding that
+        // artifact back through `replay` decodes it through the same codec and reproduces.
+        let cfg = load(
+            r#"
+[harness]
+name = "vault"
+
+[profile.smoke]
+mode = "invariant"
+ops = 1
+kinds = ["boom"]
+seed = 5
+"#,
+        );
+        let cli = cli_with_mock();
+        let dir = temp_artifacts_dir("dyn-replay-roundtrip");
+        let args = RunArgs {
+            config: PathBuf::from("vault.toml"),
+            artifacts_dir: Some(dir.to_str().unwrap().to_string()),
+            ..Default::default()
+        };
+        assert_eq!(cli.run_with_config(&cfg, &args).await, 1);
+
+        let artifact_path = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .expect("one artifact written")
+            .unwrap()
+            .path();
+        let raw = std::fs::read_to_string(&artifact_path).expect("artifact readable");
+        let value: toml::Value = toml::from_str(&raw).expect("valid replay TOML");
+        let op = &value["profile"]["replay"]["steps"][0]["op"];
+        assert!(
+            op.get("boom").is_some(),
+            "replay step must be externally tagged by the lowercase kind name: {raw}"
+        );
+
+        let code = cli
+            .dispatch_replay(ReplayArgs {
+                artifact: artifact_path,
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(code, 1, "the recorded boom must reproduce through replay");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
