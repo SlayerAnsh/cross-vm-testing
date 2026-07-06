@@ -1,13 +1,15 @@
 //! Tron chain metadata and presets.
 
 mod info;
+#[cfg(feature = "presets")]
 pub mod presets;
 mod sugar;
 
 pub use info::TronChainInfo;
+#[cfg(feature = "presets")]
 pub use presets::{LOCAL, MAINNET, NILE, SHASTA};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "presets"))]
 mod tests {
     use super::*;
     use cross_vm_core::{ChainKind, ChainSpec};

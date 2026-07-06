@@ -23,9 +23,19 @@ hex.workspace = true
 # Async mutex for the per-wallet broadcast lock (held across await on a current-thread rt).
 tokio.workspace = true
 
+[features]
+# Opt-in, default-off. Enables the concrete public/well-known chain preset instances
+# (`OSMOSIS`, `OSMOSIS_TESTNET`, `JUNO`, `NEUTRON`, `COSMOS_HUB`, `LOCAL`) in `chains`. These
+# exist only for our own internal testing convenience; downstream consumers should define their
+# own chain configs from the `CosmosChainInfo` / builder / `sugar` types, which stay public.
+presets = []
+
 [dev-dependencies]
 tokio.workspace = true
 cross-vm-macros.workspace = true
+# Self dev-dependency to force-enable `presets` for this crate's own tests, doctests, and
+# examples without leaking the feature into a downstream default build.
+cross-vm-cosmwasm = { path = ".", features = ["presets"] }
 # Load `.env` into the process environment for the live onchain test.
 dotenvy.workspace = true
 # The canonical counter contract from `examples/`, consumed as an rlib and wrapped in-process.
@@ -34,6 +44,18 @@ counter = { path = "../../contracts/cosmwasm/contracts/counter", features = ["cr
 # The vault contract, with the `cross-vm` feature on so its messages carry the typed-handle
 # derives (exercises CwExecuteFns `#[payable]` + CwQueryFns end to end).
 vault = { path = "../../contracts/cosmwasm/contracts/vault", features = ["cross-vm"] }
+
+# Quickstart examples demonstrate the (opt-in) presets, so they require the `presets` feature.
+# This keeps `cargo build --workspace` (no features) from trying to build them.
+[[example]]
+name = "cosmwasm_quickstart"
+path = "examples/cosmwasm_quickstart.rs"
+required-features = ["presets"]
+
+[[example]]
+name = "cosmwasm_rpc_quickstart"
+path = "examples/cosmwasm_rpc_quickstart.rs"
+required-features = ["presets"]
 
 [lints]
 workspace = true

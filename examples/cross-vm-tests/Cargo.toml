@@ -36,9 +36,9 @@ rpc-endurance = []
 # the deps the *library* itself needs are `[dependencies]`; deps used solely by the `ping-pong` /
 # `bridge` test support, or by the test binaries' own test fns, stay `[dev-dependencies]`.
 [dependencies]
-cross-vm-framework = { path = "../../crates/framework", features = ["cli"] }
+cross-vm-framework = { path = "../../crates/framework", features = ["cli", "presets"] }
 cross-vm-solana    = { path = "../../crates/solana" }
-cross-vm-solidity  = { path = "../../crates/solidity" }
+cross-vm-solidity  = { path = "../../crates/solidity", features = ["presets"] }
 # All contract bindings (ABI, message types, Solana ids/discriminators, embedded artifacts) come
 # from the shared mocks crate instead of duplicated `sol!` blocks and hand-copied constants.
 cross-vm-common = { path = "../common", features = ["cw", "evm", "solana", "tron"] }

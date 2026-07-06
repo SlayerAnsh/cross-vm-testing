@@ -26,7 +26,7 @@ invariant = []
 endurance = []
 
 [dependencies]
-cross-vm-framework = { path = "../../crates/framework", features = ["cli"] }
+cross-vm-framework = { path = "../../crates/framework", features = ["cli", "presets"] }
 # The shared `Counter` wrapper + harness (TVM-native bytecode + tronbox ABI bindings, ops/world serde
 # derives) and the shared wallet/funding helpers; this crate only supplies the `TRON_NILE` preset +
 # label.
