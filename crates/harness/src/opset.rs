@@ -138,6 +138,21 @@ pub struct OpDef<C: 'static, W: 'static> {
     generate: GenerateFn<C, W>,
     decode: DecodeFn<C, W>,
     weight: WeightFn<C, W>,
+    description: Option<String>,
+    field_docs: Vec<(String, String)>,
+}
+
+/// One op kind's introspectable documentation, surfaced by the CLI's `describe` subcommand:
+/// the registered kind name plus any opt-in help attached via [`OpDef::with_help`].
+/// `description` is `None` and `field_docs` empty for a plain [`OpDef::new`] with no help.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpDoc {
+    /// The registered kind name.
+    pub kind: String,
+    /// One-line summary, if [`OpDef::with_help`] set one.
+    pub description: Option<String>,
+    /// Per-field `(name, doc)` pairs, if [`OpDef::with_help`] set any.
+    pub field_docs: Vec<(String, String)>,
 }
 
 fn weight_one<C, W>(_ctx: &C, _world: &W) -> u32 {
@@ -154,6 +169,8 @@ impl<C: 'static, W: 'static> OpDef<C, W> {
             generate,
             decode,
             weight: weight_one::<C, W>,
+            description: None,
+            field_docs: Vec::new(),
         }
     }
 
@@ -161,6 +178,27 @@ impl<C: 'static, W: 'static> OpDef<C, W> {
     pub fn with_weight(mut self, weight: WeightFn<C, W>) -> Self {
         self.weight = weight;
         self
+    }
+
+    /// Attach opt-in documentation surfaced by the CLI's `describe` subcommand: a one-line
+    /// `description` and per-field `(name, doc)` pairs. Purely descriptive, unset by default, so
+    /// a plain [`OpDef::new`] needs no change.
+    pub fn with_help(mut self, description: &str, field_docs: &[(&str, &str)]) -> Self {
+        self.description = Some(description.to_string());
+        self.field_docs = field_docs
+            .iter()
+            .map(|(f, d)| (f.to_string(), d.to_string()))
+            .collect();
+        self
+    }
+
+    /// This kind's `describe` documentation: its name plus any [`with_help`](Self::with_help).
+    pub fn doc(&self) -> OpDoc {
+        OpDoc {
+            kind: self.name.to_string(),
+            description: self.description.clone(),
+            field_docs: self.field_docs.clone(),
+        }
     }
 
     /// The kind name: the `OpKind` value of [`OpSetHarness`] runs, the key config weights
@@ -338,11 +376,18 @@ pub trait ConfigOps: Harness {
     /// Encode one op back to the same externally tagged shape, for reports and replay
     /// artifacts. Always the single-key object form, `{"add": {"n": 5}}`.
     fn encode_op(&self, op: &Self::Operation) -> serde_json::Value;
+
+    /// Every registered op kind name, sorted. Powers the CLI's `describe` subcommand without a
+    /// live `(ctx, world)`.
+    fn kind_names(&self) -> Vec<String>;
+
+    /// Every registered op kind's `describe` documentation, sorted by kind name.
+    fn op_docs(&self) -> Vec<OpDoc>;
 }
 
 impl<C: 'static, W: 'static> OpSetHarness<C, W> {
-    fn kind_names(&self) -> String {
-        self.ops.keys().copied().collect::<Vec<_>>().join(", ")
+    fn available_kinds(&self) -> String {
+        self.kind_names().join(", ")
     }
 }
 
@@ -351,7 +396,12 @@ impl<C: 'static, W: 'static> ConfigOps for OpSetHarness<C, W> {
         self.ops
             .get_key_value(name)
             .map(|(k, _)| *k)
-            .ok_or_else(|| format!("unknown op kind `{name}`; available: {}", self.kind_names()))
+            .ok_or_else(|| {
+                format!(
+                    "unknown op kind `{name}`; available: {}",
+                    self.available_kinds()
+                )
+            })
     }
 
     fn decode_op(&self, value: &serde_json::Value) -> Result<DynOperation<C, W>, String> {
@@ -372,10 +422,12 @@ impl<C: 'static, W: 'static> ConfigOps for OpSetHarness<C, W> {
                 )
             }
         };
-        let def = self
-            .ops
-            .get(name)
-            .ok_or_else(|| format!("unknown op kind `{name}`; available: {}", self.kind_names()))?;
+        let def = self.ops.get(name).ok_or_else(|| {
+            format!(
+                "unknown op kind `{name}`; available: {}",
+                self.available_kinds()
+            )
+        })?;
         let op = def
             .decode(data)
             .map_err(|e| format!("op kind `{name}`: {e}"))?;
@@ -386,5 +438,13 @@ impl<C: 'static, W: 'static> ConfigOps for OpSetHarness<C, W> {
         let mut map = serde_json::Map::new();
         map.insert(op.0.kind().to_string(), op.0.to_data());
         serde_json::Value::Object(map)
+    }
+
+    fn kind_names(&self) -> Vec<String> {
+        self.ops.keys().map(|k| k.to_string()).collect()
+    }
+
+    fn op_docs(&self) -> Vec<OpDoc> {
+        self.ops.values().map(OpDef::doc).collect()
     }
 }

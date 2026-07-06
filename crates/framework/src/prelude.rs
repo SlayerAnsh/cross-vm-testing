@@ -25,7 +25,9 @@ pub use cross_vm_macros::{cross_vm_contract, define_wallet_roster};
 pub use harness_core_macros::{endurance_runner, fuzz_runner, invariant_runner};
 
 // CosmWasm
-#[cfg(feature = "cw")]
+// Preset chain instances are internal-testing conveniences, gated behind the opt-in `presets`
+// feature so a default `use cross_vm_framework::prelude::*;` does not pull them into scope.
+#[cfg(all(feature = "cw", feature = "presets"))]
 pub use cross_vm_cosmwasm::chains::{COSMOS_HUB, JUNO, LOCAL as CW_LOCAL, NEUTRON, OSMOSIS};
 #[cfg(feature = "cw")]
 pub use cross_vm_cosmwasm::{
@@ -33,7 +35,7 @@ pub use cross_vm_cosmwasm::{
 };
 
 // EVM
-#[cfg(feature = "evm")]
+#[cfg(all(feature = "evm", feature = "presets"))]
 pub use cross_vm_solidity::chains::{
     ARBITRUM, BASE, ETHEREUM, LOCAL as EVM_LOCAL, OPTIMISM, POLYGON,
 };
@@ -43,13 +45,13 @@ pub use cross_vm_solidity::{
 };
 
 // Solana
-#[cfg(feature = "solana")]
+#[cfg(all(feature = "solana", feature = "presets"))]
 pub use cross_vm_solana::chains::{SOLANA_DEVNET, SOLANA_LOCALNET, SOLANA_MAINNET, SOLANA_TESTNET};
 #[cfg(feature = "solana")]
 pub use cross_vm_solana::{SvmAsset, SvmChain, SvmMockProvider, SvmRpcProvider};
 
 // Tron
-#[cfg(feature = "tron")]
+#[cfg(all(feature = "tron", feature = "presets"))]
 pub use cross_vm_tron::chains::{
     LOCAL as TRON_LOCAL, MAINNET as TRON_MAINNET, NILE as TRON_NILE, SHASTA as TRON_SHASTA,
 };

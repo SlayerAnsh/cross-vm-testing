@@ -60,6 +60,17 @@ solana = ["dep:cross-vm-solana"]
 tron = ["dep:cross-vm-tron", "dep:revm"]
 # Enables `sample_arbitrary` + the `arbitrary` derive path for stateless op generation.
 fuzz = ["harness-core/fuzz"]
+# Opt-in, default-off. Re-exports the per-VM chain preset instances (`OSMOSIS`, `ETHEREUM`,
+# `SOLANA_DEVNET`, `TRON_NILE`, ...) through `prelude`. These are internal-testing conveniences;
+# downstream consumers should define their own chain configs from the public `*ChainInfo` /
+# builder / `sugar` types. The `?/` weak-dep-feature syntax (resolver v2) only turns each VM's
+# `presets` on when that VM's provider crate is already enabled.
+presets = [
+    "cross-vm-cosmwasm?/presets",
+    "cross-vm-solidity?/presets",
+    "cross-vm-solana?/presets",
+    "cross-vm-tron?/presets",
+]
 # Adds `Serialize` reachability for outcome/stats types (the derives themselves land in Task 11).
 serde = ["dep:serde", "harness-core/serde"]
 # The config-driven CLI: TOML/JSON run configs, chain construction, profile resolution, and (in
@@ -82,6 +93,22 @@ cli = [
 tokio.workspace = true
 # Solana system-program transfer used by examples/wallet_quickstart.rs.
 solana-system-interface.workspace = true
+# Self dev-dependency to force-enable `presets` for this crate's own tests, doctests, and
+# examples (which use presets via the prelude glob) without leaking the feature into a
+# downstream default build.
+cross-vm-framework = { path = ".", features = ["presets"] }
+
+# Quickstart examples use presets via the prelude glob, so they require the `presets` feature.
+# This keeps `cargo build --workspace` (no features) from trying to build them.
+[[example]]
+name = "wallet_quickstart"
+path = "examples/wallet_quickstart.rs"
+required-features = ["presets"]
+
+[[example]]
+name = "env_quickstart"
+path = "examples/env_quickstart.rs"
+required-features = ["presets"]
 
 [lints]
 workspace = true

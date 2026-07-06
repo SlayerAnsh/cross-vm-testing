@@ -440,7 +440,10 @@ mod tests {
             let cov = coverage();
             assert_eq!(
                 cov.skip_reasons("supply_conserved"),
-                &["no mint observed yet".to_string(), "no burn observed yet".to_string()]
+                &[
+                    "no mint observed yet".to_string(),
+                    "no burn observed yet".to_string()
+                ]
             );
             assert_eq!(
                 cov.skip_reasons("balances_never_negative"),

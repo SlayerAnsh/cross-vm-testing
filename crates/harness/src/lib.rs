@@ -43,7 +43,7 @@ mod stats;
 pub use harness_core_macros::{endurance_runner, fuzz_runner, invariant_runner};
 pub use opset::{
     decode_json_op, AdvanceFn, ConfigOps, DecodeFn, DynInvariant, DynOp, DynOperation, GenerateFn,
-    OpDef, OpFuture, OpSetHarness, WeightFn,
+    OpDef, OpDoc, OpFuture, OpSetHarness, WeightFn,
 };
 pub use outcome::{
     CheckOutcome, Coverage, Failure, FailureKind, HarnessError, InvCoverage, RunReport, Verdict,

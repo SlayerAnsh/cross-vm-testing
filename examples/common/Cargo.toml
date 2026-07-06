@@ -34,7 +34,7 @@ cw-artifacts = ["cw"]
 # this does not pull in any compiled contract artifact.
 # `cli` pulls in the `config` module (`build_chain`, `SetupRequest`, `Target`) the shared
 # config-driven `Counter` setup registers with the `cross-vm` binary.
-cross-vm-framework = { path = "../../crates/framework", features = ["cli"] }
+cross-vm-framework = { path = "../../crates/framework", features = ["cli", "presets"] }
 cross-vm-solidity  = { path = "../../crates/solidity" }
 # `#[cross_vm_contract]` generates the shared `Counter` wrapper in `contracts::counter`.
 cross-vm-macros = { path = "../../crates/macros" }

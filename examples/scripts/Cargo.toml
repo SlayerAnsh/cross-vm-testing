@@ -14,12 +14,12 @@ path = "deploy_counter/main.rs"
 [dependencies]
 # Chain-agnostic layer: the `cross_vm_contract` macro, `AnyChain`, `ContractBase`, `Account`,
 # `AppResponse`, and the prelude. Lets one logical flow dispatch across VMs.
-cross-vm-framework = { path = "../../crates/framework" }
+cross-vm-framework = { path = "../../crates/framework", features = ["presets"] }
 # Needed directly because `define_wallet_roster!` expands to `cross_vm_core::*` paths.
 cross-vm-core = { path = "../../crates/core" }
 # Testnet chain presets + `Bytes` (the prelude only re-exports mainnet-ish presets).
-cross-vm-solidity = { path = "../../crates/solidity" }
-cross-vm-cosmwasm = { path = "../../crates/cosmwasm" }
+cross-vm-solidity = { path = "../../crates/solidity", features = ["presets"] }
+cross-vm-cosmwasm = { path = "../../crates/cosmwasm", features = ["presets"] }
 # Contract bindings: EVM ABI/bytecode + the CosmWasm counter message types and typed handles
 # (CwExecuteFns/CwQueryFns), plus the embedded counter.wasm (cw-artifacts feature). The single
 # reuse point shared with the test crates; replaces the previously duplicated artifacts module.

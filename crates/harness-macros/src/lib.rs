@@ -4,6 +4,7 @@
 
 use proc_macro::TokenStream;
 
+mod op_doc;
 mod runner_macros;
 
 /// Fan a fuzz test out into one `#[tokio::test]` per case, injecting a seeded `FuzzRunner` shell.
@@ -67,6 +68,36 @@ pub fn endurance_runner(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Harvest doc comments off an op's param struct into runtime-introspectable help strings.
+///
+/// Generates an inherent impl with `field_docs() -> Vec<(&'static str, &'static str)>` (one
+/// `(field_name, doc)` pair per documented named field; undocumented fields are omitted) and
+/// `doc() -> Option<&'static str>` (the struct-level doc comment, joined, or `None`). This lets a
+/// harness feed `OpDef::with_help(description, field_docs)` from the struct itself instead of
+/// hand-typed strings.
+///
+/// ```ignore
+/// #[derive(OpParamsDoc)]
+/// /// Move funds between two accounts.
+/// struct TransferParams {
+///     /// Source account id.
+///     from: String,
+///     /// Destination account id.
+///     to: String,
+///     amount: u128, // undocumented -> not in field_docs()
+/// }
+/// // TransferParams::doc()        == Some("Move funds between two accounts.")
+/// // TransferParams::field_docs() == vec![("from", "Source account id."),
+/// //                                       ("to",   "Destination account id.")]
+/// ```
+#[proc_macro_derive(OpParamsDoc)]
+pub fn op_doc(input: TokenStream) -> TokenStream {
+    match op_doc::expand(input.into()) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 #[cfg(test)]
 mod runner_macro_tests {
     use super::runner_macros::{self, Mode};
@@ -113,5 +144,84 @@ mod runner_macro_tests {
         let s = out.to_string();
         assert!(s.contains("OnceLock"), "{s}");
         assert!(s.contains("random_seed"), "{s}");
+    }
+}
+
+#[cfg(test)]
+mod op_doc_tests {
+    use super::op_doc;
+    use quote::quote;
+
+    #[test]
+    fn field_and_struct_docs_are_harvested() {
+        // Multi-line field doc exercises the join-and-trim path (`///` -> several `#[doc]` attrs).
+        let input = quote! {
+            /// Move funds between two accounts.
+            struct TransferParams {
+                /// Source account id.
+                from: String,
+                /// Destination account id.
+                /// Second line of the same field.
+                to: String,
+                amount: u128,
+            }
+        };
+        let out = op_doc::expand(input).expect("expand");
+        let s = out.to_string();
+
+        // Both associated fns are emitted on the right type.
+        assert!(s.contains("impl TransferParams"), "{s}");
+        assert!(s.contains("fn field_docs"), "{s}");
+        assert!(s.contains("fn doc"), "{s}");
+
+        // Struct-level doc harvested.
+        assert!(
+            s.contains(r#"Some ("Move funds between two accounts.")"#),
+            "{s}"
+        );
+
+        // Field names appear as string literals, paired with their trimmed docs.
+        assert!(s.contains(r#"("from" , "Source account id.")"#), "{s}");
+        // Multi-line field doc joined with a single space.
+        assert!(
+            s.contains(r#"("to" , "Destination account id. Second line of the same field.")"#),
+            "{s}"
+        );
+
+        // Undocumented field is omitted entirely.
+        assert!(!s.contains("\"amount\""), "{s}");
+    }
+
+    #[test]
+    fn undocumented_struct_emits_empty_table_and_none() {
+        let input = quote! {
+            struct Bare {
+                a: u32,
+                b: u32,
+            }
+        };
+        let out = op_doc::expand(input).expect("expand");
+        let s = out.to_string();
+        assert!(s.contains("impl Bare"), "{s}");
+        // No field docs -> empty vec literal; struct doc -> None.
+        assert!(s.contains("None"), "{s}");
+        assert!(!s.contains("\"a\""), "{s}");
+        assert!(!s.contains("\"b\""), "{s}");
+    }
+
+    #[test]
+    fn enum_input_is_an_error_not_a_panic() {
+        let input = quote! {
+            enum NotAStruct { A, B }
+        };
+        assert!(op_doc::expand(input).is_err());
+    }
+
+    #[test]
+    fn tuple_struct_is_an_error_not_a_panic() {
+        let input = quote! {
+            struct Tuple(u32, u32);
+        };
+        assert!(op_doc::expand(input).is_err());
     }
 }

@@ -30,15 +30,15 @@ endurance = []
 # funded `ON_CHAIN_WALLET` mnemonic in `.env`). Paced by `EnduranceConfig::base_delay`.
 rpc-endurance = []
 
-# The vault harness + its support (Vault contract wrapper, wallets, init_tracing) moved into the
-# library (`src/`, P2 vault migration) so the `cross-vm` bin — which cannot see `tests/` or
-# dev-dependencies — can register and drive it through the framework's config-driven CLI. Only the
-# deps the *library* itself needs are `[dependencies]`; deps used solely by the `counter` /
-# `ping-pong` / `bridge` test support, or by the test binaries' own test fns, stay `[dev-dependencies]`.
+# The vault and counter harnesses plus their support (Vault/Counter contract wrappers, wallets,
+# init_tracing) moved into the library (`src/`) so the `cross-vm` bin — which cannot see `tests/`
+# or dev-dependencies — can register and drive them through the framework's config-driven CLI. Only
+# the deps the *library* itself needs are `[dependencies]`; deps used solely by the `ping-pong` /
+# `bridge` test support, or by the test binaries' own test fns, stay `[dev-dependencies]`.
 [dependencies]
-cross-vm-framework = { path = "../../crates/framework", features = ["cli"] }
+cross-vm-framework = { path = "../../crates/framework", features = ["cli", "presets"] }
 cross-vm-solana    = { path = "../../crates/solana" }
-cross-vm-solidity  = { path = "../../crates/solidity" }
+cross-vm-solidity  = { path = "../../crates/solidity", features = ["presets"] }
 # All contract bindings (ABI, message types, Solana ids/discriminators, embedded artifacts) come
 # from the shared mocks crate instead of duplicated `sol!` blocks and hand-copied constants.
 cross-vm-common = { path = "../common", features = ["cw", "evm", "solana", "tron"] }
@@ -52,6 +52,10 @@ solana-system-interface = { version = "2", features = ["bincode"] }
 # tagged TOML op shape); `to_data` renders each op through `serde_json`.
 serde.workspace = true
 serde_json.workspace = true
+# Load the workspace `.env` (funded mnemonic) for the opt-in `rpc-endurance` live test. Used by
+# `counter_setup` (now in the library), which loads `.env` in every mode (harmless when absent), so
+# it must be a regular dependency rather than a dev-dependency.
+dotenvy.workspace = true
 
 [dev-dependencies]
 # Proc-macro attributes must be imported from the proc-macro crate directly so rust-analyzer
@@ -62,8 +66,6 @@ rstest.workspace = true
 # advances the virtual clock without a real sleep (see `mechanics.rs`'s
 # `run_steps_delay_advances_the_paused_clock`).
 tokio = { workspace = true, features = ["test-util"] }
-# Load the workspace `.env` (funded mnemonic) for the opt-in `rpc-endurance` live test.
-dotenvy.workspace = true
 # Decode Anchor `emit!` event payloads from Solana program logs (`Program data: <base64>`).
 base64.workspace = true
 # `tests/cli_e2e.rs` parses the `--json-report` file the real `cross-vm` binary writes.

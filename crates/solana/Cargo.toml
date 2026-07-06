@@ -33,8 +33,30 @@ bip39.workspace = true
 # Async mutex for the per-wallet broadcast lock (held across await on a current-thread rt).
 tokio.workspace = true
 
+[features]
+# Opt-in, default-off. Enables the concrete public/well-known chain preset instances
+# (`SOLANA_DEVNET`, `SOLANA_LOCALNET`, `SOLANA_MAINNET`, `SOLANA_TESTNET`) in `chains`. These
+# exist only for our own internal testing convenience; downstream consumers should define their
+# own chain configs from the `SolanaChainInfo` / builder / `sugar` types, which stay public.
+presets = []
+
 [dev-dependencies]
 tokio.workspace = true
+# Self dev-dependency to force-enable `presets` for this crate's own tests, doctests, and
+# examples without leaking the feature into a downstream default build.
+cross-vm-solana = { path = ".", features = ["presets"] }
+
+# Quickstart examples demonstrate the (opt-in) presets, so they require the `presets` feature.
+# This keeps `cargo build --workspace` (no features) from trying to build them.
+[[example]]
+name = "solana_quickstart"
+path = "examples/solana_quickstart.rs"
+required-features = ["presets"]
+
+[[example]]
+name = "solana_rpc_quickstart"
+path = "examples/solana_rpc_quickstart.rs"
+required-features = ["presets"]
 
 [lints]
 workspace = true
