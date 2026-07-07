@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use alloy_primitives::{Address, Bytes, Log, LogData, B256};
+use alloy_primitives::{Address, Bytes, Log, LogData, B256, U256};
 use alloy_signer_local::PrivateKeySigner;
 use cross_vm_core::{BlockTime, ChainProvider, WalletFactory};
 use serde_json::{json, Value};
@@ -151,6 +151,19 @@ impl TronRpcProvider {
         calldata: impl AsRef<[u8]>,
         signer: &PrivateKeySigner,
     ) -> Result<TronExecution, TronError> {
+        self.call_value(to, calldata, signer, U256::ZERO).await
+    }
+
+    /// Execute a state-mutating call against `to` carrying `value` sun (a payable call), signed by
+    /// `signer`. On a live chain the signer must already hold the value (no minting). `value` is
+    /// sun (native TRX base unit), narrowed to the `u64` `call_value` java-tron expects.
+    pub async fn call_value(
+        &self,
+        to: &TronAddress,
+        calldata: impl AsRef<[u8]>,
+        signer: &PrivateKeySigner,
+        value: U256,
+    ) -> Result<TronExecution, TronError> {
         let owner = signer_address(signer);
         let resp = self
             .post(
@@ -159,7 +172,7 @@ impl TronRpcProvider {
                     "owner_address": owner.to_hex(),
                     "contract_address": to.to_hex(),
                     "data": hex::encode(calldata.as_ref()),
-                    "call_value": 0,
+                    "call_value": value.saturating_to::<u64>(),
                     "fee_limit": DEFAULT_FEE_LIMIT,
                     "visible": false,
                 }),

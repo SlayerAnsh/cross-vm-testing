@@ -132,13 +132,25 @@ impl TronChain {
         calldata: impl AsRef<[u8]>,
         wallet: WalletLabel<'_>,
     ) -> Result<TronExecution, TronError> {
+        self.call_value(to, calldata, wallet, U256::ZERO).await
+    }
+
+    /// Execute a state-mutating call against `to` carrying `value` sun (a payable call), signed by
+    /// wallet `wallet`. On the mock the caller's balance is topped up to cover `value`.
+    pub async fn call_value(
+        &self,
+        to: &TronAddress,
+        calldata: impl AsRef<[u8]>,
+        wallet: WalletLabel<'_>,
+        value: U256,
+    ) -> Result<TronExecution, TronError> {
         let signer = self.acquire(wallet).await?;
         let addr = self.signer_address(&signer);
         match self {
-            TronChain::Mock(p) => p.call(to, calldata, &addr).await,
+            TronChain::Mock(p) => p.call_value(to, calldata, &addr, value).await,
             TronChain::Rpc(p) => {
                 let _g = Self::broadcast_guard(p, &addr).await;
-                p.call(to, calldata, &signer).await
+                p.call_value(to, calldata, &signer, value).await
             }
         }
     }

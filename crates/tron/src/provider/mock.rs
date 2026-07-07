@@ -143,6 +143,20 @@ impl TronMockProvider {
         calldata: impl AsRef<[u8]>,
         from: &TronAddress,
     ) -> Result<TronExecution, TronError> {
+        self.call_value(to, calldata, from, U256::ZERO).await
+    }
+
+    /// Execute a state-mutating call against `to` carrying `value` sun (a payable call), returning
+    /// its output plus emitted logs. The caller's balance is topped up to cover `value` first (the
+    /// mock mints native funds on demand, like [`ChainProvider::new_account`]). `value` is sun
+    /// stored 1:1 as revm's `U256`, matching [`ChainProvider::set_balance`].
+    pub async fn call_value(
+        &self,
+        to: &TronAddress,
+        calldata: impl AsRef<[u8]>,
+        from: &TronAddress,
+        value: U256,
+    ) -> Result<TronExecution, TronError> {
         // Coarse bandwidth accounting: charge the caller by encoded calldata length. The mock
         // does not gate execution on the result (it models the burn-for-fee fallback as free).
         // Source: <https://developers.tron.network/docs/resource-model>
@@ -150,7 +164,7 @@ impl TronMockProvider {
             .borrow_mut()
             .consume_bandwidth(from, calldata.as_ref().len());
         self.core
-            .call(to.as_evm(), calldata.as_ref(), from.as_evm(), U256::ZERO)
+            .call(to.as_evm(), calldata.as_ref(), from.as_evm(), value)
             .map(TronExecution::from)
             .map_err(|f| TronError::Execute(f.call_message("call")))
     }
@@ -328,6 +342,44 @@ mod tests {
             .await
             .expect("tronc token-guard opcodes decode and deploy succeeds");
         assert!(addr.to_base58().starts_with('T'));
+    }
+
+    #[tokio::test]
+    async fn call_value_transfers_native_to_callee() {
+        // Deploy an empty-runtime account, then send a payable call carrying value. The mock mints
+        // the caller's funds on demand, and revm credits the value (in sun, stored 1:1 as U256) to
+        // the callee. Prove the callee's balance rose by exactly the value sent.
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+        let addr = c
+            .deploy_create(initcode, [], &deployer)
+            .await
+            .expect("empty-runtime deploy succeeds");
+        assert_eq!(c.balance(&addr).await.unwrap(), 0);
+
+        let value = 3 * SUN_PER_TRX;
+        c.call_value(&addr, [], &deployer, U256::from(value))
+            .await
+            .expect("payable call succeeds");
+        assert_eq!(c.balance(&addr).await.unwrap(), value);
+    }
+
+    #[tokio::test]
+    async fn plain_call_sends_zero_value() {
+        // The value-less `call` must leave the callee's balance untouched.
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+        let addr = c
+            .deploy_create(initcode, [], &deployer)
+            .await
+            .expect("empty-runtime deploy succeeds");
+
+        c.call(&addr, [], &deployer)
+            .await
+            .expect("value-less call succeeds");
+        assert_eq!(c.balance(&addr).await.unwrap(), 0);
     }
 
     #[tokio::test]
