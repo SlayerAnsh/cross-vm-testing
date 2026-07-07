@@ -3,9 +3,11 @@
 //! [`CwMockProvider`] wraps a `cw-multi-test` `App` configured with the chain's bech32
 //! prefix, so generated addresses carry the chain's prefix (e.g. `osmo1...`).
 
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::rc::Rc;
+
+use sha2::{Digest, Sha256};
 
 use cosmwasm_std::testing::MockStorage;
 use cosmwasm_std::{coin, Addr, Coin, Empty, Uint128};
@@ -19,6 +21,7 @@ use cw_multi_test::{
 use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
+use crate::provider::CwExecution;
 
 /// Default funding handed to accounts created via [`ChainProvider::new_account`].
 pub const DEFAULT_FUNDING: u128 = 1_000_000_000_000;
@@ -55,6 +58,9 @@ pub struct CwMockProvider {
     pub(crate) wallets: Rc<WalletFactory>,
     /// Per-label derived-signer cache (derive once, reuse).
     pub(crate) signers: Rc<RefCell<HashMap<String, crate::wallet::CosmosSigner>>>,
+    /// Monotonic per-chain execute counter, folded into the synthetic tx hash so repeated
+    /// identical executes get distinct hashes (a real chain never reuses one). Shared across clones.
+    tx_seq: Rc<Cell<u64>>,
 }
 
 impl CwMockProvider {
@@ -73,7 +79,27 @@ impl CwMockProvider {
             info,
             wallets,
             signers: Rc::new(RefCell::new(HashMap::new())),
+            tx_seq: Rc::new(Cell::new(0)),
         }
+    }
+
+    /// Mint the next synthetic tx hash for an execute: sha256 over the sender, contract, and the
+    /// monotonic sequence, rendered as uppercase hex to match Tendermint's tx-hash format. The
+    /// mock does not build or sign a real Cosmos transaction, so this is a stand-in that lets the
+    /// same test script read a hash on both the mock and the live RPC backend; it does not equal
+    /// the hash a live node would compute and must not be treated as a real on-chain identifier.
+    fn next_tx_hash(&self, sender: &Addr, contract: &Addr) -> String {
+        let seq = self.tx_seq.get();
+        self.tx_seq.set(seq + 1);
+        let mut hasher = Sha256::new();
+        hasher.update(sender.as_bytes());
+        hasher.update(contract.as_bytes());
+        hasher.update(seq.to_be_bytes());
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect()
     }
 
     /// Borrow the underlying `cw-multi-test` `App` for advanced use.
@@ -107,17 +133,26 @@ impl CwMockProvider {
     }
 
     /// Execute a state-mutating message against a contract instance.
+    ///
+    /// The in-process backend does not broadcast a real transaction, so the returned
+    /// [`CwExecution`] carries a synthetic, deterministic `tx_hash` (see [`Self::next_tx_hash`])
+    /// rather than `None`, so the same test script reads a hash on both the mock and live RPC.
     pub async fn execute_contract<Exec: CwSerde>(
         &self,
         addr: &Addr,
         msg: Exec,
         sender: &Addr,
         funds: &[Coin],
-    ) -> Result<cw_multi_test::AppResponse, CwError> {
-        self.app
+    ) -> Result<CwExecution, CwError> {
+        let response = self
+            .app
             .borrow_mut()
             .execute_contract(sender.clone(), addr.clone(), &msg, funds)
-            .map_err(|e| CwError::Execute(e.to_string()))
+            .map_err(|e| CwError::Execute(e.to_string()))?;
+        Ok(CwExecution {
+            tx_hash: Some(self.next_tx_hash(sender, addr)),
+            response,
+        })
     }
 
     /// Run a read-only smart query against a contract instance.

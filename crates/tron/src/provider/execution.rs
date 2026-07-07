@@ -14,7 +14,8 @@ pub struct TronExecution {
     pub output: Bytes,
     /// Logs (events) emitted during execution, in order.
     pub logs: Vec<Log>,
-    /// The broadcast transaction hash. `Some` on the live RPC backend; `None` on the mock,
-    /// which executes in-process without a transaction hash.
+    /// The transaction hash. The real broadcast hash on the live RPC backend; a synthetic,
+    /// deterministic hash on the mock (in-process, no real tx) so callers need not branch on
+    /// backend. `None` only appears if a backend explicitly omits it.
     pub tx_hash: Option<B256>,
 }

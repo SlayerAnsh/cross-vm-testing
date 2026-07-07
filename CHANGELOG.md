@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Fixed (CosmWasm transaction hash reaches the caller)
+
+* **Breaking (CosmWasm execute return type):** the CosmWasm execute path now returns a `CwExecution { tx_hash: Option<String>, response: CwAppResponse }` wrapper instead of a bare `CwAppResponse`. This covers `CwChain::execute_contract`, `CwContract::execute` / `execute_with_funds`, and the `CwExecuteFns`-generated typed methods. On the live RPC backend the Tendermint `broadcast_tx_commit` hash (previously computed then discarded) is now carried through; the in-process mock leaves `tx_hash` as `None`. `CwExecution` derefs to the inner `CwAppResponse`, so existing `.events` / `.data` reads keep working; call sites that build an envelope pass `exec.response` and `exec.tx_hash`.
+* **Breaking (`AppResponse` constructors carry a hash):** `AppResponse::evm` and `AppResponse::tron` take a fourth `tx_hash: Option<B256>` argument, and `AppResponse::cosmwasm` takes a third `tx_hash: Option<String>`. `AppResponse::transaction_hash()` now returns the broadcast hash for EVM, Tron, and CosmWasm on their live RPC backends (rendered as a `0x`-prefixed hex string for EVM/Tron), matching Solana; the in-process mock backends still return `CrossVmError::Unsupported`. Previously only Solana surfaced a hash and live EVM/Tron hashes were dropped at the envelope.
+* `cross-vm-solidity` and `cross-vm-tron` now re-export `alloy_primitives::B256`.
+* The in-process mock backends now mint a **synthetic, deterministic** transaction hash instead of `None`, so a script that reads `transaction_hash()` (or a provider's `tx_hash`) runs unchanged on both the mock and live RPC. EVM/Tron: keccak256 over the call fields plus a per-core monotonic sequence (real 32-byte shape, `0x`-hex); CosmWasm: uppercase sha256 hex (Tendermint shape). Solana keeps litesvm's real signature. The value is unique per call and stable across identical runs, but it does not equal the hash a live node would compute (that needs the signed-tx bytes) and must not be treated as a real on-chain identifier. `cross-vm-cosmwasm` gains a `sha2` dependency.
+
 ### Breaking (dyn ops are the only operation style)
 
 * Enum-based operations are removed as a supported style. `OpSetHarness` (dyn ops) is the one documented way to define operations, and it now works with config and CLI runs end to end.

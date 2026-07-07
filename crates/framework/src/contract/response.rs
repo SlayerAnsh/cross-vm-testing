@@ -8,25 +8,45 @@
 //! - [`CrossVmError::WrongVm`]: the caller used a VM-specific accessor (e.g. `raw_evm`) on a
 //!   response from a different VM. Wrong path.
 //! - [`CrossVmError::Unsupported`]: the VM matches but the backend does not carry the datum
-//!   (e.g. `cw-multi-test` has no transaction hash). Right path, missing data.
+//!   (e.g. a backend that omits a gas figure). Right path, missing data.
 
 use cross_vm_core::{ChainKind, CrossVmError};
 #[cfg(feature = "cw")]
 use cross_vm_cosmwasm::{CwAppResponse, Event};
 #[cfg(feature = "solana")]
 use cross_vm_solana::TransactionMetadata;
-// `Bytes`/`Log` are alloy-primitives types shared by the EVM and Tron variants. Source them from
-// whichever provider crate is compiled in (they are the same underlying types).
+// `Bytes`/`Log`/`B256` are alloy-primitives types shared by the EVM and Tron variants. Source them
+// from whichever provider crate is compiled in (they are the same underlying types).
 #[cfg(feature = "evm")]
-use cross_vm_solidity::{Bytes, Log};
+use cross_vm_solidity::{Bytes, Log, B256};
 #[cfg(all(feature = "tron", not(feature = "evm")))]
-use cross_vm_tron::{Bytes, Log};
+use cross_vm_tron::{Bytes, Log, B256};
+
+/// Return a stored per-VM tx hash as `Ok`, or [`CrossVmError::Unsupported`] when the backend
+/// (an in-process mock) carries none. Shared by the EVM, Tron, and CosmWasm hash paths.
+#[cfg(any(feature = "cw", feature = "evm", feature = "tron"))]
+fn hash_or_unsupported(tx_hash: &Option<String>, kind: ChainKind) -> Result<String, CrossVmError> {
+    tx_hash
+        .clone()
+        .ok_or_else(|| CrossVmError::unsupported(kind, "transaction hash"))
+}
+
+/// Render a 32-byte EVM/Tron transaction hash as a `0x`-prefixed hex string.
+#[cfg(any(feature = "evm", feature = "tron"))]
+fn hex_hash(h: B256) -> String {
+    format!("{h:#x}")
+}
 
 /// The raw, VM-specific result of an execution.
 pub enum RawResponse {
-    /// A `cw-multi-test` execution response.
+    /// A `cw-multi-test` execution response, plus the broadcast tx hash on the live RPC backend.
     #[cfg(feature = "cw")]
-    CosmWasm(CwAppResponse),
+    CosmWasm {
+        /// The raw `cw-multi-test` execution response.
+        response: CwAppResponse,
+        /// The broadcast transaction hash. `Some` on live RPC; `None` on the in-process mock.
+        tx_hash: Option<String>,
+    },
     /// The return data and emitted logs of an EVM call.
     #[cfg(feature = "evm")]
     Evm {
@@ -34,6 +54,8 @@ pub enum RawResponse {
         output: Bytes,
         /// Logs (events) emitted during execution.
         logs: Vec<Log>,
+        /// The broadcast transaction hash. `Some` on the live RPC backend; `None` on the mock.
+        tx_hash: Option<String>,
     },
     /// A `litesvm` transaction result.
     #[cfg(feature = "solana")]
@@ -45,6 +67,8 @@ pub enum RawResponse {
         output: Bytes,
         /// Logs (events) emitted during execution.
         logs: Vec<Log>,
+        /// The broadcast transaction hash. `Some` on the live RPC backend; `None` on the mock.
+        tx_hash: Option<String>,
     },
 }
 
@@ -53,7 +77,7 @@ impl RawResponse {
     pub fn kind(&self) -> ChainKind {
         match self {
             #[cfg(feature = "cw")]
-            RawResponse::CosmWasm(_) => ChainKind::CosmWasm,
+            RawResponse::CosmWasm { .. } => ChainKind::CosmWasm,
             #[cfg(feature = "evm")]
             RawResponse::Evm { .. } => ChainKind::Evm,
             #[cfg(feature = "solana")]
@@ -63,29 +87,25 @@ impl RawResponse {
         }
     }
 
-    /// The transaction hash, when the backend provides one.
+    /// The transaction hash.
     ///
-    /// Available on Solana (the signature). Returns [`CrossVmError::Unsupported`] on the EVM
-    /// and CosmWasm mock backends, which do not expose a hash for an in-process execution.
+    /// The real broadcast hash on Solana (the signature) and on the live RPC backends for EVM,
+    /// Tron, and CosmWasm. The in-process mock backends carry a synthetic, deterministic hash
+    /// instead (they never broadcast), so the same test reads a hash on either backend; see the
+    /// per-provider execution types. Returns [`CrossVmError::Unsupported`] only if a backend
+    /// explicitly omits the hash.
     pub fn transaction_hash(&self) -> Result<String, CrossVmError> {
         match self {
             #[cfg(feature = "solana")]
             RawResponse::Svm(m) => Ok(m.signature.to_string()),
             #[cfg(feature = "cw")]
-            RawResponse::CosmWasm(_) => Err(CrossVmError::unsupported(
-                ChainKind::CosmWasm,
-                "transaction hash",
-            )),
+            RawResponse::CosmWasm { tx_hash, .. } => {
+                hash_or_unsupported(tx_hash, ChainKind::CosmWasm)
+            }
             #[cfg(feature = "evm")]
-            RawResponse::Evm { .. } => Err(CrossVmError::unsupported(
-                ChainKind::Evm,
-                "transaction hash",
-            )),
+            RawResponse::Evm { tx_hash, .. } => hash_or_unsupported(tx_hash, ChainKind::Evm),
             #[cfg(feature = "tron")]
-            RawResponse::Tron { .. } => Err(CrossVmError::unsupported(
-                ChainKind::Tron,
-                "transaction hash",
-            )),
+            RawResponse::Tron { tx_hash, .. } => hash_or_unsupported(tx_hash, ChainKind::Tron),
         }
     }
 
@@ -109,7 +129,7 @@ impl RawResponse {
     #[allow(unreachable_patterns)]
     pub fn cosmwasm_events(&self) -> Result<&[Event], CrossVmError> {
         match self {
-            RawResponse::CosmWasm(r) => Ok(&r.events),
+            RawResponse::CosmWasm { response, .. } => Ok(&response.events),
             other => Err(CrossVmError::wrong_vm(ChainKind::CosmWasm, other.kind())),
         }
     }
@@ -161,21 +181,30 @@ pub struct AppResponse<T> {
 }
 
 impl<T> AppResponse<T> {
-    /// Build a CosmWasm response.
+    /// Build a CosmWasm response. `tx_hash` is the broadcast hash on the live RPC backend and
+    /// `None` on the in-process mock.
     #[cfg(feature = "cw")]
-    pub fn cosmwasm(value: T, raw: CwAppResponse) -> Self {
+    pub fn cosmwasm(value: T, raw: CwAppResponse, tx_hash: Option<String>) -> Self {
         Self {
             value,
-            raw: RawResponse::CosmWasm(raw),
+            raw: RawResponse::CosmWasm {
+                response: raw,
+                tx_hash,
+            },
         }
     }
 
-    /// Build an EVM response from the call's return data and emitted logs.
+    /// Build an EVM response from the call's return data, emitted logs, and (on the live RPC
+    /// backend) the broadcast transaction hash. `tx_hash` is `None` on the mock.
     #[cfg(feature = "evm")]
-    pub fn evm(value: T, output: Bytes, logs: Vec<Log>) -> Self {
+    pub fn evm(value: T, output: Bytes, logs: Vec<Log>, tx_hash: Option<B256>) -> Self {
         Self {
             value,
-            raw: RawResponse::Evm { output, logs },
+            raw: RawResponse::Evm {
+                output,
+                logs,
+                tx_hash: tx_hash.map(hex_hash),
+            },
         }
     }
 
@@ -188,12 +217,17 @@ impl<T> AppResponse<T> {
         }
     }
 
-    /// Build a Tron response from the call's return data and emitted logs.
+    /// Build a Tron response from the call's return data, emitted logs, and (on the live RPC
+    /// backend) the broadcast transaction hash. `tx_hash` is `None` on the mock.
     #[cfg(feature = "tron")]
-    pub fn tron(value: T, output: Bytes, logs: Vec<Log>) -> Self {
+    pub fn tron(value: T, output: Bytes, logs: Vec<Log>, tx_hash: Option<B256>) -> Self {
         Self {
             value,
-            raw: RawResponse::Tron { output, logs },
+            raw: RawResponse::Tron {
+                output,
+                logs,
+                tx_hash: tx_hash.map(hex_hash),
+            },
         }
     }
 
@@ -235,7 +269,7 @@ impl<T> AppResponse<T> {
     #[allow(unreachable_patterns)]
     pub fn raw_cosmwasm(&self) -> Result<&CwAppResponse, CrossVmError> {
         match &self.raw {
-            RawResponse::CosmWasm(r) => Ok(r),
+            RawResponse::CosmWasm { response, .. } => Ok(response),
             other => Err(CrossVmError::wrong_vm(ChainKind::CosmWasm, other.kind())),
         }
     }
@@ -301,7 +335,7 @@ mod tests {
 
     #[test]
     fn wrong_accessor_is_wrong_vm_not_unsupported() {
-        let resp = AppResponse::evm(7u64, Bytes::new(), vec![]);
+        let resp = AppResponse::evm(7u64, Bytes::new(), vec![], None);
         // Right payload.
         assert_eq!(*resp.value(), 7);
         // Wrong-VM accessor: distinct from Unsupported.
@@ -311,15 +345,52 @@ mod tests {
 
     #[test]
     fn missing_datum_is_unsupported_not_wrong_vm() {
-        let resp = AppResponse::evm((), Bytes::new(), vec![]);
+        // Mock-shaped EVM response: no hash present.
+        let resp = AppResponse::evm((), Bytes::new(), vec![], None);
         // Same-VM datum the backend lacks: Unsupported, not WrongVm.
         let err = resp.transaction_hash().unwrap_err();
         assert!(matches!(err, CrossVmError::Unsupported { .. }));
     }
 
     #[test]
+    fn evm_hash_is_carried_and_hex_rendered() {
+        // RPC-shaped EVM response: a hash is present and rendered as `0x`-prefixed hex.
+        let h = B256::with_last_byte(0xAB);
+        let resp = AppResponse::evm((), Bytes::new(), vec![], Some(h));
+        assert_eq!(resp.transaction_hash().unwrap(), format!("{h:#x}"));
+    }
+
+    #[test]
+    fn cosmwasm_hash_is_carried_when_present() {
+        // RPC-shaped CosmWasm response: the broadcast hash surfaces through the envelope.
+        let raw = CwAppResponse {
+            events: vec![],
+            data: None,
+            msg_responses: vec![],
+        };
+        let resp = AppResponse::cosmwasm((), raw, Some("ABCD1234".to_string()));
+        assert_eq!(resp.transaction_hash().unwrap(), "ABCD1234");
+    }
+
+    #[test]
+    fn absent_cosmwasm_hash_is_unsupported() {
+        // A response built without a hash reads as Unsupported, not WrongVm. (Real backends now
+        // supply a hash; this covers the explicit `None` path.)
+        let raw = CwAppResponse {
+            events: vec![],
+            data: None,
+            msg_responses: vec![],
+        };
+        let resp = AppResponse::cosmwasm((), raw, None);
+        assert!(matches!(
+            resp.transaction_hash(),
+            Err(CrossVmError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
     fn evm_logs_are_carried_solana_logs_are_wrong_vm() {
-        let resp = AppResponse::evm((), Bytes::new(), vec![]);
+        let resp = AppResponse::evm((), Bytes::new(), vec![], None);
         // EVM logs accessor on an EVM response: present (empty here), not an error.
         assert!(resp.raw_evm_logs().unwrap().is_empty());
         // Solana-logs accessor on an EVM response: WrongVm.

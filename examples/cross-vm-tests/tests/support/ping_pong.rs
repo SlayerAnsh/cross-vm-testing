@@ -105,7 +105,7 @@ impl PingPong {
             .contract(self.base.cw_addr()?)
             .execute(cosmos_pp::ExecuteMsg::Ping { destination_port }, wallet)
             .await?;
-        Ok(AppResponse::cosmwasm((), raw))
+        Ok(AppResponse::cosmwasm((), raw.response, raw.tx_hash))
     }
 
     async fn cw_receive_packet(
@@ -130,7 +130,7 @@ impl PingPong {
                 wallet,
             )
             .await?;
-        Ok(AppResponse::cosmwasm((), raw))
+        Ok(AppResponse::cosmwasm((), raw.response, raw.tx_hash))
     }
 
     async fn cw_acknowledge_packet(
@@ -153,7 +153,7 @@ impl PingPong {
                 wallet,
             )
             .await?;
-        Ok(AppResponse::cosmwasm((), raw))
+        Ok(AppResponse::cosmwasm((), raw.response, raw.tx_hash))
     }
 
     async fn cw_stats(&self) -> Result<StatsView, CrossVmError> {
@@ -222,7 +222,7 @@ impl PingPong {
         let exec = chain
             .call(&self.base.evm_addr()?, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::evm((), exec.output, exec.logs))
+        Ok(AppResponse::evm((), exec.output, exec.logs, exec.tx_hash))
     }
 
     async fn evm_receive_packet(
@@ -247,7 +247,7 @@ impl PingPong {
         let exec = chain
             .call(&self.base.evm_addr()?, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::evm((), exec.output, exec.logs))
+        Ok(AppResponse::evm((), exec.output, exec.logs, exec.tx_hash))
     }
 
     async fn evm_acknowledge_packet(
@@ -270,7 +270,7 @@ impl PingPong {
         let exec = chain
             .call(&self.base.evm_addr()?, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::evm((), exec.output, exec.logs))
+        Ok(AppResponse::evm((), exec.output, exec.logs, exec.tx_hash))
     }
 
     async fn evm_stats(&self) -> Result<StatsView, CrossVmError> {
@@ -361,7 +361,7 @@ impl PingPong {
         let exec = chain
             .call(&self.base.tron_addr()?, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::tron((), exec.output, exec.logs))
+        Ok(AppResponse::tron((), exec.output, exec.logs, exec.tx_hash))
     }
 
     async fn tron_receive_packet(
@@ -386,7 +386,7 @@ impl PingPong {
         let exec = chain
             .call(&self.base.tron_addr()?, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::tron((), exec.output, exec.logs))
+        Ok(AppResponse::tron((), exec.output, exec.logs, exec.tx_hash))
     }
 
     async fn tron_acknowledge_packet(
@@ -409,7 +409,7 @@ impl PingPong {
         let exec = chain
             .call(&self.base.tron_addr()?, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::tron((), exec.output, exec.logs))
+        Ok(AppResponse::tron((), exec.output, exec.logs, exec.tx_hash))
     }
 
     async fn tron_stats(&self) -> Result<StatsView, CrossVmError> {

@@ -41,14 +41,27 @@ async fn deploy_increment_query() {
         .expect("query");
     assert_eq!(res.count, 0);
 
-    chain
+    let exec1 = chain
         .execute_contract(&contract, ExecuteMsg::Increment {}, &deployer, &[])
         .await
         .expect("execute 1");
-    chain
+    let exec2 = chain
         .execute_contract(&contract, ExecuteMsg::Increment {}, &deployer, &[])
         .await
         .expect("execute 2");
+    // The mock mints a synthetic, deterministic tx hash (uppercase sha256 hex, Tendermint shape),
+    // distinct per execute, so a test can read a hash on the mock exactly as on live RPC.
+    let h1 = exec1
+        .tx_hash
+        .expect("mock execute carries a synthetic tx hash");
+    let h2 = exec2
+        .tx_hash
+        .expect("mock execute carries a synthetic tx hash");
+    assert_eq!(h1.len(), 64, "tendermint tx hash is 32-byte sha256 hex");
+    assert!(h1
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()));
+    assert_ne!(h1, h2, "repeated identical executes get distinct hashes");
 
     let res: CountResponse = chain
         .query_wasm_smart(&contract, QueryMsg::GetCount {})

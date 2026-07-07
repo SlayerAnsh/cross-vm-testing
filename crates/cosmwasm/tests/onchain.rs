@@ -76,10 +76,14 @@ async fn live_counter_on_osmosis_testnet() {
         .expect("query count");
     assert_eq!(resp.count, 0, "fresh counter starts at 0");
 
-    chain
+    let exec = chain
         .execute_contract(&addr, ExecuteMsg::Increment {}, ONCHAIN_WALLETS.test, &[])
         .await
         .expect("increment");
+    // The live RPC path surfaces the broadcast tx hash (the mock leaves it `None`).
+    let tx_hash = exec.tx_hash.expect("live execute carries a tx hash");
+    assert!(!tx_hash.is_empty(), "tx hash should be non-empty");
+    println!("increment tx hash: {tx_hash}");
     let resp: CountResponse = chain
         .query_wasm_smart(&addr, QueryMsg::GetCount {})
         .await

@@ -16,10 +16,10 @@
 //!   `DIVERGENCE(tron)` CREATE-address caveat), and each provider's error enum, built from
 //!   [`ExecFailure`] with the provider's historical message shapes.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use alloy_primitives::{Address, Bytes, Log, U256};
+use alloy_primitives::{keccak256, Address, Bytes, Log, B256, U256};
 use cross_vm_core::BlockTime;
 use revm::context::result::{ExecutionResult, Output};
 use revm::context::{Context, TxEnv};
@@ -77,14 +77,26 @@ impl ExecFailure {
     }
 }
 
-/// The result of a state-mutating call on the core: return data plus the logs emitted during
-/// execution. Providers wrap this into their own execution types (adding e.g. a tx hash slot).
+/// The result of a state-mutating call on the core: return data, the logs emitted during
+/// execution, and a synthetic transaction hash. Providers wrap this into their own execution
+/// types.
+///
+/// The mock executes in-process and never builds or signs a real transaction, so it has no real
+/// hash to report. Rather than leave callers to branch on "mock has no hash", the core mints a
+/// **synthetic, deterministic** hash (see [`RevmCore::call`]): keccak256 over the call's fields
+/// plus a per-core monotonic sequence, so it matches the real 32-byte hash *shape*, is stable
+/// across identical runs, and is unique per call (like a real chain). It does NOT equal the hash
+/// a live node would compute for the same intent (that needs the signed-tx bytes) and must not be
+/// treated as a real on-chain identifier.
 #[derive(Clone, Debug, Default)]
 pub struct Execution {
     /// ABI-encoded return data.
     pub output: Bytes,
     /// Logs (events) emitted during execution, in order.
     pub logs: Vec<Log>,
+    /// Synthetic, deterministic transaction hash (see the type-level note). Zero on the
+    /// read-only `static_call` path, which is not a transaction.
+    pub tx_hash: B256,
 }
 
 /// The shared in-process `revm` core.
@@ -95,6 +107,9 @@ pub struct Execution {
 #[derive(Clone)]
 pub struct RevmCore {
     evm: Rc<RefCell<RevmInner>>,
+    /// Monotonic per-core transaction counter, folded into the synthetic tx hash so repeated
+    /// identical calls get distinct hashes (a real chain never reuses one). Shared across clones.
+    tx_seq: Rc<Cell<u64>>,
 }
 
 impl RevmCore {
@@ -112,7 +127,22 @@ impl RevmCore {
         customize(&mut evm);
         Self {
             evm: Rc::new(RefCell::new(evm)),
+            tx_seq: Rc::new(Cell::new(0)),
         }
+    }
+
+    /// Mint the next synthetic tx hash: keccak256 over the call fields plus the monotonic
+    /// sequence. Deterministic for a given call order, unique per call. See [`Execution`].
+    fn next_tx_hash(&self, to: Address, calldata: &[u8], from: Address, value: U256) -> B256 {
+        let seq = self.tx_seq.get();
+        self.tx_seq.set(seq + 1);
+        let mut buf = Vec::with_capacity(20 + 20 + 32 + 8 + calldata.len());
+        buf.extend_from_slice(from.as_slice());
+        buf.extend_from_slice(to.as_slice());
+        buf.extend_from_slice(&value.to_be_bytes::<32>());
+        buf.extend_from_slice(&seq.to_be_bytes());
+        buf.extend_from_slice(calldata);
+        keccak256(&buf)
     }
 
     /// Deploy bytecode via a create transaction, appending constructor args to the initcode.
@@ -179,7 +209,9 @@ impl RevmCore {
             .borrow_mut()
             .transact_commit(tx)
             .map_err(|e| ExecFailure::Internal(format!("{e:?}")))?;
-        exec_or_err(result)
+        let mut exec = exec_or_err(result)?;
+        exec.tx_hash = self.next_tx_hash(to, calldata, from, value);
+        Ok(exec)
     }
 
     /// Run a read-only static call against `to`. Logs are dropped: getters do not emit, and a
@@ -241,6 +273,8 @@ fn exec_or_err(result: ExecutionResult) -> Result<Execution, ExecFailure> {
         ExecutionResult::Success { output, logs, .. } => Ok(Execution {
             output: output.into_data(),
             logs,
+            // Filled by `call`; the read-only `static_call` path leaves it zero (not a tx).
+            tx_hash: B256::ZERO,
         }),
         ExecutionResult::Revert { output, .. } => Err(ExecFailure::Revert(hex_encode(&output))),
         ExecutionResult::Halt { reason, .. } => Err(ExecFailure::Halt(format!("{reason:?}"))),
@@ -293,6 +327,33 @@ mod tests {
         // A plain value transfer to an empty account succeeds after the top-up.
         c.call(to, &[], from, U256::from(5u64)).expect("value call");
         assert_eq!(c.balance(to).unwrap(), U256::from(5u64));
+    }
+
+    #[test]
+    fn synthetic_tx_hash_is_nonzero_unique_and_deterministic() {
+        let from = Address::repeat_byte(0x33);
+        let to = Address::repeat_byte(0x44);
+
+        // Two calls in a run: both carry a nonzero hash, and the monotonic seq makes them differ.
+        let c = core();
+        let h1 = c.call(to, &[], from, U256::ZERO).unwrap().tx_hash;
+        let h2 = c.call(to, &[], from, U256::ZERO).unwrap().tx_hash;
+        assert_ne!(h1, B256::ZERO);
+        assert_ne!(h2, B256::ZERO);
+        assert_ne!(h1, h2, "repeated identical calls must get distinct hashes");
+
+        // A fresh core replays the same call order to the same hashes (deterministic).
+        let c2 = core();
+        assert_eq!(c2.call(to, &[], from, U256::ZERO).unwrap().tx_hash, h1);
+        assert_eq!(c2.call(to, &[], from, U256::ZERO).unwrap().tx_hash, h2);
+    }
+
+    #[test]
+    fn static_call_leaves_tx_hash_zero() {
+        let c = core();
+        // Calling an empty account statically returns empty output and, being a non-tx, no hash.
+        let out = c.static_call(Address::repeat_byte(0x55), &[]).unwrap();
+        assert!(out.is_empty());
     }
 
     #[test]
