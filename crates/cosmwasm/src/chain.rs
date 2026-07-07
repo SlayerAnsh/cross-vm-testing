@@ -20,7 +20,7 @@ use crate::asset::CwAsset;
 use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
-use crate::provider::{CwCode, CwMockProvider, CwRpcProvider};
+use crate::provider::{CwCode, CwExecution, CwMockProvider, CwRpcProvider};
 use crate::wallet::CosmosSigner;
 
 /// CW20 balance query message for [`CwChain::ensure_asset`].
@@ -180,13 +180,16 @@ impl CwChain {
     }
 
     /// Execute a state-mutating message against a contract instance, signed by wallet `wallet`.
+    ///
+    /// The returned [`CwExecution`] carries the broadcast transaction hash on the live RPC
+    /// backend (`None` on the in-process mock) alongside the raw execution response.
     pub async fn execute_contract<Exec: CwSerde>(
         &self,
         addr: &Addr,
         msg: Exec,
         wallet: WalletLabel<'_>,
         funds: &[Coin],
-    ) -> Result<cw_multi_test::AppResponse, CwError> {
+    ) -> Result<CwExecution, CwError> {
         let signer = self.acquire(wallet).await?;
         match self {
             CwChain::Mock(p) => p.execute_contract(addr, msg, &signer.address, funds).await,

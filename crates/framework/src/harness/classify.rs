@@ -61,7 +61,7 @@ mod tests {
         let mut applied = false;
         let v = classify::<()>(
             true,
-            Ok(AppResponse::evm((), Default::default(), vec![])),
+            Ok(AppResponse::evm((), Default::default(), vec![], None)),
             || applied = true,
             "a",
             "b",
@@ -81,7 +81,7 @@ mod tests {
     fn unexpected_accept_is_bug() {
         let e = classify::<()>(
             false,
-            Ok(AppResponse::evm((), Default::default(), vec![])),
+            Ok(AppResponse::evm((), Default::default(), vec![], None)),
             || {},
             "over-accept",
             "b",

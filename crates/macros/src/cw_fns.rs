@@ -31,22 +31,22 @@ pub fn expand_execute_fns(input: DeriveInput) -> syn::Result<TokenStream> {
         if is_payable(v) {
             sigs.push(quote! {
                 async fn #method(&self, wallet: &str #(, #arg_decls)*, funds: &[::cosmwasm_std::Coin])
-                    -> Result<::cross_vm_cosmwasm::CwAppResponse, ::cross_vm_cosmwasm::CwError>;
+                    -> Result<::cross_vm_cosmwasm::CwExecution, ::cross_vm_cosmwasm::CwError>;
             });
             methods.push(quote! {
                 async fn #method(&self, wallet: &str #(, #arg_decls)*, funds: &[::cosmwasm_std::Coin])
-                    -> Result<::cross_vm_cosmwasm::CwAppResponse, ::cross_vm_cosmwasm::CwError> {
+                    -> Result<::cross_vm_cosmwasm::CwExecution, ::cross_vm_cosmwasm::CwError> {
                     self.execute_with_funds(#ctor, wallet, funds).await
                 }
             });
         } else {
             sigs.push(quote! {
                 async fn #method(&self, wallet: &str #(, #arg_decls)*)
-                    -> Result<::cross_vm_cosmwasm::CwAppResponse, ::cross_vm_cosmwasm::CwError>;
+                    -> Result<::cross_vm_cosmwasm::CwExecution, ::cross_vm_cosmwasm::CwError>;
             });
             methods.push(quote! {
                 async fn #method(&self, wallet: &str #(, #arg_decls)*)
-                    -> Result<::cross_vm_cosmwasm::CwAppResponse, ::cross_vm_cosmwasm::CwError> {
+                    -> Result<::cross_vm_cosmwasm::CwExecution, ::cross_vm_cosmwasm::CwError> {
                     self.execute(#ctor, wallet).await
                 }
             });

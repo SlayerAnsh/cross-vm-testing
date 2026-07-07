@@ -92,7 +92,10 @@ mod hooks {
         });
 
         let resp = base
-            .run_after("increment", AppResponse::evm((), Bytes::new(), vec![]))
+            .run_after(
+                "increment",
+                AppResponse::evm((), Bytes::new(), vec![], None),
+            )
             .expect("after ok");
         assert_eq!(resp.kind(), ChainKind::Evm);
         assert_eq!(
@@ -123,7 +126,10 @@ mod hooks {
                 reason: "indexer down".into(),
             })
         });
-        let res = base.run_after("increment", AppResponse::evm((), Bytes::new(), vec![]));
+        let res = base.run_after(
+            "increment",
+            AppResponse::evm((), Bytes::new(), vec![], None),
+        );
         assert!(matches!(res, Err(CrossVmError::Other { .. })));
     }
 
@@ -138,8 +144,11 @@ mod hooks {
                 Ok(())
             });
         }
-        base.run_after("increment", AppResponse::evm((), Bytes::new(), vec![]))
-            .expect("after ok");
+        base.run_after(
+            "increment",
+            AppResponse::evm((), Bytes::new(), vec![], None),
+        )
+        .expect("after ok");
         assert_eq!(*order.borrow(), vec![1, 2, 3]);
     }
 
@@ -148,7 +157,10 @@ mod hooks {
         let base = base();
         assert!(base.run_before("increment").is_ok());
         assert!(base
-            .run_after("increment", AppResponse::evm((), Bytes::new(), vec![]))
+            .run_after(
+                "increment",
+                AppResponse::evm((), Bytes::new(), vec![], None)
+            )
             .is_ok());
     }
 }

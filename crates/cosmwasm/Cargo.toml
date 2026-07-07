@@ -13,6 +13,7 @@ cw-multi-test.workspace = true
 cosmwasm-std.workspace = true
 thiserror.workspace = true
 serde = { version = "1", features = ["derive"] }
+sha2.workspace = true
 cosmrs.workspace = true
 prost.workspace = true
 serde_json.workspace = true

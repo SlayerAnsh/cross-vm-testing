@@ -219,10 +219,10 @@ impl Vault {
     ) -> Result<AppResponse<()>, CrossVmError> {
         let chain = self.base.cosmwasm()?;
         let addr = self.base.cw_addr()?;
-        let raw = chain
+        let exec = chain
             .execute_contract(&addr, msg, WalletLabel::wrap(wallet), &[])
             .await?;
-        Ok(AppResponse::cosmwasm((), raw))
+        Ok(AppResponse::cosmwasm((), exec.response, exec.tx_hash))
     }
 
     async fn cw_query_amount(&self, wallet: &str, collateral: bool) -> Result<u128, CrossVmError> {
@@ -252,7 +252,7 @@ impl Vault {
         let exec = chain
             .call(&addr, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::evm((), exec.output, exec.logs))
+        Ok(AppResponse::evm((), exec.output, exec.logs, exec.tx_hash))
     }
 
     async fn evm_view_user(&self, wallet: &str, collateral: bool) -> Result<u128, CrossVmError> {
@@ -286,7 +286,7 @@ impl Vault {
         let exec = chain
             .call(&addr, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::tron((), exec.output, exec.logs))
+        Ok(AppResponse::tron((), exec.output, exec.logs, exec.tx_hash))
     }
 
     async fn tron_view_user(&self, wallet: &str, collateral: bool) -> Result<u128, CrossVmError> {

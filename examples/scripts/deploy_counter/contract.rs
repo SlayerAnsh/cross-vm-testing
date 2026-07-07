@@ -55,7 +55,7 @@ impl Counter {
             .contract_as::<cw::CounterContract>(self.base.cw_addr()?)
             .increment(wallet)
             .await?;
-        Ok(AppResponse::cosmwasm((), raw))
+        Ok(AppResponse::cosmwasm((), raw.response, raw.tx_hash))
     }
 
     async fn cw_count(&self) -> Result<u64, CrossVmError> {
@@ -90,7 +90,7 @@ impl Counter {
         let addr = self.base.evm_addr()?;
         let calldata = Bytes::from(evm_counter::Counter::incrementCall {}.abi_encode());
         let exec = chain.call(&addr, calldata, WalletLabel::wrap(wallet)).await?;
-        Ok(AppResponse::evm((), exec.output, exec.logs))
+        Ok(AppResponse::evm((), exec.output, exec.logs, exec.tx_hash))
     }
 
     async fn evm_count(&self) -> Result<u64, CrossVmError> {

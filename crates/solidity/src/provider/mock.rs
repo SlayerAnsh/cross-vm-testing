@@ -122,8 +122,9 @@ pub struct EvmExecution {
     pub output: Bytes,
     /// Logs (events) emitted during execution, in order.
     pub logs: Vec<Log>,
-    /// The broadcast transaction hash. `Some` on the live RPC backend; `None` on the mock,
-    /// which executes in-process without a transaction hash.
+    /// The transaction hash. The real broadcast hash on the live RPC backend; a synthetic,
+    /// deterministic hash on the mock (in-process, no real tx) so callers need not branch on
+    /// backend. `None` only appears if a backend explicitly omits it.
     pub tx_hash: Option<B256>,
 }
 
@@ -132,7 +133,9 @@ impl From<cross_vm_revm_common::Execution> for EvmExecution {
         Self {
             output: e.output,
             logs: e.logs,
-            tx_hash: None,
+            // The mock has no real broadcast hash; the core mints a synthetic, deterministic one
+            // so the same test script reads a hash on both the mock and the live RPC backend.
+            tx_hash: Some(e.tx_hash),
         }
     }
 }

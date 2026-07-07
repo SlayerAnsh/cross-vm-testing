@@ -28,7 +28,7 @@ use cross_vm_core::WalletLabel;
 use crate::chain::CwChain;
 use crate::error::CwError;
 use crate::msg::CwSerde;
-use crate::CwAppResponse;
+use crate::CwExecution;
 
 /// Compile-time marker tying a CosmWasm contract's message types to a zero-sized handle tag.
 ///
@@ -135,11 +135,7 @@ impl<I> CwContract<I> {
     /// Execute a state-mutating message against the bound contract, signed by wallet `wallet`,
     /// sending no funds. For a funded call use [`execute_with_funds`](Self::execute_with_funds)
     /// (the path the `CwExecuteFns` derive's `#[payable]` variants take).
-    pub async fn execute<E: CwSerde>(
-        &self,
-        msg: E,
-        wallet: &str,
-    ) -> Result<CwAppResponse, CwError> {
+    pub async fn execute<E: CwSerde>(&self, msg: E, wallet: &str) -> Result<CwExecution, CwError> {
         self.execute_with_funds(msg, wallet, &[]).await
     }
 
@@ -150,7 +146,7 @@ impl<I> CwContract<I> {
         msg: E,
         wallet: &str,
         funds: &[Coin],
-    ) -> Result<CwAppResponse, CwError> {
+    ) -> Result<CwExecution, CwError> {
         self.chain
             .execute_contract(self.require_addr()?, msg, WalletLabel::wrap(wallet), funds)
             .await

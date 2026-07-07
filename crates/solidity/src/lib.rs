@@ -25,7 +25,7 @@ mod wallet;
 #[cfg(test)]
 mod tests;
 
-pub use alloy_primitives::{Address, Bytes, Log, U256};
+pub use alloy_primitives::{Address, Bytes, Log, B256, U256};
 pub use asset::EvmAsset;
 pub use chain::EvmChain;
 pub use chains::EvmChainInfo;

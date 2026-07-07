@@ -38,7 +38,7 @@ use crate::asset::CwAsset;
 use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
-use crate::provider::CwCode;
+use crate::provider::{CwCode, CwExecution};
 use crate::wallet::CosmosSigner;
 
 /// A live-RPC CosmWasm provider. Chain-level reads and contract queries hit a real node via
@@ -294,7 +294,8 @@ impl CwRpcProvider {
 
     /// Execute a state-mutating message against a contract instance, signed by `signer`.
     ///
-    /// The returned [`cw_multi_test::AppResponse`] carries the chain's emitted events (mapped to
+    /// The returned [`CwExecution`] carries the broadcast transaction hash (`tx_hash`) plus a
+    /// [`cw_multi_test::AppResponse`] holding the chain's emitted events (mapped to
     /// `cosmwasm_std::Event`); `data` is left `None` (the raw tx data is proto-wrapped, not the
     /// contract's response payload).
     pub async fn execute_contract<Exec: CwSerde>(
@@ -303,7 +304,7 @@ impl CwRpcProvider {
         msg: Exec,
         signer: &CosmosSigner,
         funds: &[Coin],
-    ) -> Result<cw_multi_test::AppResponse, CwError> {
+    ) -> Result<CwExecution, CwError> {
         let m = MsgExecuteContract {
             sender: signer_account(signer)?,
             contract: addr
@@ -316,11 +317,14 @@ impl CwRpcProvider {
         let any = m
             .to_any()
             .map_err(|e| CwError::Execute(format!("encode execute: {e}")))?;
-        let (_, events) = self.sign_and_broadcast(vec![any], signer, 300_000).await?;
-        Ok(cw_multi_test::AppResponse {
-            events: events.iter().map(to_cw_event).collect(),
-            data: None,
-            msg_responses: Vec::new(),
+        let (tx_hash, events) = self.sign_and_broadcast(vec![any], signer, 300_000).await?;
+        Ok(CwExecution {
+            tx_hash: Some(tx_hash),
+            response: cw_multi_test::AppResponse {
+                events: events.iter().map(to_cw_event).collect(),
+                data: None,
+                msg_responses: Vec::new(),
+            },
         })
     }
 

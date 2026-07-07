@@ -207,7 +207,9 @@ impl From<cross_vm_revm_common::Execution> for TronExecution {
         Self {
             output: e.output,
             logs: e.logs,
-            tx_hash: None,
+            // The mock has no real broadcast hash; the core mints a synthetic, deterministic one
+            // so the same test script reads a hash on both the mock and the live RPC backend.
+            tx_hash: Some(e.tx_hash),
         }
     }
 }

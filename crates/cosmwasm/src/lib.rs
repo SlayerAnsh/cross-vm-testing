@@ -34,7 +34,7 @@ pub use contract::{CwContract, CwInterface};
 pub use cosmwasm_std::{Addr, Event};
 pub use error::CwError;
 pub use msg::CwSerde;
-pub use provider::{CwApp, CwCode, CwMockProvider, CwRpcProvider, DEFAULT_FUNDING};
+pub use provider::{CwApp, CwCode, CwExecution, CwMockProvider, CwRpcProvider, DEFAULT_FUNDING};
 pub use wallet::CosmosSigner;
 
 /// The `cw-multi-test` execution response, re-exported so downstream crates can name the
