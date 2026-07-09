@@ -80,7 +80,9 @@ impl PingPong {
     async fn cw_setup(&self, wallet: &str, _chain_id: &str) -> Result<(), CrossVmError> {
         // CosmWasm derives its port from the runtime block chain_id, not a constructor arg.
         let chain = self.base.cosmwasm()?;
-        let code_id = chain.store_code(cosmos_pp::contract()).await?;
+        let code_id = chain
+            .store_code(cosmos_pp::contract(), WalletLabel::wrap(wallet))
+            .await?;
         let addr = chain
             .instantiate(
                 code_id,

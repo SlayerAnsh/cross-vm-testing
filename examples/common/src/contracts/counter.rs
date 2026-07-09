@@ -62,7 +62,9 @@ pub trait CounterSpec {
 impl Counter {
     async fn cw_setup(&self, wallet: &str) -> Result<(), CrossVmError> {
         let chain = self.base.cosmwasm()?;
-        let code_id = chain.store_code(cosmos_counter::contract()).await?;
+        let code_id = chain
+            .store_code(cosmos_counter::contract(), WalletLabel::wrap(wallet))
+            .await?;
         let addr = chain
             .instantiate(
                 code_id,

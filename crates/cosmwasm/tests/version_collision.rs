@@ -53,7 +53,7 @@ async fn shared_method_names_resolve_per_contract() {
     let chain: CwChain = OSMOSIS.mock(wallets()).into();
 
     let counter_code = chain
-        .store_code(counter_contract())
+        .store_code(counter_contract(), TEST_WALLETS.alice)
         .await
         .expect("store counter");
     let counter_addr = chain
@@ -68,7 +68,7 @@ async fn shared_method_names_resolve_per_contract() {
         .expect("instantiate counter");
 
     let vault_code = chain
-        .store_code(vault_contract())
+        .store_code(vault_contract(), TEST_WALLETS.alice)
         .await
         .expect("store vault");
     let vault_addr = chain

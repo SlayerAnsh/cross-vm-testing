@@ -33,7 +33,10 @@ fn wallets() -> Rc<WalletFactory> {
 async fn handle_binds_address_for_execute_and_query() {
     let chain: CwChain = OSMOSIS.mock(wallets()).into();
 
-    let code_id = chain.store_code(counter_contract()).await.expect("store");
+    let code_id = chain
+        .store_code(counter_contract(), TEST_WALLETS.alice)
+        .await
+        .expect("store");
     let addr = chain
         .instantiate(
             code_id,

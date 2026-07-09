@@ -56,7 +56,9 @@ impl Vault {
         match self.base.kind() {
             ChainKind::CosmWasm => {
                 let chain = self.base.cosmwasm()?;
-                let code_id = chain.store_code(cw_vault::contract()).await?;
+                let code_id = chain
+                    .store_code(cw_vault::contract(), WalletLabel::wrap(wallet))
+                    .await?;
                 let addr = chain
                     .instantiate(
                         code_id,

@@ -54,9 +54,9 @@ async fn live_counter_on_osmosis_testnet() {
     );
 
     let code_id = chain
-        .store_code_wasm(COUNTER_WASM.to_vec(), ONCHAIN_WALLETS.test)
+        .store_code(COUNTER_WASM.to_vec(), ONCHAIN_WALLETS.test)
         .await
-        .expect("store_code_wasm");
+        .expect("store_code");
     println!("stored code id:     {code_id}");
 
     let addr = chain

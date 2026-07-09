@@ -112,9 +112,12 @@ impl CwMockProvider {
         self.app.borrow_mut()
     }
 
-    /// Upload wasm to the chain and return its code id.
-    pub async fn store_code(&self, code: CwCode) -> u64 {
-        self.app.borrow_mut().store_code(code)
+    /// Upload a contract to the chain and return its code id, recording `creator` as the
+    /// uploading account (mirroring the sender a live chain's `MsgStoreCode` records).
+    pub async fn store_code(&self, creator: &Addr, code: CwCode) -> u64 {
+        self.app
+            .borrow_mut()
+            .store_code_with_creator(creator.clone(), code)
     }
 
     /// Instantiate a contract from an uploaded code id.

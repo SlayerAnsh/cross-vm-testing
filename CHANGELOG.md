@@ -4,7 +4,11 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
-### Added (raw storage reads on every VM, `AnyChain::chain_id`)
+### Changed (one backend-agnostic `store_code` for CosmWasm)
+
+* **Breaking:** `CwChain::store_code_wasm` and the always-erroring RPC stub `CwRpcProvider::store_code(CwCode)` are removed. A single `CwChain::store_code(code, wallet)` now covers both backends: it takes anything convertible into the new `CwCodeSource` struct (a native `cw-multi-test` contract object via `From<CwCode>`, compiled wasm bytes via `From<Vec<u8>>`, or `CwCodeSource::both(native, wasm)` carrying both representations so identical deploy code runs on the mock and on a live chain) plus an explicit signing wallet label. A source missing the representation the active backend needs surfaces as `CwError::Unimplemented` with a message naming the fix.
+* **Breaking:** `CwMockProvider::store_code(creator, code)` takes the uploader's address and records it through `App::store_code_with_creator`, mirroring the sender a live chain's `MsgStoreCode` records. `CwRpcProvider::store_code_wasm` is renamed to `store_code` (same wasm-plus-signer signature).
+* `CwContract::store_code` takes `impl Into<CwCodeSource>` and routes through the merged `CwChain::store_code`, so the stateful lifecycle handle now works on the mock backend too, not only live RPC.
 
 * Every VM now exposes idiomatic raw state reads on its providers and chain enum, following each VM's native naming:
   * CosmWasm: `query_wasm_raw(addr, key)` returns `Option<Vec<u8>>` for a contract's exact storage key (mock through `cw-multi-test`'s querier, RPC through the wasm module's `RawContractState` over ABCI; both return `None` for an absent key). `get_contract_states(addr)` dumps every raw `(key, value)` pair of a contract in ascending key order (mock through `App::dump_wasm_raw`, RPC through `AllContractState` with transparent pagination).
