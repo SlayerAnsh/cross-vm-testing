@@ -185,6 +185,13 @@ impl TronMockProvider {
             })
     }
 
+    /// Read the raw storage value at `slot` for `addr`.
+    pub async fn get_storage_at(&self, addr: &TronAddress, slot: U256) -> Result<U256, TronError> {
+        self.core
+            .storage(addr.as_evm(), slot)
+            .map_err(|f| TronError::Query(f.call_message("get_storage_at")))
+    }
+
     /// Freeze `trx_sun` sun of TRX for `who`, granting energy.
     /// Source: <https://developers.tron.network/docs/resource-model>
     pub fn freeze_for_energy(&self, who: &TronAddress, trx_sun: u64) {
@@ -382,6 +389,30 @@ mod tests {
             .await
             .expect("value-less call succeeds");
         assert_eq!(c.balance(&addr).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn reads_storage_slot_written_by_constructor() {
+        // Initcode whose constructor writes 42 into storage slot 0, then returns an empty runtime:
+        //   PUSH1 0x2a, PUSH1 0x00, SSTORE, PUSH1 0x00, PUSH1 0x00, RETURN.
+        let initcode = Bytes::from(vec![
+            0x60, 0x2a, 0x60, 0x00, 0x55, 0x60, 0x00, 0x60, 0x00, 0xf3,
+        ]);
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+        let addr = c
+            .deploy_create(initcode, [], &deployer)
+            .await
+            .expect("storage-writing deploy succeeds");
+        // The constructor wrote 42 at slot 0; an untouched slot reads as zero.
+        assert_eq!(
+            c.get_storage_at(&addr, U256::ZERO).await.unwrap(),
+            U256::from(42u64)
+        );
+        assert_eq!(
+            c.get_storage_at(&addr, U256::from(1u64)).await.unwrap(),
+            U256::ZERO
+        );
     }
 
     #[tokio::test]

@@ -17,8 +17,10 @@ use cosmrs::proto::cosmos::auth::v1beta1::{
     BaseAccount, QueryAccountRequest, QueryAccountResponse,
 };
 use cosmrs::proto::cosmos::bank::v1beta1::{QueryBalanceRequest, QueryBalanceResponse};
+use cosmrs::proto::cosmos::base::query::v1beta1::PageRequest;
 use cosmrs::proto::cosmwasm::wasm::v1::{
-    QuerySmartContractStateRequest, QuerySmartContractStateResponse,
+    QueryAllContractStateRequest, QueryAllContractStateResponse, QueryRawContractStateRequest,
+    QueryRawContractStateResponse, QuerySmartContractStateRequest, QuerySmartContractStateResponse,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -347,6 +349,75 @@ impl CwRpcProvider {
         let resp = QuerySmartContractStateResponse::decode(bytes.as_slice())
             .map_err(|e| CwError::Query(e.to_string()))?;
         serde_json::from_slice(&resp.data).map_err(|e| CwError::Query(e.to_string()))
+    }
+
+    /// Read a raw storage entry from a contract instance by its exact key.
+    ///
+    /// A missing key yields empty response data on the wasm module's raw query, which maps to
+    /// `None` here so the live and mock backends agree: `Some(bytes)` when the key exists,
+    /// `None` when it is absent.
+    pub async fn query_wasm_raw(
+        &self,
+        addr: &Addr,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, CwError> {
+        let req = QueryRawContractStateRequest {
+            address: addr.to_string(),
+            query_data: key.to_vec(),
+        };
+        let bytes = self
+            .abci_query(
+                "/cosmwasm.wasm.v1.Query/RawContractState",
+                req.encode_to_vec(),
+            )
+            .await?;
+        let resp = QueryRawContractStateResponse::decode(bytes.as_slice())
+            .map_err(|e| CwError::Query(e.to_string()))?;
+        if resp.data.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(resp.data))
+        }
+    }
+
+    /// Dump every raw key-value pair held in a contract's storage, in ascending key order.
+    ///
+    /// Pages through the wasm module's `AllContractState` query, following each response's
+    /// `next_key` until it comes back empty and accumulating every `(key, value)` model. The
+    /// order follows wasmd (ascending by raw key), so this agrees with the mock backend's dump.
+    pub async fn get_contract_states(
+        &self,
+        addr: &Addr,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CwError> {
+        let mut states = Vec::new();
+        let mut next_key: Vec<u8> = Vec::new();
+        loop {
+            let req = QueryAllContractStateRequest {
+                address: addr.to_string(),
+                // An empty `key` starts at the first page; a non-empty one resumes after it.
+                pagination: Some(PageRequest {
+                    key: next_key,
+                    offset: 0,
+                    limit: 0,
+                    count_total: false,
+                    reverse: false,
+                }),
+            };
+            let bytes = self
+                .abci_query(
+                    "/cosmwasm.wasm.v1.Query/AllContractState",
+                    req.encode_to_vec(),
+                )
+                .await?;
+            let resp = QueryAllContractStateResponse::decode(bytes.as_slice())
+                .map_err(|e| CwError::Query(e.to_string()))?;
+            states.extend(resp.models.into_iter().map(|m| (m.key, m.value)));
+            match resp.pagination {
+                Some(page) if !page.next_key.is_empty() => next_key = page.next_key,
+                _ => break,
+            }
+        }
+        Ok(states)
     }
 }
 

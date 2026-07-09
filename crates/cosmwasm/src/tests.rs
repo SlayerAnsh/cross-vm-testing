@@ -113,3 +113,117 @@ async fn rpc_write_paths_unimplemented() {
     let addr = cosmwasm_std::Addr::unchecked("osmo1xyz");
     assert!(chain.set_balance(&addr, "uosmo", 1).await.is_err());
 }
+
+#[tokio::test]
+async fn query_wasm_raw_reads_item_storage() {
+    use cosmwasm_std::Empty;
+    use counter::{ExecuteMsg, InstantiateMsg};
+    use cw_multi_test::{Contract, ContractWrapper};
+
+    let mut chain = OSMOSIS.mock(empty_wallets());
+    let deployer = chain.new_account("deployer").await;
+
+    let code: Box<dyn Contract<Empty, Empty>> = Box::new(ContractWrapper::new(
+        counter::execute,
+        counter::instantiate,
+        counter::query,
+    ));
+    let code_id = chain.store_code(code).await;
+    let contract = chain
+        .instantiate(code_id, InstantiateMsg {}, &deployer, &[], "counter")
+        .await
+        .expect("instantiate");
+
+    // The counter contract keeps its count in a cw-storage-plus `Item::new("counter")`, which
+    // lands under the raw storage key `b"counter"`, JSON-encoded (`0u64` -> b"0").
+    let raw = chain
+        .query_wasm_raw(&contract, b"counter")
+        .await
+        .expect("raw query")
+        .expect("counter key present after instantiate");
+    assert_eq!(
+        serde_json::from_slice::<u64>(&raw).expect("raw bytes parse as u64"),
+        0
+    );
+
+    // Two increments later, the same raw key reflects the new value.
+    for _ in 0..2 {
+        chain
+            .execute_contract(&contract, ExecuteMsg::Increment {}, &deployer, &[])
+            .await
+            .expect("increment");
+    }
+    let raw = chain
+        .query_wasm_raw(&contract, b"counter")
+        .await
+        .expect("raw query")
+        .expect("counter key present");
+    assert_eq!(
+        serde_json::from_slice::<u64>(&raw).expect("raw bytes parse as u64"),
+        2
+    );
+
+    // A key the contract never writes comes back as `None`.
+    assert!(chain
+        .query_wasm_raw(&contract, b"missing")
+        .await
+        .expect("raw query")
+        .is_none());
+}
+
+#[tokio::test]
+async fn get_contract_states_dumps_all_storage() {
+    use cosmwasm_std::Empty;
+    use counter::{ExecuteMsg, InstantiateMsg};
+    use cw_multi_test::{Contract, ContractWrapper};
+
+    let mut chain = OSMOSIS.mock(empty_wallets());
+    let deployer = chain.new_account("deployer").await;
+
+    let code: Box<dyn Contract<Empty, Empty>> = Box::new(ContractWrapper::new(
+        counter::execute,
+        counter::instantiate,
+        counter::query,
+    ));
+    let code_id = chain.store_code(code).await;
+    let contract = chain
+        .instantiate(code_id, InstantiateMsg {}, &deployer, &[], "counter")
+        .await
+        .expect("instantiate");
+
+    // The full dump carries the counter's `Item::new("counter")` entry under raw key `b"counter"`,
+    // JSON-encoded (`0u64` -> b"0"). Contract-info-only keys are harmless: we only assert the
+    // counter pair is present among whatever the dump returns.
+    let states = chain
+        .get_contract_states(&contract)
+        .await
+        .expect("dump states");
+    let counter = states
+        .iter()
+        .find(|(k, _)| k.as_slice() == b"counter")
+        .expect("counter key present after instantiate");
+    assert_eq!(
+        serde_json::from_slice::<u64>(&counter.1).expect("raw bytes parse as u64"),
+        0
+    );
+
+    // Two increments later, the dump reflects the new value under the same key.
+    for _ in 0..2 {
+        chain
+            .execute_contract(&contract, ExecuteMsg::Increment {}, &deployer, &[])
+            .await
+            .expect("increment");
+    }
+    let states = chain
+        .get_contract_states(&contract)
+        .await
+        .expect("dump states");
+    let counter = states
+        .iter()
+        .find(|(k, _)| k.as_slice() == b"counter")
+        .expect("counter key present");
+    assert_eq!(
+        serde_json::from_slice::<u64>(&counter.1).expect("raw bytes parse as u64"),
+        2
+    );
+}

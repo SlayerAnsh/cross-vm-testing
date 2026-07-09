@@ -167,6 +167,14 @@ impl TronChain {
         }
     }
 
+    /// Read the raw storage value at `slot` for `addr`.
+    pub async fn get_storage_at(&self, addr: &TronAddress, slot: U256) -> Result<U256, TronError> {
+        match self {
+            TronChain::Mock(p) => p.get_storage_at(addr, slot).await,
+            TronChain::Rpc(p) => p.get_storage_at(addr, slot).await,
+        }
+    }
+
     /// Ensure `who` holds at least `amount` (sun, or token base units) of `asset`.
     ///
     /// Mock native: mints the shortfall. Mock TRC20: validates `balanceOf`. RPC native:
@@ -314,6 +322,18 @@ mod tests {
         let a = chain.new_account("alice").await;
         assert!(a.to_base58().starts_with('T'));
         assert!(chain.balance(&a).await.unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn get_storage_at_plumbs_through_chain() {
+        // Exercise the `TronChain` enum dispatch: an unset slot reads as zero.
+        let mut chain =
+            TronChain::from(LOCAL.mock(Rc::new(WalletFactory::from_roster(&[]).unwrap())));
+        let a = chain.new_account("alice").await;
+        assert_eq!(
+            chain.get_storage_at(&a, U256::ZERO).await.unwrap(),
+            U256::ZERO
+        );
     }
 
     #[tokio::test]

@@ -212,6 +212,33 @@ impl CwChain {
         }
     }
 
+    /// Read a raw storage entry from a contract instance by its exact key.
+    ///
+    /// Returns `Some(bytes)` when the key exists and `None` when it is absent, on both backends.
+    pub async fn query_wasm_raw(
+        &self,
+        addr: &Addr,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, CwError> {
+        match self {
+            CwChain::Mock(p) => p.query_wasm_raw(addr, key).await,
+            CwChain::Rpc(p) => p.query_wasm_raw(addr, key).await,
+        }
+    }
+
+    /// Dump every raw key-value pair held in a contract's storage, in ascending key order.
+    ///
+    /// Returns all `(key, value)` entries the contract has written, on both backends.
+    pub async fn get_contract_states(
+        &self,
+        addr: &Addr,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CwError> {
+        match self {
+            CwChain::Mock(p) => p.get_contract_states(addr).await,
+            CwChain::Rpc(p) => p.get_contract_states(addr).await,
+        }
+    }
+
     /// Ensure `who` holds at least `amount` of `asset`.
     ///
     /// Mock native: mints the shortfall. Mock cw20: validates the real balance. RPC native:

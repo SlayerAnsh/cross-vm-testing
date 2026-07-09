@@ -244,6 +244,16 @@ impl RevmCore {
         Ok(info.map(|i| i.balance).unwrap_or_default())
     }
 
+    /// The storage value at `slot` for `addr`, as revm's `U256`.
+    pub fn storage(&self, addr: Address, slot: U256) -> Result<U256, ExecFailure> {
+        let evm = self.evm.borrow();
+        evm.ctx
+            .journaled_state
+            .db()
+            .storage_ref(addr, slot)
+            .map_err(|e| ExecFailure::Internal(format!("{e:?}")))
+    }
+
     /// Set the native balance of `addr`.
     pub fn set_balance(&self, addr: Address, amount: U256) {
         let mut evm = self.evm.borrow_mut();

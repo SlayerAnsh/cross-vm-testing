@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use crate::chains::{ETHEREUM, LOCAL};
-use alloy_primitives::U256;
+use alloy_primitives::{Bytes, U256};
 use cross_vm_core::{BlockTime, ChainProvider, ChainSpec, WalletFactory};
 
 fn empty_wallets() -> Rc<WalletFactory> {
@@ -63,6 +63,41 @@ async fn blocks_advance() {
     let h0 = chain.block_height().await;
     chain.advance_blocks(5, BlockTime::Increment(1)).await;
     assert_eq!(chain.block_height().await, h0 + 5);
+}
+
+#[tokio::test]
+async fn reads_storage_slot_written_by_constructor() {
+    // Initcode whose constructor writes 42 into storage slot 0, then returns an empty runtime:
+    //   PUSH1 0x2a, PUSH1 0x00, SSTORE, PUSH1 0x00, PUSH1 0x00, RETURN.
+    let initcode = Bytes::from(vec![
+        0x60, 0x2a, 0x60, 0x00, 0x55, 0x60, 0x00, 0x60, 0x00, 0xf3,
+    ]);
+    let mut chain = LOCAL.mock(empty_wallets());
+    let deployer = chain.new_account("deployer").await;
+    let addr = chain
+        .deploy_create(initcode, [], &deployer)
+        .await
+        .expect("storage-writing deploy succeeds");
+    // The constructor wrote 42 at slot 0; an untouched slot reads as zero.
+    assert_eq!(
+        chain.get_storage_at(&addr, U256::ZERO).await.unwrap(),
+        U256::from(42u64)
+    );
+    assert_eq!(
+        chain.get_storage_at(&addr, U256::from(1u64)).await.unwrap(),
+        U256::ZERO
+    );
+}
+
+#[tokio::test]
+async fn get_storage_at_plumbs_through_chain() {
+    // Exercise the `EvmChain` enum dispatch: an unset slot reads as zero.
+    let mut chain = crate::EvmChain::from(LOCAL.mock(empty_wallets()));
+    let alice = chain.new_account("alice").await;
+    assert_eq!(
+        chain.get_storage_at(&alice, U256::ZERO).await.unwrap(),
+        U256::ZERO
+    );
 }
 
 #[tokio::test]

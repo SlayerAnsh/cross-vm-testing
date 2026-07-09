@@ -5,7 +5,8 @@
 //! ([`deploy_create`], [`call`]) sign the transaction id with the wallet's secp256k1 key and
 //! broadcast. Only `set_balance` stays [`TronError::Unimplemented`] (a live chain cannot mint).
 //!
-//! Transport is TronGrid HTTP (`/wallet/*`), not gRPC, so the crate keeps no Tron-specific
+//! Transport is TronGrid HTTP (`/wallet/*`, plus the Ethereum-compatible `/jsonrpc` endpoint for
+//! [`get_storage_at`]), not gRPC, so the crate keeps no Tron-specific
 //! dependency (just `reqwest` + `serde_json`). The flow for a write is the standard java-tron
 //! three step: build the unsigned transaction at the node (`/wallet/deploycontract` or
 //! `/wallet/triggersmartcontract`), sign its `txID` locally, then `/wallet/broadcasttransaction`.
@@ -14,6 +15,7 @@
 //! [`balance`]: TronRpcProvider::balance
 //! [`block_height`]: ChainProvider::block_height
 //! [`static_call`]: TronRpcProvider::static_call
+//! [`get_storage_at`]: TronRpcProvider::get_storage_at
 //! [`deploy_create`]: TronRpcProvider::deploy_create
 //! [`call`]: TronRpcProvider::call
 
@@ -87,6 +89,45 @@ impl TronRpcProvider {
             .json::<Value>()
             .await
             .map_err(|e| TronError::Rpc(format!("decode {path}: {e}")))
+    }
+
+    /// POST a JSON-RPC `method` to TronGrid's Ethereum-compatible endpoint (`<rest_base>/jsonrpc`)
+    /// and return the `result` member.
+    ///
+    /// TronGrid mounts the standard Ethereum JSON-RPC alongside the `/wallet/*` REST API; a
+    /// JSON-RPC-level `error` member surfaces as [`TronError::Rpc`].
+    /// Source: <https://developers.tron.network/reference/eth_getstorageat>
+    async fn post_jsonrpc(&self, method: &str, params: Value) -> Result<Value, TronError> {
+        if self.rpc_url.is_empty() {
+            return Err(TronError::Rpc(format!(
+                "chain '{}' has no rpc_url; use a chain preset with an endpoint",
+                self.info.chain_id
+            )));
+        }
+        let url = format!("{}/jsonrpc", self.rpc_url);
+        let resp = self
+            .http
+            .post(url)
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": method,
+                "params": params,
+            }))
+            .send()
+            .await
+            .map_err(|e| TronError::Rpc(e.to_string()))?
+            .json::<Value>()
+            .await
+            .map_err(|e| TronError::Rpc(format!("decode {method}: {e}")))?;
+        if let Some(err) = resp.get("error").filter(|e| !e.is_null()) {
+            let msg = err["message"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| err.to_string());
+            return Err(TronError::Rpc(format!("{method}: {msg}")));
+        }
+        Ok(resp["result"].clone())
     }
 
     /// Current block number. Inherent fallible variant of the trait's infallible
@@ -233,6 +274,25 @@ impl TronRpcProvider {
         let bytes = hex::decode(hexstr)
             .map_err(|e| TronError::Query(format!("constant_result hex: {e}")))?;
         Ok(Bytes::from(bytes))
+    }
+
+    /// Read the raw 32-byte storage value at `slot` for `addr` via TronGrid's Ethereum-compatible
+    /// JSON-RPC (`eth_getStorageAt` at `<rest_base>/jsonrpc`).
+    ///
+    /// The address crosses the wire as the 20-byte EVM form ([`TronAddress::as_evm`]), not the
+    /// base58 or `0x41` Tron form. TRON only supports the `"latest"` block tag, so historical slot
+    /// reads are unavailable. Source: <https://developers.tron.network/reference/eth_getstorageat>
+    pub async fn get_storage_at(&self, addr: &TronAddress, slot: U256) -> Result<U256, TronError> {
+        let addr_hex = format!("{:#x}", addr.as_evm());
+        let slot_hex = format!("{slot:#x}");
+        let result = self
+            .post_jsonrpc("eth_getStorageAt", json!([addr_hex, slot_hex, "latest"]))
+            .await?;
+        let s = result
+            .as_str()
+            .ok_or_else(|| TronError::Query("eth_getStorageAt: non-string result".into()))?;
+        U256::from_str_radix(s.trim_start_matches("0x"), 16)
+            .map_err(|e| TronError::Query(format!("eth_getStorageAt parse: {e}")))
     }
 
     /// Sign an unsigned transaction's `txID` with `signer` and broadcast it.
@@ -467,6 +527,16 @@ mod tests {
             .deploy_create(Bytes::new(), Vec::<u8>::new(), &signer)
             .await;
         assert!(matches!(res, Err(TronError::Deploy(_) | TronError::Rpc(_))));
+    }
+
+    #[tokio::test]
+    async fn get_storage_at_no_endpoint_errors_offline() {
+        // LOCAL has no rpc_url: the JSON-RPC slot read fails fast as `Rpc` (a live method now, not
+        // `Unimplemented`), without touching the network.
+        let mut c = TronRpcProvider::new(LOCAL, Rc::new(WalletFactory::from_roster(&[]).unwrap()));
+        let addr = c.new_account("x").await;
+        let res = c.get_storage_at(&addr, U256::ZERO).await;
+        assert!(matches!(res, Err(TronError::Rpc(_))));
     }
 
     #[test]

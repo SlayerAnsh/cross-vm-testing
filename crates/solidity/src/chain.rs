@@ -166,6 +166,14 @@ impl EvmChain {
         }
     }
 
+    /// Read the raw storage value at `slot` for `addr`.
+    pub async fn get_storage_at(&self, addr: &Address, slot: U256) -> Result<U256, EvmError> {
+        match self {
+            EvmChain::Mock(p) => p.get_storage_at(addr, slot).await,
+            EvmChain::Rpc(p) => p.get_storage_at(addr, slot).await,
+        }
+    }
+
     /// Ensure `who` holds at least `amount` of `asset`.
     ///
     /// Mock native: mints the shortfall. Mock ERC-20: validates `balanceOf`. RPC native:

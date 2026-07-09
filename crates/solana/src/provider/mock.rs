@@ -119,6 +119,27 @@ impl SvmMockProvider {
     pub async fn get_account(&self, pubkey: &Address) -> Option<Account> {
         self.svm.borrow().get_account(pubkey)
     }
+
+    /// Read the raw account data bytes for `pubkey` (SVM equivalent of raw storage).
+    pub async fn get_account_data(&self, pubkey: &Address) -> Option<Vec<u8>> {
+        self.get_account(pubkey).await.map(|a| a.data)
+    }
+
+    /// Read a fixed-width window `[offset, offset + len)` of `pubkey`'s account data.
+    ///
+    /// Returns `None` when the account is missing or the requested range is not fully within
+    /// the account data (partial/out-of-range slices are never truncated), so a `Some` result
+    /// always carries exactly `len` bytes.
+    pub async fn get_account_data_slice(
+        &self,
+        pubkey: &Address,
+        offset: usize,
+        len: usize,
+    ) -> Option<Vec<u8>> {
+        self.get_account(pubkey)
+            .await
+            .and_then(|a| a.data.get(offset..offset + len).map(<[u8]>::to_vec))
+    }
 }
 
 impl ChainProvider for SvmMockProvider {

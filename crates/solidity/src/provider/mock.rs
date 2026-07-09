@@ -111,6 +111,13 @@ impl EvmMockProvider {
                 other => EvmError::Execute(other.call_message("static_call")),
             })
     }
+
+    /// Read the raw storage value at `slot` for `addr`.
+    pub async fn get_storage_at(&self, addr: &Address, slot: U256) -> Result<U256, EvmError> {
+        self.core
+            .storage(*addr, slot)
+            .map_err(|f| EvmError::Query(f.call_message("get_storage_at")))
+    }
 }
 
 /// The result of a state-mutating EVM [`call`](EvmMockProvider::call): the return data, the
