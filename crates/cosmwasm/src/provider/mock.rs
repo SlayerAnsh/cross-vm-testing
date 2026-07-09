@@ -19,7 +19,7 @@ use cw_multi_test::{
 };
 
 use crate::chains::CosmosChainInfo;
-use crate::error::CwError;
+use crate::error::{any_chain, CwError};
 use crate::msg::CwSerde;
 use crate::provider::CwExecution;
 
@@ -132,7 +132,7 @@ impl CwMockProvider {
         self.app
             .borrow_mut()
             .instantiate_contract(code_id, sender.clone(), &init, funds, label, None)
-            .map_err(|e| CwError::Deploy(e.to_string()))
+            .map_err(|e| CwError::Deploy(any_chain(&e)))
     }
 
     /// Execute a state-mutating message against a contract instance.
@@ -151,7 +151,7 @@ impl CwMockProvider {
             .app
             .borrow_mut()
             .execute_contract(sender.clone(), addr.clone(), &msg, funds)
-            .map_err(|e| CwError::Execute(e.to_string()))?;
+            .map_err(|e| CwError::Execute(any_chain(&e)))?;
         Ok(CwExecution {
             tx_hash: Some(self.next_tx_hash(sender, addr)),
             response,
@@ -254,7 +254,7 @@ impl ChainProvider for CwMockProvider {
             .init_modules(|router, _api, storage| {
                 router.bank.init_balance(storage, &addr, balances)
             })
-            .map_err(|e| CwError::Balance(e.to_string()))
+            .map_err(|e| CwError::Balance(any_chain(&e)))
     }
 
     async fn block_height(&self) -> u64 {

@@ -17,6 +17,11 @@ All notable changes to this project are documented here. The format follows Keep
   * Solana: `get_account_data(pubkey)` returns the full account data bytes. `get_account_data_slice(pubkey, offset, len)` reads a fixed-width window (mock slices locally, RPC uses `getAccountInfo` with `dataSlice`; both return `None` unless the whole window exists). `SvmChain::find_program_account(program_id, seeds)` derives the PDA that names a program's state cell, and `get_program_state(program_id, seeds, offset, len)` composes the two into a point read, the SVM analog of `get_storage_at`.
 * `AnyChain::chain_id()` returns the underlying spec's chain id (`&str`) at the top level, so callers no longer downcast to the VM chain to read it. Sync, like `kind()`.
 
+### Fixed (CosmWasm errors keep their root cause)
+
+* The mock CosmWasm backend rendered `cw-multi-test`'s `anyhow` errors with `to_string()`, which prints only the outermost `.context(..)` layer. An execution failure therefore surfaced as `Error executing WasmMsg: sender: .. Execute { .. }` with the contract's actual error (`Unauthorized`, an overflow, a `Std error`, ..) silently dropped. `instantiate`, `execute_contract`, and `set_balance` now flatten the whole error chain, appending each link on its own `caused by:` line.
+* `From<CrossVmError> for CwError` collapsed every variant into `CwError::Wallet`, so a revert that round-tripped through `CrossVmError` came back labelled `wallet: ..`. Deploy, execute, query, balance, unimplemented, and wallet errors now keep their variant across the conversion.
+
 ### Fixed (CosmWasm transaction hash reaches the caller)
 
 * **Breaking (CosmWasm execute return type):** the CosmWasm execute path now returns a `CwExecution { tx_hash: Option<String>, response: CwAppResponse }` wrapper instead of a bare `CwAppResponse`. This covers `CwChain::execute_contract`, `CwContract::execute` / `execute_with_funds`, and the `CwExecuteFns`-generated typed methods. On the live RPC backend the Tendermint `broadcast_tx_commit` hash (previously computed then discarded) is now carried through; the in-process mock leaves `tx_hash` as `None`. `CwExecution` derefs to the inner `CwAppResponse`, so existing `.events` / `.data` reads keep working; call sites that build an envelope pass `exec.response` and `exec.tx_hash`.
