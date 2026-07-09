@@ -161,7 +161,7 @@ ops = 5
             assert_eq!(f.common.seed, SeedSpec::Fixed(0));
             assert_eq!(f.common.check_every, 1);
             assert!(!f.common.stats);
-            assert_eq!(f.common.artifacts_dir, "target/cross-vm");
+            assert_eq!(f.common.artifacts_dir, "run-logs/replay");
             assert_eq!(f.common.shrink_limit, 256);
         }
         other => panic!("expected Fuzz, got {other:?}"),

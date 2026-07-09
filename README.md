@@ -311,7 +311,7 @@ cargo run -p cross-vm-tests --bin cross-vm -- run vault.cross-vm.toml --profile 
 cargo run -p cross-vm-tests --bin cross-vm -- list vault.cross-vm.toml
 
 # re-run a failing run's replay artifact
-cargo run -p cross-vm-tests --bin cross-vm -- replay target/cross-vm/vault-deep-....replay.toml
+cargo run -p cross-vm-tests --bin cross-vm -- replay run-logs/replay/vault-deep-....replay.toml
 ```
 
 Exit codes are a stable CI contract: `0` all runs passed, `1` a `Bug` or invariant violation, `2` an infrastructure or setup failure, `3` a config or usage error. Every failing fuzz, invariant, or endurance run writes a self contained `*.replay.toml` artifact (itself a valid config), so `replay` closes the failure to regression loop with no bespoke tooling. `--json-report <path>` emits a machine readable envelope (`schema_version = 1`). Environment overrides follow a fixed precedence: a CLI flag beats a `CROSS_VM_*` variable, which beats a profile key, which beats the built in default. See `docs/config-runs-spec.md` for the full schema.

@@ -131,7 +131,7 @@ fn default_check_every() -> usize {
 }
 
 fn default_artifacts_dir() -> String {
-    "target/cross-vm".to_string()
+    "run-logs/replay".to_string()
 }
 
 fn default_shrink_limit() -> usize {
@@ -151,7 +151,7 @@ pub struct CommonKeys {
     pub check_every: usize,
     /// Enables `Runner::with_stats()`. Defaults to `false`.
     pub stats: bool,
-    /// Directory replay artifacts and reports land in. Defaults to `"target/cross-vm"`.
+    /// Directory replay artifacts and reports land in. Defaults to `"run-logs/replay"`.
     pub artifacts_dir: String,
     /// Optional path to write the run report as JSON.
     pub json_report: Option<String>,

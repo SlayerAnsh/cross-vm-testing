@@ -37,3 +37,7 @@ examples/integration-tests/target/
 # Test-generated artifacts/reports (redirected to <crate>/tests_result/ instead of any target/ dir)
 tests_result/
 **/tests_result/
+
+# Default replay-artifact/report dir (artifacts_dir default: run-logs/replay)
+run-logs/
+**/run-logs/

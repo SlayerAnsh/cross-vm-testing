@@ -219,13 +219,13 @@ Two caveats to keep in mind when an inherited phase fails: shrink is disabled fo
 
 ## The failure to replay loop
 
-Any fuzz, invariant, or endurance profile that fails writes a self contained artifact under its `artifacts_dir` (default `target/cross-vm`, overridable with `--artifacts-dir`): `<harness>-<profile>-<seed>-<timestamp>.replay.toml`. The artifact is itself a valid config file, so closing the loop needs no bespoke tooling.
+Any fuzz, invariant, or endurance profile that fails writes a self contained artifact under its `artifacts_dir` (default `run-logs/replay`, overridable with `--artifacts-dir`): `<harness>-<profile>-<seed>-<timestamp>.replay.toml`. The artifact is itself a valid config file, so closing the loop needs no bespoke tooling.
 
 ```sh
 cargo run -p cross-vm-tests --bin cross-vm -- run examples/cross-vm-tests/vault.cross-vm.toml --profile deep
-# ... fails; the log prints: wrote replay artifact: target/cross-vm/vault-deep-6021349-....replay.toml
+# ... fails; the log prints: wrote replay artifact: run-logs/replay/vault-deep-6021349-....replay.toml
 
-cargo run -p cross-vm-tests --bin cross-vm -- replay target/cross-vm/vault-deep-6021349-....replay.toml
+cargo run -p cross-vm-tests --bin cross-vm -- replay run-logs/replay/vault-deep-6021349-....replay.toml
 ```
 
 `cross-vm replay <artifact>` is sugar for `run <artifact> --profile replay`, reusing the ordinary run path end to end. Exit code `0` means the artifact's failure no longer reproduces (a fix landed since the artifact was written); a nonzero code means it still does.
