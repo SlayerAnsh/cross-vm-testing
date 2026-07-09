@@ -341,7 +341,7 @@ Copy `.env.example` to `.env` and fill in your mnemonics. An all `auto` roster (
 
 ## Live RPC providers
 
-Alongside the mock backends, each VM crate ships an RPC provider (`CwRpcProvider`, `EvmRpcProvider`, `SvmRpcProvider`) that talks to a real node at the endpoint baked into the chain preset (`OSMOSIS_TESTNET.rpc(wallets)`, and so on). All three serve live reads; CosmWasm and EVM also sign and broadcast writes (`store_code_wasm`/`instantiate`/`execute_contract` and `deploy_create`/`call`). Solana writes are not implemented yet. CosmWasm reads block height, native balance, and smart queries; EVM reads block number, native balance, and `eth_call`; Solana reads slot, lamport balance, and `getAccountInfo`. Construction and a read flow are shown in the `*_rpc_quickstart` examples:
+Alongside the mock backends, each VM crate ships an RPC provider (`CwRpcProvider`, `EvmRpcProvider`, `SvmRpcProvider`) that talks to a real node at the endpoint baked into the chain preset (`OSMOSIS_TESTNET.rpc(wallets)`, and so on). All three serve live reads; CosmWasm and EVM also sign and broadcast writes (`store_code`/`instantiate`/`execute_contract` and `deploy_create`/`call`). Solana writes are not implemented yet. CosmWasm reads block height, native balance, and smart queries; EVM reads block number, native balance, and `eth_call`; Solana reads slot, lamport balance, and `getAccountInfo`. Construction and a read flow are shown in the `*_rpc_quickstart` examples:
 
 ```
 cargo run -p cross-vm-cosmwasm --example cosmwasm_rpc_quickstart
@@ -439,7 +439,7 @@ cargo test -p cross-vm-tests --test harness --features "fuzz invariant endurance
 | --- | --- | --- | --- | --- | --- |
 | Mock provider (in process VM) | Supported | Supported | Supported | Supported | `cw-multi-test` / `revm` / `litesvm`; Tron is a `revm` core with TVM-accurate layers |
 | Live RPC reads | Supported | Supported | Supported | Supported | validated on `osmo-test-5`, Ethereum Sepolia, Solana Devnet; Tron RPC reads over TronGrid HTTP (block height, native balance, `triggerconstantcontract`), exercised against Nile |
-| Live RPC writes (deploy + call) | Supported | Supported | Planned | Supported | CosmWasm/EVM/Tron sign and broadcast (CosmWasm deploy via `store_code_wasm` with compiled bytes; Tron signs the `txID` and broadcasts over TronGrid HTTP); Solana writes return `Unimplemented`. `set_balance` is `Unimplemented` on every RPC backend (a live chain cannot mint). On mocks, `set_balance(addr, denom, amount)` mints any bank denom on CosmWasm and accepts only the native symbol on EVM, Solana, and Tron. |
+| Live RPC writes (deploy + call) | Supported | Supported | Planned | Supported | CosmWasm/EVM/Tron sign and broadcast (CosmWasm deploy via `store_code` with compiled wasm bytes; Tron signs the `txID` and broadcasts over TronGrid HTTP); Solana writes return `Unimplemented`. `set_balance` is `Unimplemented` on every RPC backend (a live chain cannot mint). On mocks, `set_balance(addr, denom, amount)` mints any bank denom on CosmWasm and accepts only the native symbol on EVM, Solana, and Tron. |
 | Wallet derivation (mnemonic to signer) | Supported | Supported | Supported | Supported | coin types 118 / 60 / 501 / 195, global (chain, address) broadcast lock on the RPC path |
 | Cross VM contract wrapper (`#[cross_vm_contract]`) | Supported | Supported | Supported | Supported | typed CosmWasm/EVM calls; Solana and Tron hooks hand written |
 | Property `Harness` (fuzz / invariant / endurance / matrix) | Supported (VM agnostic, runs over any injected chain) |||||

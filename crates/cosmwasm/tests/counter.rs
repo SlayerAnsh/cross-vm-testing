@@ -29,7 +29,7 @@ async fn deploy_increment_query() {
     let mut chain: CwMockProvider = OSMOSIS.mock(empty_wallets());
     let deployer = chain.new_account("deployer").await;
 
-    let code_id = chain.store_code(counter_contract()).await;
+    let code_id = chain.store_code(&deployer, counter_contract()).await;
     let contract = chain
         .instantiate(code_id, InstantiateMsg {}, &deployer, &[], "counter")
         .await

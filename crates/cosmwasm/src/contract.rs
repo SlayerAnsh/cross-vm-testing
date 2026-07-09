@@ -28,6 +28,7 @@ use cross_vm_core::WalletLabel;
 use crate::chain::CwChain;
 use crate::error::CwError;
 use crate::msg::CwSerde;
+use crate::provider::CwCodeSource;
 use crate::CwExecution;
 
 /// Compile-time marker tying a CosmWasm contract's message types to a zero-sized handle tag.
@@ -82,14 +83,18 @@ impl<I> CwContract<I> {
         }
     }
 
-    /// Upload `wasm` and record the resulting `code_id` internally, then return the handle for
-    /// chaining into [`instantiate`](Self::instantiate). Signed by wallet `wallet`.
+    /// Upload contract code and record the resulting `code_id` internally, then return the
+    /// handle for chaining into [`instantiate`](Self::instantiate). Signed by wallet `wallet`.
+    ///
+    /// Backend-agnostic like [`CwChain::store_code`]: pass compiled wasm bytes for a live RPC
+    /// chain, a native `cw-multi-test` contract object for the mock, or a
+    /// [`CwCodeSource::both`] carrying both so the same handle code runs on either backend.
     pub async fn store_code(
         mut self,
-        wasm: Vec<u8>,
+        code: impl Into<CwCodeSource>,
         wallet: WalletLabel<'_>,
     ) -> Result<Self, CwError> {
-        self.code_id = Some(self.chain.store_code_wasm(wasm, wallet).await?);
+        self.code_id = Some(self.chain.store_code(code, wallet).await?);
         Ok(self)
     }
 

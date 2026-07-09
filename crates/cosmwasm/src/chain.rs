@@ -20,7 +20,7 @@ use crate::asset::CwAsset;
 use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
-use crate::provider::{CwCode, CwExecution, CwMockProvider, CwRpcProvider};
+use crate::provider::{CwCodeSource, CwExecution, CwMockProvider, CwRpcProvider};
 use crate::wallet::CosmosSigner;
 
 /// CW20 balance query message for [`CwChain::ensure_asset`].
@@ -127,32 +127,44 @@ impl CwChain {
         Ok(addr)
     }
 
-    /// Upload a `cw-multi-test` contract object to the mock chain and return its code id. Code
-    /// upload needs no signer on the mock. For a live RPC chain use
-    /// [`store_code_wasm`](Self::store_code_wasm) with compiled wasm bytes instead.
-    pub async fn store_code(&self, code: CwCode) -> Result<u64, CwError> {
-        match self {
-            CwChain::Mock(p) => Ok(p.store_code(code).await),
-            CwChain::Rpc(p) => p.store_code(code).await,
-        }
-    }
-
-    /// Upload compiled wasm bytecode to the chain, signed by wallet `wallet`, and return its
-    /// code id. This is the live-RPC analogue of [`store_code`](Self::store_code); the mock
-    /// backend runs native contract objects, not wasm, so it reports an error.
-    pub async fn store_code_wasm(
+    /// Upload contract code to the chain, uploaded by wallet `wallet`, and return its code id.
+    ///
+    /// One backend-agnostic entry point: pass anything convertible into a [`CwCodeSource`]. A
+    /// native `cw-multi-test` contract object ([`crate::CwCode`]) runs on the mock backend,
+    /// compiled wasm bytes (`Vec<u8>`) upload on the live RPC backend, and
+    /// [`CwCodeSource::both`] carries the two representations so identical deploy code runs on
+    /// either backend without branching. A source missing the representation the active backend
+    /// needs surfaces as [`CwError::Unimplemented`].
+    ///
+    /// The mock records the wallet's address as the code creator; the RPC path signs and
+    /// broadcasts a `MsgStoreCode` under the process-wide broadcast lock.
+    pub async fn store_code(
         &self,
-        wasm: Vec<u8>,
+        code: impl Into<CwCodeSource>,
         wallet: WalletLabel<'_>,
     ) -> Result<u64, CwError> {
         let signer = self.acquire(wallet).await?;
         match self {
-            CwChain::Mock(_) => Err(CwError::Unimplemented(
-                "mock store_code_wasm (use store_code with a cw-multi-test Contract object)".into(),
-            )),
+            CwChain::Mock(p) => {
+                let native = code.into().native.ok_or_else(|| {
+                    CwError::Unimplemented(
+                        "mock store_code cannot run wasm bytes; provide a native cw-multi-test \
+                         contract object (via From<CwCode> or CwCodeSource::both)"
+                            .into(),
+                    )
+                })?;
+                Ok(p.store_code(&signer.address, native).await)
+            }
             CwChain::Rpc(p) => {
+                let wasm = code.into().wasm.ok_or_else(|| {
+                    CwError::Unimplemented(
+                        "rpc store_code cannot run a native contract object; provide compiled \
+                         wasm bytes (via From<Vec<u8>> or CwCodeSource::both)"
+                            .into(),
+                    )
+                })?;
                 let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
-                p.store_code_wasm(wasm, &signer).await
+                p.store_code(wasm, &signer).await
             }
         }
     }

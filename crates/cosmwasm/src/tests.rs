@@ -128,7 +128,7 @@ async fn query_wasm_raw_reads_item_storage() {
         counter::instantiate,
         counter::query,
     ));
-    let code_id = chain.store_code(code).await;
+    let code_id = chain.store_code(&deployer, code).await;
     let contract = chain
         .instantiate(code_id, InstantiateMsg {}, &deployer, &[], "counter")
         .await
@@ -185,7 +185,7 @@ async fn get_contract_states_dumps_all_storage() {
         counter::instantiate,
         counter::query,
     ));
-    let code_id = chain.store_code(code).await;
+    let code_id = chain.store_code(&deployer, code).await;
     let contract = chain
         .instantiate(code_id, InstantiateMsg {}, &deployer, &[], "counter")
         .await

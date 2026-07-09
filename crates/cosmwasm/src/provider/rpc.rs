@@ -2,14 +2,14 @@
 //!
 //! [`CwRpcProvider`] talks to a real Cosmos node over Tendermint RPC. Read paths use ABCI
 //! queries with no signer: [`block_height`], [`balance`], and [`query_wasm_smart`]. Write paths
-//! ([`store_code_wasm`], [`instantiate`], [`execute_contract`]) sign with the wallet's secp256k1
+//! ([`store_code`], [`instantiate`], [`execute_contract`]) sign with the wallet's secp256k1
 //! key (account number + sequence + `SignDoc` + `broadcast_tx_commit`) and broadcast; only
 //! `set_balance` stays [`CwError::Unimplemented`] (a live chain cannot mint).
 //!
 //! [`block_height`]: CwRpcProvider::block_height
 //! [`balance`]: CwRpcProvider::balance
 //! [`query_wasm_smart`]: CwRpcProvider::query_wasm_smart
-//! [`store_code_wasm`]: CwRpcProvider::store_code_wasm
+//! [`store_code`]: CwRpcProvider::store_code
 //! [`instantiate`]: CwRpcProvider::instantiate
 //! [`execute_contract`]: CwRpcProvider::execute_contract
 
@@ -40,14 +40,14 @@ use crate::asset::CwAsset;
 use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
-use crate::provider::{CwCode, CwExecution};
+use crate::provider::CwExecution;
 use crate::wallet::CosmosSigner;
 
 /// A live-RPC CosmWasm provider. Chain-level reads and contract queries hit a real node via
-/// ABCI queries; the write paths ([`store_code_wasm`](Self::store_code_wasm),
+/// ABCI queries; the write paths ([`store_code`](Self::store_code),
 /// [`instantiate`](Self::instantiate), [`execute_contract`](Self::execute_contract)) sign with
-/// the wallet's secp256k1 key and broadcast. Only `set_balance` (and the trait-object
-/// [`store_code`](Self::store_code)) stay [`CwError::Unimplemented`].
+/// the wallet's secp256k1 key and broadcast. Only `set_balance` stays
+/// [`CwError::Unimplemented`] (a live chain cannot mint).
 #[derive(Clone)]
 pub struct CwRpcProvider {
     info: CosmosChainInfo,
@@ -236,13 +236,9 @@ impl CwRpcProvider {
 
     /// Upload raw wasm bytecode to the chain, signed by `signer`, and return its code id.
     ///
-    /// This is the RPC analogue of the mock's [`store_code`](Self::store_code): the mock takes a
-    /// `cw-multi-test` `Contract` object, a live chain takes compiled wasm bytes.
-    pub async fn store_code_wasm(
-        &self,
-        wasm: Vec<u8>,
-        signer: &CosmosSigner,
-    ) -> Result<u64, CwError> {
+    /// This is the RPC arm of [`crate::CwChain::store_code`]: a live chain takes compiled wasm
+    /// bytes, while the mock's `store_code` takes a native `cw-multi-test` `Contract` object.
+    pub async fn store_code(&self, wasm: Vec<u8>, signer: &CosmosSigner) -> Result<u64, CwError> {
         let msg = MsgStoreCode {
             sender: signer_account(signer)?,
             wasm_byte_code: wasm,
@@ -258,15 +254,6 @@ impl CwRpcProvider {
         find_attr(&events, "store_code", "code_id")?
             .parse::<u64>()
             .map_err(|e| CwError::Execute(format!("parse code_id: {e}")))
-    }
-
-    /// `store_code` is unavailable on the live RPC path because [`CwCode`] is a cw-multi-test
-    /// trait object, not wasm bytes; use [`store_code_wasm`](Self::store_code_wasm) with compiled
-    /// wasm instead.
-    pub async fn store_code(&self, _code: CwCode) -> Result<u64, CwError> {
-        Err(CwError::Unimplemented(
-            "rpc store_code (use store_code_wasm with compiled wasm bytes)".into(),
-        ))
     }
 
     /// Instantiate a contract from an uploaded code id, signed by `signer`.
