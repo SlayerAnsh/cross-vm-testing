@@ -88,7 +88,10 @@ mod tests {
             .context("Error executing WasmMsg:\n  sender: euclid1dz6")
             .unwrap_err();
 
-        assert_eq!(e.to_string(), "Error executing WasmMsg:\n  sender: euclid1dz6");
+        assert_eq!(
+            e.to_string(),
+            "Error executing WasmMsg:\n  sender: euclid1dz6"
+        );
         assert_eq!(
             any_chain(&e),
             "Error executing WasmMsg:\n  sender: euclid1dz6\n  caused by: Unauthorized"
