@@ -197,6 +197,53 @@ impl SvmRpcProvider {
             rent_epoch: value["rentEpoch"].as_u64().unwrap_or(0),
         }))
     }
+
+    /// Read the raw account data bytes (`getAccountInfo`) for `pubkey` (SVM equivalent of raw storage).
+    pub async fn get_account_data(&self, pubkey: &Address) -> Result<Option<Vec<u8>>, SvmError> {
+        Ok(self.get_account(pubkey).await?.map(|a| a.data))
+    }
+
+    /// Read a fixed-width window `[offset, offset + len)` of `pubkey`'s account data via
+    /// `getAccountInfo` with a server-side `dataSlice` (only the requested bytes cross the wire).
+    ///
+    /// Semantics are normalized to match the mock exactly, so a `Some` result always carries
+    /// exactly `len` bytes: a missing account yields `Ok(None)`, and because the RPC silently
+    /// clamps a slice that runs past the end of the account data, any decoded length other than
+    /// `len` (i.e. an out-of-range window) is also reported as `Ok(None)` rather than a short
+    /// buffer.
+    pub async fn get_account_data_slice(
+        &self,
+        pubkey: &Address,
+        offset: usize,
+        len: usize,
+    ) -> Result<Option<Vec<u8>>, SvmError> {
+        let result = self
+            .rpc(
+                "getAccountInfo",
+                json!([pubkey.to_string(), {
+                    "encoding": "base64",
+                    "commitment": self.commitment(),
+                    "dataSlice": { "offset": offset, "length": len },
+                }]),
+            )
+            .await?;
+        let value = &result["value"];
+        if value.is_null() {
+            return Ok(None);
+        }
+        let data_b64 = value["data"][0]
+            .as_str()
+            .ok_or_else(|| SvmError::Query("getAccountInfo: missing base64 data".into()))?;
+        let data = STANDARD
+            .decode(data_b64)
+            .map_err(|e| SvmError::Query(format!("getAccountInfo: bad base64: {e}")))?;
+        // The RPC clamps an out-of-range slice to whatever bytes exist; treat any short read as
+        // "range not fully present" to mirror the mock's all-or-nothing `get(offset..offset+len)`.
+        if data.len() != len {
+            return Ok(None);
+        }
+        Ok(Some(data))
+    }
 }
 
 impl ChainProvider for SvmRpcProvider {

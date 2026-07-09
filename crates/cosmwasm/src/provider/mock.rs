@@ -167,6 +167,34 @@ impl CwMockProvider {
             .query_wasm_smart(addr, &msg)
             .map_err(|e| CwError::Query(e.to_string()))
     }
+
+    /// Read a raw storage entry from a contract instance by its exact key.
+    ///
+    /// Returns `Some(bytes)` when the key exists and `None` when it is absent, matching the
+    /// live RPC backend (where an empty raw response maps to `None`).
+    pub async fn query_wasm_raw(
+        &self,
+        addr: &Addr,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, CwError> {
+        self.app
+            .borrow()
+            .wrap()
+            .query_wasm_raw(addr, key)
+            .map_err(|e| CwError::Query(e.to_string()))
+    }
+
+    /// Dump every raw key-value pair held in a contract's storage, in ascending key order.
+    ///
+    /// Returns all `(key, value)` entries the contract has written, matching the live RPC
+    /// backend's `AllContractState` query. Ordering follows wasmd (ascending by raw key).
+    pub async fn get_contract_states(
+        &self,
+        addr: &Addr,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CwError> {
+        // `App::dump_wasm_raw` ranges the contract's prefixed storage in ascending key order.
+        Ok(self.app.borrow().dump_wasm_raw(addr))
+    }
 }
 
 impl ChainProvider for CwMockProvider {

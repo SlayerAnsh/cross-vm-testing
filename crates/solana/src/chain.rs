@@ -154,6 +154,60 @@ impl SvmChain {
         }
     }
 
+    /// Read the raw account data bytes for `pubkey` (SVM equivalent of raw storage).
+    pub async fn get_account_data(&self, pubkey: &Address) -> Result<Option<Vec<u8>>, SvmError> {
+        match self {
+            SvmChain::Mock(p) => Ok(p.get_account_data(pubkey).await),
+            SvmChain::Rpc(p) => p.get_account_data(pubkey).await,
+        }
+    }
+
+    /// Read a fixed-width window `[offset, offset + len)` of `pubkey`'s account data.
+    ///
+    /// Both backends share all-or-nothing semantics: `Ok(None)` when the account is missing or
+    /// the requested range is not fully within the data, otherwise `Ok(Some(bytes))` where
+    /// `bytes.len() == len`.
+    pub async fn get_account_data_slice(
+        &self,
+        pubkey: &Address,
+        offset: usize,
+        len: usize,
+    ) -> Result<Option<Vec<u8>>, SvmError> {
+        match self {
+            SvmChain::Mock(p) => Ok(p.get_account_data_slice(pubkey, offset, len).await),
+            SvmChain::Rpc(p) => p.get_account_data_slice(pubkey, offset, len).await,
+        }
+    }
+
+    /// Derive the program-derived address (PDA) that `seeds` name under `program_id`.
+    ///
+    /// The seed set is the "storage key" that names a state cell owned by the program: a
+    /// program keeps its state in PDAs it deterministically derives from seeds, so
+    /// `(program_id, seeds)` addresses one such cell. Needs no backend, hence an associated fn.
+    pub fn find_program_account(program_id: &Address, seeds: &[&[u8]]) -> Address {
+        Address::find_program_address(seeds, program_id).0
+    }
+
+    /// Point-read a program's state cell: derive the PDA named by `seeds` under `program_id`,
+    /// then read the fixed-width window `[offset, offset + len)` of that account's data.
+    ///
+    /// This is the SVM analog of EVM `get_storage_at(addr, slot)` and CosmWasm
+    /// `query_wasm_raw(addr, key)`: the PDA seeds play the role of the storage key, and
+    /// `offset + len` pin the fixed-width location within the cell. Returns `Ok(None)` when the
+    /// PDA has no account or the window is not fully present (see [`get_account_data_slice`]).
+    ///
+    /// [`get_account_data_slice`]: SvmChain::get_account_data_slice
+    pub async fn get_program_state(
+        &self,
+        program_id: &Address,
+        seeds: &[&[u8]],
+        offset: usize,
+        len: usize,
+    ) -> Result<Option<Vec<u8>>, SvmError> {
+        let pda = Self::find_program_account(program_id, seeds);
+        self.get_account_data_slice(&pda, offset, len).await
+    }
+
     /// Ensure `who` holds at least `amount` of `asset`.
     ///
     /// Mock native: mints (sets) the lamport balance. Mock SPL: validates the token

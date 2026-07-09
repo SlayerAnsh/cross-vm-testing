@@ -64,6 +64,42 @@ async fn native_funding_mints_on_start() {
     assert!(bal >= 9_000_000);
 }
 
+#[test]
+fn chain_id_matches_typed_spec() {
+    let wallets = empty_wallets();
+
+    #[cfg(feature = "cw")]
+    {
+        let chain = CwChain::from(OSMOSIS.mock(wallets.clone()));
+        let expected = chain.chain_info().chain_id().to_string();
+        let any = AnyChain::from(chain);
+        assert_eq!(any.chain_id(), expected);
+    }
+    #[cfg(feature = "evm")]
+    {
+        let chain = EvmChain::from(ETHEREUM.mock(wallets.clone()));
+        let expected = chain.chain_info().chain_id().to_string();
+        let any = AnyChain::from(chain);
+        assert_eq!(any.chain_id(), expected);
+    }
+    #[cfg(feature = "solana")]
+    {
+        let chain = SvmChain::from(SOLANA_DEVNET.mock(wallets.clone()));
+        let expected = chain.chain_info().chain_id().to_string();
+        let any = AnyChain::from(chain);
+        assert_eq!(any.chain_id(), expected);
+    }
+    #[cfg(feature = "tron")]
+    {
+        let chain = TronChain::from(TRON_NILE.mock(wallets.clone()));
+        let expected = chain.chain_info().chain_id().to_string();
+        let any = AnyChain::from(chain);
+        assert_eq!(any.chain_id(), expected);
+    }
+
+    let _ = &wallets;
+}
+
 mod hooks {
     use std::cell::RefCell;
     use std::rc::Rc;

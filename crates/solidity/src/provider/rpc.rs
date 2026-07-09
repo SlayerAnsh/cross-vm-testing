@@ -220,6 +220,14 @@ impl EvmRpcProvider {
             .await
             .map_err(|e| EvmError::Query(e.to_string()))
     }
+
+    /// Read the raw storage value at `slot` for `addr` (`eth_getStorageAt`).
+    pub async fn get_storage_at(&self, addr: &Address, slot: U256) -> Result<U256, EvmError> {
+        self.provider()?
+            .get_storage_at(*addr, slot)
+            .await
+            .map_err(|e| EvmError::Query(e.to_string()))
+    }
 }
 
 impl ChainProvider for EvmRpcProvider {

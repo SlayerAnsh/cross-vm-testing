@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added (raw storage reads on every VM, `AnyChain::chain_id`)
+
+* Every VM now exposes idiomatic raw state reads on its providers and chain enum, following each VM's native naming:
+  * CosmWasm: `query_wasm_raw(addr, key)` returns `Option<Vec<u8>>` for a contract's exact storage key (mock through `cw-multi-test`'s querier, RPC through the wasm module's `RawContractState` over ABCI; both return `None` for an absent key). `get_contract_states(addr)` dumps every raw `(key, value)` pair of a contract in ascending key order (mock through `App::dump_wasm_raw`, RPC through `AllContractState` with transparent pagination).
+  * EVM: `get_storage_at(addr, slot)` returns the `U256` storage value. The mock reads the revm database directly (new `RevmCore::storage` in `cross-vm-revm-common`); the RPC backend calls `eth_getStorageAt`.
+  * Tron: `get_storage_at(addr, slot)` on both backends. The mock shares the revm core (TRON address converted to its inner EVM address); the live backend goes over TronGrid's Ethereum-compatible JSON-RPC endpoint (REST base plus `/jsonrpc`, method `eth_getStorageAt`, `latest` block tag only, which is all TRON supports).
+  * Solana: `get_account_data(pubkey)` returns the full account data bytes. `get_account_data_slice(pubkey, offset, len)` reads a fixed-width window (mock slices locally, RPC uses `getAccountInfo` with `dataSlice`; both return `None` unless the whole window exists). `SvmChain::find_program_account(program_id, seeds)` derives the PDA that names a program's state cell, and `get_program_state(program_id, seeds, offset, len)` composes the two into a point read, the SVM analog of `get_storage_at`.
+* `AnyChain::chain_id()` returns the underlying spec's chain id (`&str`) at the top level, so callers no longer downcast to the VM chain to read it. Sync, like `kind()`.
+
 ### Fixed (CosmWasm transaction hash reaches the caller)
 
 * **Breaking (CosmWasm execute return type):** the CosmWasm execute path now returns a `CwExecution { tx_hash: Option<String>, response: CwAppResponse }` wrapper instead of a bare `CwAppResponse`. This covers `CwChain::execute_contract`, `CwContract::execute` / `execute_with_funds`, and the `CwExecuteFns`-generated typed methods. On the live RPC backend the Tendermint `broadcast_tx_commit` hash (previously computed then discarded) is now carried through; the in-process mock leaves `tx_hash` as `None`. `CwExecution` derefs to the inner `CwAppResponse`, so existing `.events` / `.data` reads keep working; call sites that build an envelope pass `exec.response` and `exec.tx_hash`.

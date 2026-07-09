@@ -1,6 +1,6 @@
 //! Heterogeneous storage for chains of different VMs.
 
-use cross_vm_core::{BlockTime, ChainKind, ChainProvider};
+use cross_vm_core::{BlockTime, ChainKind, ChainProvider, ChainSpec};
 #[cfg(feature = "cw")]
 use cross_vm_cosmwasm::{CwChain, CwMockProvider, CwRpcProvider};
 #[cfg(feature = "solana")]
@@ -79,6 +79,23 @@ impl AnyChain {
             AnyChain::Svm(c) => c.block_height().await,
             #[cfg(feature = "tron")]
             AnyChain::Tron(c) => c.block_height().await,
+        }
+    }
+
+    /// Chain identifier from the underlying chain's spec (no typecast needed).
+    ///
+    /// Forwards to the VM provider's [`ChainProvider::chain_info`] and reads the spec's
+    /// [`ChainSpec::chain_id`], so callers get the id without matching on the VM variant.
+    pub fn chain_id(&self) -> &str {
+        match self {
+            #[cfg(feature = "cw")]
+            AnyChain::CosmWasm(c) => c.chain_info().chain_id(),
+            #[cfg(feature = "evm")]
+            AnyChain::Evm(c) => c.chain_info().chain_id(),
+            #[cfg(feature = "solana")]
+            AnyChain::Svm(c) => c.chain_info().chain_id(),
+            #[cfg(feature = "tron")]
+            AnyChain::Tron(c) => c.chain_info().chain_id(),
         }
     }
 

@@ -103,6 +103,60 @@ async fn live_deploy_increment_count_on_nile() {
     assert_eq!(n, 1, "expected count == 1 after a single increment");
 }
 
+#[tokio::test]
+#[ignore = "live: requires Nile RPC + funded MNEMONIC_TEST index 0 (coin 195)"]
+async fn live_get_storage_at_on_nile() {
+    dotenvy::from_path(ENV_PATH).unwrap_or_else(|e| panic!("load {ENV_PATH}: {e}"));
+    let wallets = Rc::new(
+        WalletFactory::from_roster(OnchainWallets::SPECS)
+            .unwrap_or_else(|e| panic!("resolve roster: {e}")),
+    );
+    let chain: TronChain = NILE.rpc(wallets).into();
+
+    let who = chain
+        .wallet_address(ONCHAIN_WALLETS.test)
+        .await
+        .expect("derive test wallet");
+    let balance = chain.balance(&who).await.expect("read balance");
+    println!("test wallet: {who}");
+    println!("balance:     {balance} sun");
+    assert!(balance > 0, "fund {who} on Nile first (balance is zero)");
+
+    // Counter's `uint256 public count` is the sole state variable, so it occupies storage slot 0.
+    let counter = chain
+        .deploy_create(counter_bytecode(), Bytes::new(), ONCHAIN_WALLETS.test)
+        .await
+        .expect("deploy counter");
+    println!("counter deployed at: {counter}");
+    settle().await;
+
+    // Fresh deploy: slot 0 (count) reads as zero.
+    let slot0 = chain
+        .get_storage_at(&counter, alloy_primitives::U256::ZERO)
+        .await
+        .expect("get_storage_at slot 0 (pre-increment)");
+    println!("slot 0 before increment: {slot0}");
+    assert_eq!(slot0, alloy_primitives::U256::ZERO);
+
+    // `call` polls for the receipt, so the incremented state is committed on return.
+    chain
+        .call(&counter, selector("increment()"), ONCHAIN_WALLETS.test)
+        .await
+        .expect("increment");
+    settle().await;
+
+    let slot0 = chain
+        .get_storage_at(&counter, alloy_primitives::U256::ZERO)
+        .await
+        .expect("get_storage_at slot 0 (post-increment)");
+    println!("slot 0 after increment: {slot0}");
+    assert_eq!(
+        slot0,
+        alloy_primitives::U256::from(1u64),
+        "expected count (slot 0) == 1 after a single increment"
+    );
+}
+
 /// Nile blocks are ~3s; give a broadcast tx time to confirm before reading state.
 async fn settle() {
     tokio::time::sleep(Duration::from_secs(8)).await;
