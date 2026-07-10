@@ -77,6 +77,13 @@ impl TronMockProvider {
     /// Build a fresh mock chain from a predefined [`TronChainInfo`].
     pub fn new(info: TronChainInfo, wallets: Rc<WalletFactory>) -> Self {
         let core = RevmCore::new(info.numeric_id(), info.spec_id, |evm| {
+            // Start at block 1 (a 0 marker is indistinguishable from "unset" in contracts that
+            // record `pending[seq] = block.number`) and at the shared mock clock so cross-VM
+            // packet timeouts compare correctly against the EVM, cosmos, and Solana chains.
+            // `revm`'s `BlockEnv::default()` is `number: 0, timestamp: 1`, which would otherwise
+            // put a TRON contract in 1970 while every other mock sits at `MOCK_BLOCK_TIMESTAMP`.
+            evm.ctx.block.number = U256::from(1u64);
+            evm.ctx.block.timestamp = U256::from(cross_vm_core::MOCK_BLOCK_TIMESTAMP);
             // Replace the stock Ethereum precompile set with the TVM set (TIP-272 relocations +
             // validatemultisign). The VM was built at `info.spec_id`, so `set_spec` will see an
             // unchanged spec on the first transaction and will NOT overwrite this injection.
@@ -421,5 +428,22 @@ mod tests {
         let start = c.block_height().await;
         c.advance_blocks(5, BlockTime::Increment(1)).await;
         assert_eq!(c.block_height().await, start + 5);
+    }
+
+    #[tokio::test]
+    async fn starts_on_the_shared_mock_clock() {
+        let c = provider();
+        // Not `revm`'s `BlockEnv::default()` of `number: 0, timestamp: 1`: the mock has to agree
+        // with the EVM, cosmos, and Solana chains so cross-VM timeouts compare correctly.
+        assert_eq!(c.block_height().await, 1);
+        assert_eq!(
+            c.core.block_timestamp(),
+            cross_vm_core::MOCK_BLOCK_TIMESTAMP
+        );
+    }
+
+    #[tokio::test]
+    async fn chain_id_comes_from_the_preset() {
+        assert_eq!(provider().core.chain_id(), LOCAL.numeric_id());
     }
 }

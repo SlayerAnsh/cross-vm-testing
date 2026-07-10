@@ -32,6 +32,16 @@ async fn set_and_read_balance() {
 }
 
 #[tokio::test]
+async fn mock_block_carries_the_preset_chain_id() {
+    let mut chain = OSMOSIS.mock(empty_wallets());
+    // Not cw-multi-test's `mock_env()` default of `cosmos-testnet-14002`.
+    assert_eq!(chain.app().block_info().chain_id, OSMOSIS.chain_id());
+    // And advancing the clock preserves it.
+    chain.advance_blocks(2, BlockTime::Increment(1)).await;
+    assert_eq!(chain.app().block_info().chain_id, OSMOSIS.chain_id());
+}
+
+#[tokio::test]
 async fn blocks_advance() {
     let mut chain = LOCAL.mock(empty_wallets());
     let h0 = chain.block_height().await;

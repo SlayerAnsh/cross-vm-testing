@@ -268,6 +268,16 @@ impl RevmCore {
         self.evm.borrow().ctx.block.number.saturating_to::<u64>()
     }
 
+    /// The numeric chain id the VM was configured with (what `block.chainid` returns).
+    pub fn chain_id(&self) -> u64 {
+        self.evm.borrow().ctx.cfg.chain_id
+    }
+
+    /// The current block timestamp, in seconds since the UNIX epoch.
+    pub fn block_timestamp(&self) -> u64 {
+        self.evm.borrow().ctx.block.timestamp.saturating_to::<u64>()
+    }
+
     /// Advance `n` blocks and move the block timestamp per `time`.
     pub fn advance_blocks(&self, n: u64, time: BlockTime) {
         let mut evm = self.evm.borrow_mut();

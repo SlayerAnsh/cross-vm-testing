@@ -69,10 +69,14 @@ impl CwMockProvider {
         let mut app = AppBuilder::new()
             .with_api(MockApiBech32::new(info.bech32_prefix))
             .build(|_router, _api, _storage| {});
-        // Override cw-multi-test's 2019-era default block time with the shared mock clock so a
-        // cross-VM packet's timeout (stamped on one VM, checked on another) compares correctly.
+        // cw-multi-test seeds its `BlockInfo` from cosmwasm-std's `mock_env()`, so both the block
+        // time and the chain id are defaults unrelated to the selected preset. Override the
+        // 2019-era time with the shared mock clock, so a cross-VM packet's timeout (stamped on one
+        // VM, checked on another) compares correctly; override the `cosmos-testnet-14002` chain id
+        // with the preset's, so a contract reading `env.block.chain_id` sees the chain it runs on.
         app.update_block(|block| {
             block.time = cosmwasm_std::Timestamp::from_seconds(cross_vm_core::MOCK_BLOCK_TIMESTAMP);
+            block.chain_id = info.chain_id.to_string();
         });
         Self {
             app: Rc::new(RefCell::new(app)),

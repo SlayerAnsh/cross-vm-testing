@@ -17,6 +17,12 @@ All notable changes to this project are documented here. The format follows Keep
   * Solana: `get_account_data(pubkey)` returns the full account data bytes. `get_account_data_slice(pubkey, offset, len)` reads a fixed-width window (mock slices locally, RPC uses `getAccountInfo` with `dataSlice`; both return `None` unless the whole window exists). `SvmChain::find_program_account(program_id, seeds)` derives the PDA that names a program's state cell, and `get_program_state(program_id, seeds, offset, len)` composes the two into a point read, the SVM analog of `get_storage_at`.
 * `AnyChain::chain_id()` returns the underlying spec's chain id (`&str`) at the top level, so callers no longer downcast to the VM chain to read it. Sync, like `kind()`.
 
+### Fixed (mock chains report their own chain id and clock)
+
+* The mock CosmWasm chain reported `cosmos-testnet-14002` regardless of the selected preset. `chain_id` is a field on `cosmwasm_std::BlockInfo`, and `cw-multi-test` seeds the whole struct from `mock_env()`; `CwMockProvider::new` overrode the block time out of that default but left the chain id. It now sets `block.chain_id` from the preset, so a contract reading `env.block.chain_id` sees the chain it runs on. `advance_blocks` preserves it.
+* The mock Tron chain started at `revm`'s `BlockEnv::default()` (`number: 0, timestamp: 1`), putting a TVM contract in 1970 while the CosmWasm, EVM, and Solana mocks all sat at the shared `MOCK_BLOCK_TIMESTAMP`. A cross-VM packet timeout stamped on one VM and checked on Tron therefore compared against the wrong clock. `TronMockProvider::new` now seeds `number = 1` and the shared mock clock, matching the EVM mock. Chain id was already correct on both revm-backed mocks (`RevmCore::new(info.numeric_id(), ..)`); Solana has no in-VM cluster id to set.
+* `RevmCore` gains `chain_id()` and `block_timestamp()` accessors, siblings of the existing `block_height()`, so the EVM and Tron mocks' VM configuration is assertable from tests.
+
 ### Fixed (CosmWasm errors keep their root cause)
 
 * The mock CosmWasm backend rendered `cw-multi-test`'s `anyhow` errors with `to_string()`, which prints only the outermost `.context(..)` layer. An execution failure therefore surfaced as `Error executing WasmMsg: sender: .. Execute { .. }` with the contract's actual error (`Unauthorized`, an overflow, a `Std error`, ..) silently dropped. `instantiate`, `execute_contract`, and `set_balance` now flatten the whole error chain, appending each link on its own `caused by:` line.
