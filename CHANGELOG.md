@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added (`env_any` wallet source: ordered env-var fallback chains)
+
+* `define_wallet_roster!` gains an `env_any(candidate, ...)` source: an ordered fallback chain of typed candidates, `mnemonic("VAR")` / `mnemonic("VAR") @ N` or `private_key("VAR")`. At resolve time the first candidate whose env var is set and non blank wins, and its kind decides how the value is read; a `mnemonic` candidate without its own `@ N` inherits the row's `@ N`, which still defaults to `0`, and a `private_key` candidate rejects `@ N` at compile time. Backed by the new `WalletSource::EnvAny` and `EnvCandidate` types in `cross-vm-core`.
+* When every candidate in an `env_any` chain is missing, `WalletFactory::resolve` now fails with the new `CrossVmError::SecretVarsAllMissing`, naming every var tried, in declaration order, never a value.
+
+### Changed (blank env vars count as missing everywhere)
+
+* An env var that is unset, empty, or whitespace only is now treated as missing for every wallet env source, including the existing `env_mnemonic` and `env_private_key`, not just the new `env_any`; a set value is trimmed before use. Previously only an unset variable errored, so a `FOO=` line in a `.env` would pass an empty or padded string through to BIP-39 parsing and fail there instead of resolving cleanly as `CrossVmError::SecretVarMissing`.
+
 ### Added (VM-agnostic native transfers on `AnyChain`)
 
 * `AnyChain::transfer_funds(to, denom, amount, wallet)` fans out to the per-VM `transfer_funds` (CosmWasm, EVM, Solana, Tron) and returns the transaction hash, so a cross-VM test moves native funds without matching on the VM variant. The recipient is a VM-agnostic `Account`; one belonging to another VM surfaces as `CrossVmError::WrongVm` through the existing accessor.

@@ -26,6 +26,6 @@ pub use error::CrossVmError;
 pub use fund_error::FundError;
 pub use time::{BlockTime, MOCK_BLOCK_TIMESTAMP};
 pub use wallet::{
-    bip44_account_path, WalletDef, WalletDeriver, WalletFactory, WalletLabel, WalletSource,
-    WalletSpec,
+    bip44_account_path, EnvCandidate, WalletDef, WalletDeriver, WalletFactory, WalletLabel,
+    WalletSource, WalletSpec,
 };

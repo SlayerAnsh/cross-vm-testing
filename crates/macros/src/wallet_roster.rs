@@ -25,6 +25,71 @@ enum SourceKind {
     EnvMnemonic(LitStr),
     Auto,
     EnvPrivateKey(LitStr),
+    /// An ordered fallback chain of typed env-var candidates; the first one set at resolve time
+    /// wins. Parsed from `env_any(private_key("A"), mnemonic("B") @ 1)`.
+    EnvAny(Vec<CandidateKind>),
+}
+
+/// One `env_any(..)` candidate. A `mnemonic` candidate's index is `None` until codegen, where it
+/// falls back to the row-level `@ N` (itself defaulting to `0`). `private_key` carries no index.
+enum CandidateKind {
+    Mnemonic { var: LitStr, index: Option<u32> },
+    PrivateKey { var: LitStr },
+}
+
+/// Parse the inside of `env_any( .. )`: a non-empty, comma-separated list of
+/// `mnemonic("VAR") @ N` / `private_key("VAR")` candidates, trailing comma allowed.
+fn parse_env_any(env_any_kw: &Ident, args: ParseStream) -> syn::Result<Vec<CandidateKind>> {
+    let mut candidates = Vec::new();
+    while !args.is_empty() {
+        let kind: Ident = args.parse()?;
+        let var_args;
+        syn::parenthesized!(var_args in args);
+        let var: LitStr = var_args.parse()?;
+
+        // A candidate's own `@ N` overrides the row-level default.
+        let index = if args.peek(Token![@]) {
+            let _: Token![@] = args.parse()?;
+            let index_lit: LitInt = args.parse()?;
+            Some((index_lit.base10_parse::<u32>()?, index_lit))
+        } else {
+            None
+        };
+
+        if kind == "mnemonic" {
+            candidates.push(CandidateKind::Mnemonic {
+                var,
+                index: index.map(|(n, _)| n),
+            });
+        } else if kind == "private_key" {
+            if let Some((_, lit)) = index {
+                return Err(syn::Error::new(
+                    lit.span(),
+                    "define_wallet_roster: a `private_key` candidate has no derivation index; drop the `@ N`",
+                ));
+            }
+            candidates.push(CandidateKind::PrivateKey { var });
+        } else {
+            return Err(syn::Error::new(
+                kind.span(),
+                "define_wallet_roster: expected `mnemonic(\"VAR\")` or `private_key(\"VAR\")` inside `env_any(..)`",
+            ));
+        }
+
+        let comma: Option<Token![,]> = args.parse()?;
+        if comma.is_none() {
+            break;
+        }
+    }
+
+    if candidates.is_empty() {
+        return Err(syn::Error::new(
+            env_any_kw.span(),
+            "define_wallet_roster: `env_any(..)` needs at least one candidate, e.g. `env_any(private_key(\"VAR\"))`",
+        ));
+    }
+
+    Ok(candidates)
 }
 
 impl Parse for RosterInput {
@@ -59,16 +124,20 @@ impl Parse for RosterInput {
                     SourceKind::EnvPrivateKey(var)
                 } else if kind == "auto" {
                     SourceKind::Auto
+                } else if kind == "env_any" {
+                    let env_args;
+                    syn::parenthesized!(env_args in content);
+                    SourceKind::EnvAny(parse_env_any(&kind, &env_args)?)
                 } else {
                     return Err(syn::Error::new(
                         kind.span(),
-                        "define_wallet_roster: expected `env_mnemonic(\"VAR\")`, `auto`, or `env_private_key(\"VAR\")`",
+                        "define_wallet_roster: expected `env_mnemonic(\"VAR\")`, `auto`, `env_private_key(\"VAR\")`, or `env_any(..)`",
                     ));
                 }
             } else {
                 return Err(syn::Error::new(
                     content.span(),
-                    "define_wallet_roster: expected `env_mnemonic(\"VAR\")`, `auto`, or `env_private_key(\"VAR\")`",
+                    "define_wallet_roster: expected `env_mnemonic(\"VAR\")`, `auto`, `env_private_key(\"VAR\")`, or `env_any(..)`",
                 ));
             };
 
@@ -171,6 +240,20 @@ fn expand_parsed(
             SourceKind::Auto => quote! { cross_vm_core::WalletSource::Auto },
             SourceKind::EnvPrivateKey(var) => {
                 quote! { cross_vm_core::WalletSource::EnvPrivateKey(#var) }
+            }
+            SourceKind::EnvAny(candidates) => {
+                // Declaration order is the fallback order. A `mnemonic` candidate without its own
+                // `@ N` inherits the row-level index (which itself defaults to 0).
+                let candidates = candidates.iter().map(|c| match c {
+                    CandidateKind::PrivateKey { var } => {
+                        quote! { cross_vm_core::EnvCandidate::PrivateKey { var: #var } }
+                    }
+                    CandidateKind::Mnemonic { var, index } => {
+                        let index = index.unwrap_or(entry.index);
+                        quote! { cross_vm_core::EnvCandidate::Mnemonic { var: #var, index: #index } }
+                    }
+                });
+                quote! { cross_vm_core::WalletSource::EnvAny(&[ #(#candidates),* ]) }
             }
         });
     }
@@ -281,6 +364,92 @@ mod tests {
         assert!(out.contains("WalletSource :: EnvPrivateKey"));
         assert!(out.contains("PRIVKEY_SIGNER"));
         assert!(out.contains("index : 0u32"));
+    }
+
+    #[test]
+    fn env_any_emits_ordered_candidate_chain() {
+        let input = quote! {
+            pub const W: Wallets = {
+                bob: env_any(
+                    private_key("BOB_PRIVATE_KEY"),
+                    mnemonic("FIXTURE_MNEMONIC") @ 1,
+                ),
+            };
+        };
+        let out = expand_str(input);
+        assert!(out.contains(
+            "source : cross_vm_core :: WalletSource :: EnvAny \
+             (& [cross_vm_core :: EnvCandidate :: PrivateKey { var : \"BOB_PRIVATE_KEY\" } , \
+             cross_vm_core :: EnvCandidate :: Mnemonic { var : \"FIXTURE_MNEMONIC\" , index : 1u32 }])"
+        ));
+        // The row itself keeps the default index, and `hd_path` still emits `None`.
+        assert!(out.contains("index : 0u32"));
+        assert!(out.contains("hd_path : None"));
+    }
+
+    #[test]
+    fn env_any_candidates_inherit_row_index() {
+        let input = quote! {
+            pub const W: Wallets = {
+                carol: env_any(mnemonic("A"), mnemonic("B")) @ 2,
+            };
+        };
+        let out = expand_str(input);
+        assert!(out.contains(
+            "EnvAny (& [cross_vm_core :: EnvCandidate :: Mnemonic { var : \"A\" , index : 2u32 } , \
+             cross_vm_core :: EnvCandidate :: Mnemonic { var : \"B\" , index : 2u32 }])"
+        ));
+        assert!(out.contains("index : 2u32 , hd_path : None"));
+    }
+
+    #[test]
+    fn env_any_candidate_index_overrides_row_index() {
+        let input = quote! {
+            pub const W: Wallets = {
+                dave: env_any(mnemonic("A") @ 7, mnemonic("B")) @ 2,
+            };
+        };
+        let out = expand_str(input);
+        assert!(out.contains(
+            "EnvAny (& [cross_vm_core :: EnvCandidate :: Mnemonic { var : \"A\" , index : 7u32 } , \
+             cross_vm_core :: EnvCandidate :: Mnemonic { var : \"B\" , index : 2u32 }])"
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_env_any() {
+        match syn::parse2::<RosterInput>(quote! {
+            pub const W: Wallets = {
+                bob: env_any(),
+            };
+        }) {
+            Ok(_) => panic!("empty env_any should fail to parse"),
+            Err(e) => assert!(e.to_string().contains("at least one candidate"), "{e}"),
+        }
+    }
+
+    #[test]
+    fn rejects_indexed_private_key_candidate() {
+        match syn::parse2::<RosterInput>(quote! {
+            pub const W: Wallets = {
+                bob: env_any(private_key("X") @ 1),
+            };
+        }) {
+            Ok(_) => panic!("an indexed private_key candidate should fail to parse"),
+            Err(e) => assert!(e.to_string().contains("no derivation index"), "{e}"),
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_env_any_candidate() {
+        match syn::parse2::<RosterInput>(quote! {
+            pub const W: Wallets = {
+                bob: env_any(keyring("X")),
+            };
+        }) {
+            Ok(_) => panic!("an unknown candidate kind should fail to parse"),
+            Err(e) => assert!(e.to_string().contains("private_key"), "{e}"),
+        }
     }
 
     #[test]

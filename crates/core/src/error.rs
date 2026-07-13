@@ -102,13 +102,24 @@ pub enum CrossVmError {
     },
 
     /// A wallet's `EnvMnemonic`/`EnvPrivateKey` source referenced an environment variable
-    /// that is not set in the process environment.
+    /// that is not set (or is blank) in the process environment.
     #[error("secret env var `{var}` not set for wallet `{label}`")]
     SecretVarMissing {
         /// Wallet label whose source could not be resolved.
         label: String,
         /// The missing environment variable name.
         var: String,
+    },
+
+    /// A wallet's `EnvAny` fallback chain found no usable candidate: every environment
+    /// variable in the chain is unset or blank. Names only the variables (in declaration
+    /// order), never their values.
+    #[error("no secret env var set for wallet `{label}` (tried, in order: {})", .vars.join(", "))]
+    SecretVarsAllMissing {
+        /// Wallet label whose fallback chain could not be resolved.
+        label: String,
+        /// Every candidate env var name that was tried, in declaration order.
+        vars: Vec<String>,
     },
 }
 
