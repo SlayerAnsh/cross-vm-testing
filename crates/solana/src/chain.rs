@@ -146,6 +146,30 @@ impl SvmChain {
         }
     }
 
+    /// Transfer `amount` base units (lamports) of `denom` from `wallet` to `to`, returning the
+    /// base58 transaction signature.
+    ///
+    /// `denom` must name this chain's native token (`SOL`), matching
+    /// [`set_balance`](ChainProvider::set_balance); SPL transfers are not covered. Mock: a real
+    /// System Program transfer, so an underfunded sender is an [`SvmError::Execute`]. RPC: still
+    /// [`SvmError::Unimplemented`].
+    pub async fn transfer_funds(
+        &self,
+        to: &Address,
+        denom: &str,
+        amount: u64,
+        wallet: WalletLabel<'_>,
+    ) -> Result<String, SvmError> {
+        let signer = self.acquire(wallet).await?;
+        match self {
+            SvmChain::Mock(p) => p.transfer_funds(to, denom, amount, signer.keypair()).await,
+            SvmChain::Rpc(p) => {
+                let _g = Self::broadcast_guard(p, &signer.pubkey()).await;
+                p.transfer_funds(to, denom, amount, &signer).await
+            }
+        }
+    }
+
     /// Read on-chain account data for `pubkey`.
     pub async fn get_account(&self, pubkey: &Address) -> Result<Option<Account>, SvmError> {
         match self {

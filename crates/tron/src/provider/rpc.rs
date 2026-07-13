@@ -2,14 +2,16 @@
 //!
 //! [`TronRpcProvider`] mirrors the EVM `EvmRpcProvider`: chain reads ([`balance`],
 //! [`block_height`]) and read-only [`static_call`] need no signer; the write paths
-//! ([`deploy_create`], [`call`]) sign the transaction id with the wallet's secp256k1 key and
-//! broadcast. Only `set_balance` stays [`TronError::Unimplemented`] (a live chain cannot mint).
+//! ([`deploy_create`], [`call`], [`transfer_funds`]) sign the transaction id with the wallet's
+//! secp256k1 key and broadcast. Only `set_balance` stays [`TronError::Unimplemented`] (a live
+//! chain cannot mint).
 //!
 //! Transport is TronGrid HTTP (`/wallet/*`, plus the Ethereum-compatible `/jsonrpc` endpoint for
 //! [`get_storage_at`]), not gRPC, so the crate keeps no Tron-specific
 //! dependency (just `reqwest` + `serde_json`). The flow for a write is the standard java-tron
-//! three step: build the unsigned transaction at the node (`/wallet/deploycontract` or
-//! `/wallet/triggersmartcontract`), sign its `txID` locally, then `/wallet/broadcasttransaction`.
+//! three step: build the unsigned transaction at the node (`/wallet/deploycontract`,
+//! `/wallet/triggersmartcontract`, or `/wallet/createtransaction` for a native transfer), sign its
+//! `txID` locally, then `/wallet/broadcasttransaction`.
 //! Addresses cross the wire in 0x41 hex form (`visible=false`).
 //!
 //! [`balance`]: TronRpcProvider::balance
@@ -18,6 +20,7 @@
 //! [`get_storage_at`]: TronRpcProvider::get_storage_at
 //! [`deploy_create`]: TronRpcProvider::deploy_create
 //! [`call`]: TronRpcProvider::call
+//! [`transfer_funds`]: TronRpcProvider::transfer_funds
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -230,6 +233,45 @@ impl TronRpcProvider {
             .map_err(|e| TronError::Execute(e.to_string()))?;
         let info = self.await_tx_info(&txid).await?;
         parse_tx_info(&info, &txid)
+    }
+
+    /// Transfer `amount` sun of the native token to `to`, signed by `signer`, returning the
+    /// broadcast transaction's `txID`.
+    ///
+    /// A native TRX transfer is its own java-tron transaction type, not a contract call: the node
+    /// builds the unsigned `TransferContract` at `/wallet/createtransaction`, then the standard
+    /// sign-`txID`-and-broadcast step applies. The node validates the sender's balance, so an
+    /// underfunded transfer is rejected at broadcast. Confirmation is polled before returning, as
+    /// on the [`call`](Self::call) path.
+    /// Source: <https://developers.tron.network/reference/createtransaction>
+    pub async fn transfer_funds(
+        &self,
+        to: &TronAddress,
+        amount: u64,
+        signer: &PrivateKeySigner,
+    ) -> Result<String, TronError> {
+        let owner = signer_address(signer);
+        let unsigned = self
+            .post(
+                "createtransaction",
+                json!({
+                    "owner_address": owner.to_hex(),
+                    "to_address": to.to_hex(),
+                    "amount": amount,
+                    "visible": false,
+                }),
+            )
+            .await?;
+        check_node_ok(&unsigned, "createtransaction")?;
+        let txid = unsigned["txID"]
+            .as_str()
+            .ok_or_else(|| TronError::Execute("createtransaction: no txID".into()))?
+            .to_string();
+        self.sign_and_broadcast(unsigned, signer)
+            .await
+            .map_err(|e| TronError::Execute(e.to_string()))?;
+        self.await_tx_info(&txid).await?;
+        Ok(txid)
     }
 
     /// Poll `gettransactioninfobyid` until the transaction is mined, returning its

@@ -96,6 +96,27 @@ impl EvmMockProvider {
             .map_err(|f| EvmError::Execute(f.call_message("call")))
     }
 
+    /// Transfer `amount` wei of native funds from `from` to `to`: a value-carrying call with empty
+    /// calldata.
+    ///
+    /// Unlike [`call_value`](Self::call_value), the sender is *not* topped up: a transfer moves
+    /// funds that already exist, so a short balance is an error here, exactly as a live chain would
+    /// report it.
+    pub async fn transfer_funds(
+        &self,
+        to: &Address,
+        from: &Address,
+        amount: U256,
+    ) -> Result<EvmExecution, EvmError> {
+        let held = self.balance(from).await?;
+        if held < amount {
+            return Err(EvmError::Balance(format!(
+                "insufficient funds: {from} holds {held} wei, transfer needs {amount}"
+            )));
+        }
+        self.call_value(to, [], from, amount).await
+    }
+
     /// Run a read-only static call against `to`.
     pub async fn static_call(
         &self,

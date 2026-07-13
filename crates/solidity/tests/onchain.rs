@@ -92,3 +92,45 @@ async fn live_counter_on_base_sepolia() {
     println!("count after increment: {count}");
     assert_eq!(count, 1, "increment should raise the count to 1");
 }
+
+#[tokio::test]
+#[ignore = "live: requires Base Sepolia RPC + funded MNEMONIC_TEST index 0"]
+async fn live_transfer_funds_on_base_sepolia() {
+    dotenvy::from_path(ENV_PATH).unwrap_or_else(|e| panic!("load {ENV_PATH}: {e}"));
+    let wallets = Rc::new(
+        WalletFactory::from_roster(OnchainWallets::SPECS)
+            .unwrap_or_else(|e| panic!("resolve roster: {e}")),
+    );
+    let chain: EvmChain = BASE_SEPOLIA.rpc(wallets).into();
+
+    let who = chain
+        .wallet_address(ONCHAIN_WALLETS.test)
+        .await
+        .expect("derive test wallet");
+    let balance = chain.balance(&who).await.expect("read balance");
+    println!("test wallet: {who}");
+    println!("balance:     {balance} wei");
+    assert!(
+        balance > U256::ZERO,
+        "wallet {who} has no Base Sepolia ETH; fund it (index 0 of MNEMONIC_TEST) and retry"
+    );
+
+    // Send a dust amount back to the sender: no second funded key is needed, and the only balance
+    // change is the gas the transfer itself burns.
+    let amount = U256::from(1_000u64);
+    let start = chain.balance(&who).await.expect("read balance");
+    let tx_hash = chain
+        .transfer_funds(&who, "ETH", amount, ONCHAIN_WALLETS.test)
+        .await
+        .expect("transfer_funds");
+    println!("transfer tx hash: {tx_hash}");
+    assert!(
+        tx_hash.starts_with("0x"),
+        "hash `{tx_hash}` is not 0x-prefixed"
+    );
+    assert_eq!(tx_hash.len(), 66, "hash `{tx_hash}` is not 32 bytes of hex");
+
+    let end = chain.balance(&who).await.expect("read balance");
+    println!("balance after self-transfer: {end} wei (was {start})");
+    assert!(end < start, "the transfer should at least have burnt gas");
+}

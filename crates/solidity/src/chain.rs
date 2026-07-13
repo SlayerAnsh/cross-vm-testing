@@ -154,6 +154,40 @@ impl EvmChain {
         }
     }
 
+    /// Transfer `amount` base units (wei) of the chain's native token from wallet `wallet` to `to`,
+    /// returning the transaction hash (`0x`-prefixed lowercase hex).
+    ///
+    /// `denom` must name this chain's native token (case-insensitively); there is no ERC-20 path
+    /// here. The mock returns its synthetic hash (see [`EvmExecution::tx_hash`]), the RPC backend
+    /// the real broadcast hash.
+    pub async fn transfer_funds(
+        &self,
+        to: &Address,
+        denom: &str,
+        amount: U256,
+        wallet: WalletLabel<'_>,
+    ) -> Result<String, EvmError> {
+        let native = self.chain_info().native_symbol;
+        if !denom.eq_ignore_ascii_case(native) {
+            return Err(EvmError::Balance(format!(
+                "unknown denom '{denom}': this chain's native token is '{native}'"
+            )));
+        }
+        let signer = self.acquire(wallet).await?;
+        let addr = self.signer_address(&signer);
+        // A native transfer is just a value-carrying call with empty calldata.
+        let exec = match self {
+            EvmChain::Mock(p) => p.transfer_funds(to, &addr, amount).await?,
+            EvmChain::Rpc(p) => {
+                let _g = Self::broadcast_guard(p, &addr).await;
+                p.call_value(to, [], &signer, amount).await?
+            }
+        };
+        exec.tx_hash
+            .map(|h| h.to_string())
+            .ok_or_else(|| EvmError::Execute("transfer carried no transaction hash".into()))
+    }
+
     /// Run a read-only static call against `to`.
     pub async fn static_call(
         &self,

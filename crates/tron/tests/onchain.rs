@@ -19,6 +19,10 @@ use cross_vm_tron::{Bytes, TronChain};
 define_wallet_roster! {
     pub const ONCHAIN_WALLETS: OnchainWallets = {
         test: env_mnemonic("MNEMONIC_TEST") @ 0,
+        // Transfer recipient. java-tron rejects a transfer to the sender's own address, so the
+        // live transfer test needs a second address; index 1 of the same mnemonic needs no
+        // funding of its own (it only receives).
+        recipient: env_mnemonic("MNEMONIC_TEST") @ 1,
     };
 }
 
@@ -154,6 +158,55 @@ async fn live_get_storage_at_on_nile() {
         slot0,
         alloy_primitives::U256::from(1u64),
         "expected count (slot 0) == 1 after a single increment"
+    );
+}
+
+#[tokio::test]
+#[ignore = "live: requires Nile RPC + funded MNEMONIC_TEST index 0 (coin 195)"]
+async fn live_transfer_funds_on_nile() {
+    // 1 TRX in sun. The sender also pays the bandwidth fee, and the 1-TRX account-activation fee
+    // the first time the recipient address is seen on chain.
+    const AMOUNT_SUN: u64 = 1_000_000;
+
+    dotenvy::from_path(ENV_PATH).unwrap_or_else(|e| panic!("load {ENV_PATH}: {e}"));
+    let wallets = Rc::new(
+        WalletFactory::from_roster(OnchainWallets::SPECS)
+            .unwrap_or_else(|e| panic!("resolve roster: {e}")),
+    );
+    let chain: TronChain = NILE.rpc(wallets).into();
+
+    let who = chain
+        .wallet_address(ONCHAIN_WALLETS.test)
+        .await
+        .expect("derive test wallet");
+    let to = chain
+        .wallet_address(ONCHAIN_WALLETS.recipient)
+        .await
+        .expect("derive recipient wallet");
+    let balance = chain.balance(&who).await.expect("read balance");
+    println!("test wallet: {who}");
+    println!("balance:     {balance} sun");
+    println!("recipient:   {to}");
+    assert!(
+        balance > AMOUNT_SUN,
+        "fund {who} on Nile first (holds {balance} sun, needs more than {AMOUNT_SUN})"
+    );
+
+    let before = chain.balance(&to).await.expect("read recipient balance");
+    let txid = chain
+        .transfer_funds(&to, "TRX", AMOUNT_SUN, ONCHAIN_WALLETS.test)
+        .await
+        .expect("native transfer");
+    println!("transfer txID: {txid}");
+    assert_eq!(txid.len(), 64, "expected a 32-byte txID in hex");
+    settle().await;
+
+    let after = chain.balance(&to).await.expect("read recipient balance");
+    println!("recipient balance: {before} -> {after} sun");
+    assert_eq!(
+        after,
+        before + AMOUNT_SUN,
+        "expected the recipient's balance to rise by exactly the transferred amount"
     );
 }
 

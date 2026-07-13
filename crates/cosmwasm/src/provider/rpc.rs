@@ -2,9 +2,9 @@
 //!
 //! [`CwRpcProvider`] talks to a real Cosmos node over Tendermint RPC. Read paths use ABCI
 //! queries with no signer: [`block_height`], [`balance`], and [`query_wasm_smart`]. Write paths
-//! ([`store_code`], [`instantiate`], [`execute_contract`]) sign with the wallet's secp256k1
-//! key (account number + sequence + `SignDoc` + `broadcast_tx_commit`) and broadcast; only
-//! `set_balance` stays [`CwError::Unimplemented`] (a live chain cannot mint).
+//! ([`store_code`], [`instantiate`], [`execute_contract`], [`transfer_funds`]) sign with the
+//! wallet's secp256k1 key (account number + sequence + `SignDoc` + `broadcast_tx_commit`) and
+//! broadcast; only `set_balance` stays [`CwError::Unimplemented`] (a live chain cannot mint).
 //!
 //! [`block_height`]: CwRpcProvider::block_height
 //! [`balance`]: CwRpcProvider::balance
@@ -12,6 +12,7 @@
 //! [`store_code`]: CwRpcProvider::store_code
 //! [`instantiate`]: CwRpcProvider::instantiate
 //! [`execute_contract`]: CwRpcProvider::execute_contract
+//! [`transfer_funds`]: CwRpcProvider::transfer_funds
 
 use cosmrs::proto::cosmos::auth::v1beta1::{
     BaseAccount, QueryAccountRequest, QueryAccountResponse,
@@ -26,6 +27,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use cosmrs::bank::MsgSend;
 use cosmrs::cosmwasm::{MsgExecuteContract, MsgInstantiateContract, MsgStoreCode};
 use cosmrs::rpc::{Client, HttpClient};
 use cosmrs::tendermint::abci::Event as TmEvent;
@@ -254,6 +256,37 @@ impl CwRpcProvider {
         find_attr(&events, "store_code", "code_id")?
             .parse::<u64>()
             .map_err(|e| CwError::Execute(format!("parse code_id: {e}")))
+    }
+
+    /// Send `amount` base units of bank `denom` from `signer` to `to`, and return the broadcast
+    /// transaction hash.
+    ///
+    /// Any bank denom moves verbatim (`uosmo`, `ibc/...`), not just the chain's native denom.
+    pub async fn transfer_funds(
+        &self,
+        to: &Addr,
+        denom: &str,
+        amount: u128,
+        signer: &CosmosSigner,
+    ) -> Result<String, CwError> {
+        let msg = MsgSend {
+            from_address: signer_account(signer)?,
+            to_address: to
+                .as_str()
+                .parse()
+                .map_err(|e| CwError::Execute(format!("recipient addr: {e}")))?,
+            amount: vec![CosmrsCoin {
+                denom: denom
+                    .parse::<Denom>()
+                    .map_err(|e| CwError::Execute(format!("denom {denom}: {e}")))?,
+                amount,
+            }],
+        };
+        let any = msg
+            .to_any()
+            .map_err(|e| CwError::Execute(format!("encode transfer: {e}")))?;
+        let (tx_hash, _) = self.sign_and_broadcast(vec![any], signer, 200_000).await?;
+        Ok(tx_hash)
     }
 
     /// Instantiate a contract from an uploaded code id, signed by `signer`.

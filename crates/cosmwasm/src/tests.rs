@@ -3,11 +3,23 @@
 use std::rc::Rc;
 
 use crate::chains::{LOCAL, OSMOSIS};
-use crate::{CwAsset, CwChain};
+use crate::{CwAsset, CwChain, CwError};
 use cross_vm_core::{BlockTime, ChainProvider, ChainSpec, WalletFactory};
+use cross_vm_macros::define_wallet_roster;
+
+define_wallet_roster! {
+    pub const TEST_WALLETS: TestWallets = {
+        alice: auto @ 0,
+        bob: auto @ 1,
+    };
+}
 
 fn empty_wallets() -> Rc<WalletFactory> {
     Rc::new(WalletFactory::from_roster(&[]).unwrap())
+}
+
+fn wallets() -> Rc<WalletFactory> {
+    Rc::new(WalletFactory::from_roster(TestWallets::SPECS).expect("resolve roster"))
 }
 
 #[test]
@@ -115,6 +127,97 @@ async fn ensure_asset_native_preserves_other_denoms() {
         chain.balance(&bob).await.unwrap(),
         2 * crate::DEFAULT_FUNDING
     );
+}
+
+/// Read an arbitrary bank denom's balance off a mock chain (the trait's `balance` is native-only).
+fn denom_balance(chain: &CwChain, who: &cosmwasm_std::Addr, denom: &str) -> u128 {
+    let p = match chain {
+        CwChain::Mock(p) => p.clone(),
+        CwChain::Rpc(_) => unreachable!("mock chain"),
+    };
+    let balance = p.app().wrap().query_balance(who, denom).unwrap();
+    balance.amount.u128()
+}
+
+#[tokio::test]
+async fn transfer_funds_moves_the_native_denom() {
+    let mut chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let denom = chain.chain_info().native_denom;
+    let alice = chain
+        .wallet_address(TEST_WALLETS.alice)
+        .await
+        .expect("alice addr");
+    let bob = chain
+        .wallet_address(TEST_WALLETS.bob)
+        .await
+        .expect("bob addr");
+    chain.set_balance(&alice, denom, 1_000).await.unwrap();
+
+    let hash = chain
+        .transfer_funds(&bob, denom, 400, TEST_WALLETS.alice)
+        .await
+        .expect("transfer");
+
+    assert_eq!(chain.balance(&alice).await.unwrap(), 600);
+    assert_eq!(chain.balance(&bob).await.unwrap(), 400);
+    // The mock's synthetic hash carries the same shape as a live Tendermint one.
+    assert_eq!(hash.len(), 64, "tendermint tx hash is 32-byte sha256 hex");
+    assert!(hash
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()));
+}
+
+#[tokio::test]
+async fn transfer_funds_moves_a_non_native_denom() {
+    // CosmWasm's bank module moves any denom the sender holds, not just the chain's native one.
+    const IBC_DENOM: &str = "ibc/27394FB092D2ECCD56123C74F36E4C1F926001CEADA9CA97EA622B25F41E5EB2";
+
+    let mut chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let alice = chain
+        .wallet_address(TEST_WALLETS.alice)
+        .await
+        .expect("alice addr");
+    let bob = chain
+        .wallet_address(TEST_WALLETS.bob)
+        .await
+        .expect("bob addr");
+    chain.set_balance(&alice, IBC_DENOM, 900).await.unwrap();
+
+    chain
+        .transfer_funds(&bob, IBC_DENOM, 250, TEST_WALLETS.alice)
+        .await
+        .expect("transfer");
+
+    assert_eq!(denom_balance(&chain, &alice, IBC_DENOM), 650);
+    assert_eq!(denom_balance(&chain, &bob, IBC_DENOM), 250);
+}
+
+#[tokio::test]
+async fn transfer_funds_rejects_an_underfunded_sender() {
+    let mut chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let denom = chain.chain_info().native_denom;
+    let alice = chain
+        .wallet_address(TEST_WALLETS.alice)
+        .await
+        .expect("alice addr");
+    let bob = chain
+        .wallet_address(TEST_WALLETS.bob)
+        .await
+        .expect("bob addr");
+    chain.set_balance(&alice, denom, 100).await.unwrap();
+
+    let err = chain
+        .transfer_funds(&bob, denom, 1_000, TEST_WALLETS.alice)
+        .await
+        .expect_err("sender holds only 100");
+    assert!(
+        matches!(err, CwError::Execute(_)),
+        "insufficient funds is an execute failure, got {err:?}"
+    );
+
+    // The failed send left both balances untouched.
+    assert_eq!(chain.balance(&alice).await.unwrap(), 100);
+    assert_eq!(chain.balance(&bob).await.unwrap(), 0);
 }
 
 #[tokio::test]

@@ -3,8 +3,8 @@
 //! [`SvmRpcProvider`] talks to a real Solana cluster over JSON-RPC (a thin `reqwest`
 //! client). Read paths need no signer: [`block_height`] (`getSlot`), [`balance`]
 //! (`getBalance`), and [`get_account`] (`getAccountInfo`). Write paths (`add_program`,
-//! `send_transaction`, `set_balance`) still return [`SvmError::Unimplemented`] until signing
-//! and broadcast land.
+//! `send_transaction`, `transfer_funds`, `set_balance`) still return
+//! [`SvmError::Unimplemented`] until signing and broadcast land.
 //!
 //! [`block_height`]: SvmRpcProvider::block_height
 //! [`balance`]: SvmRpcProvider::balance
@@ -165,6 +165,18 @@ impl SvmRpcProvider {
         _signer: &SvmSigner,
     ) -> Result<TransactionMetadata, SvmError> {
         Err(SvmError::Unimplemented("rpc send_transaction".into()))
+    }
+
+    /// Transfer `amount` base units (lamports) of `denom` from `signer` to `to`, returning the
+    /// base58 transaction signature.
+    pub async fn transfer_funds(
+        &self,
+        _to: &Address,
+        _denom: &str,
+        _amount: u64,
+        _signer: &SvmSigner,
+    ) -> Result<String, SvmError> {
+        Err(SvmError::Unimplemented("solana rpc transfer_funds".into()))
     }
 
     /// Read on-chain account data (`getAccountInfo`) for `pubkey`.

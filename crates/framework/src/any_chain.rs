@@ -1,12 +1,12 @@
 //! Heterogeneous storage for chains of different VMs.
 
-use cross_vm_core::{BlockTime, ChainKind, ChainProvider, ChainSpec};
+use cross_vm_core::{BlockTime, ChainKind, ChainProvider, ChainSpec, CrossVmError, WalletLabel};
 #[cfg(feature = "cw")]
 use cross_vm_cosmwasm::{CwChain, CwMockProvider, CwRpcProvider};
 #[cfg(feature = "solana")]
 use cross_vm_solana::{SvmChain, SvmMockProvider, SvmRpcProvider};
 #[cfg(feature = "evm")]
-use cross_vm_solidity::{EvmChain, EvmMockProvider, EvmRpcProvider};
+use cross_vm_solidity::{EvmChain, EvmMockProvider, EvmRpcProvider, U256};
 #[cfg(feature = "tron")]
 use cross_vm_tron::{TronChain, TronMockProvider, TronRpcProvider};
 
@@ -115,6 +115,61 @@ impl AnyChain {
             AnyChain::Tron(c) => c.advance_blocks(n, time).await,
         }
     }
+
+    /// Send `amount` of native `denom` from the `wallet` signer to `to`, and return the
+    /// transaction hash.
+    ///
+    /// Forwards to the VM's own `transfer_funds`, so a test can move native funds without
+    /// matching on the VM variant. `to` is recovered with the [`Account`] accessor for this
+    /// chain's VM: a recipient from another VM is a [`CrossVmError::WrongVm`].
+    ///
+    /// `amount` is in the chain's **base units**, never whole tokens: wei on EVM, lamports on
+    /// Solana, sun on Tron, and the bank denom's own units on CosmWasm (`uosmo`, not `OSMO`).
+    /// `u128` is the widest of the per-VM amount types; Solana and Tron take `u64`, so an
+    /// amount that does not fit is a [`CrossVmError::Balance`] naming the base unit rather
+    /// than a silent truncation.
+    ///
+    /// `denom` is passed through verbatim; each VM validates it below this layer. On Solana
+    /// only the mock backend transfers, the RPC backend returns
+    /// [`CrossVmError::Unimplemented`].
+    pub async fn transfer_funds(
+        &self,
+        to: &Account,
+        denom: &str,
+        amount: u128,
+        wallet: WalletLabel<'_>,
+    ) -> Result<String, CrossVmError> {
+        match self {
+            #[cfg(feature = "cw")]
+            AnyChain::CosmWasm(c) => Ok(c.transfer_funds(to.cw()?, denom, amount, wallet).await?),
+            #[cfg(feature = "evm")]
+            AnyChain::Evm(c) => Ok(c
+                .transfer_funds(to.evm()?, denom, U256::from(amount), wallet)
+                .await?),
+            #[cfg(feature = "solana")]
+            AnyChain::Svm(c) => {
+                let lamports = base_units_u64(amount, ChainKind::Svm, "lamports")?;
+                Ok(c.transfer_funds(to.svm()?, denom, lamports, wallet).await?)
+            }
+            #[cfg(feature = "tron")]
+            AnyChain::Tron(c) => {
+                let sun = base_units_u64(amount, ChainKind::Tron, "sun")?;
+                Ok(c.transfer_funds(to.tron()?, denom, sun, wallet).await?)
+            }
+        }
+    }
+}
+
+/// Narrow a base-unit `amount` to the `u64` that Solana and Tron carry balances in.
+///
+/// Overflow is an error, not a truncation: a caller who asks to move more than `u64::MAX`
+/// base units is asking for something the chain cannot represent.
+#[cfg(any(feature = "solana", feature = "tron"))]
+fn base_units_u64(amount: u128, kind: ChainKind, unit: &str) -> Result<u64, CrossVmError> {
+    u64::try_from(amount).map_err(|_| CrossVmError::Balance {
+        kind,
+        reason: format!("amount {amount} exceeds the u64 range of {kind} {unit}"),
+    })
 }
 
 macro_rules! into_any {

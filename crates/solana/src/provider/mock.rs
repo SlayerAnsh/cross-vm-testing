@@ -18,6 +18,7 @@ use solana_instruction::Instruction;
 use solana_keypair::Keypair;
 use solana_native_token::LAMPORTS_PER_SOL;
 use solana_signer::Signer;
+use solana_system_interface::instruction::transfer;
 use solana_transaction::Transaction;
 
 use crate::chains::SolanaChainInfo;
@@ -113,6 +114,30 @@ impl SvmMockProvider {
         // a row) produces a distinct signature instead of being rejected as `AlreadyProcessed`.
         self.svm.borrow_mut().expire_blockhash();
         Ok(meta)
+    }
+
+    /// Transfer `amount` base units (lamports) of `denom` from `signer` to `to`, returning the
+    /// base58 transaction signature.
+    ///
+    /// `denom` must name this chain's native token (see [`ChainProvider::set_balance`]). Runs a
+    /// real System Program transfer through litesvm, so an underfunded sender surfaces as
+    /// [`SvmError::Execute`] and the returned signature is the one litesvm signed.
+    pub async fn transfer_funds(
+        &self,
+        to: &Address,
+        denom: &str,
+        amount: u64,
+        signer: &Keypair,
+    ) -> Result<String, SvmError> {
+        if !denom.eq_ignore_ascii_case(self.info.native_symbol) {
+            return Err(SvmError::Balance(format!(
+                "unknown denom '{denom}': this chain's native token is '{}'",
+                self.info.native_symbol
+            )));
+        }
+        let ix = transfer(&signer.pubkey(), to, amount);
+        let meta = self.send_transaction([ix], signer).await?;
+        Ok(meta.signature.to_string())
     }
 
     /// Read on-chain account data for `pubkey`.
