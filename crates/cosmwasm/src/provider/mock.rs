@@ -10,7 +10,7 @@ use std::rc::Rc;
 use sha2::{Digest, Sha256};
 
 use cosmwasm_std::testing::MockStorage;
-use cosmwasm_std::{coin, Addr, Coin, Empty, Uint128};
+use cosmwasm_std::{coin, Addr, BankMsg, Coin, CosmosMsg, Empty, Uint128};
 use cross_vm_core::{BlockTime, ChainProvider, WalletFactory};
 use cw_multi_test::{
     App, AppBuilder, BankKeeper, Contract, DistributionKeeper, Executor, FailingModule,
@@ -87,17 +87,19 @@ impl CwMockProvider {
         }
     }
 
-    /// Mint the next synthetic tx hash for an execute: sha256 over the sender, contract, and the
-    /// monotonic sequence, rendered as uppercase hex to match Tendermint's tx-hash format. The
-    /// mock does not build or sign a real Cosmos transaction, so this is a stand-in that lets the
-    /// same test script read a hash on both the mock and the live RPC backend; it does not equal
-    /// the hash a live node would compute and must not be treated as a real on-chain identifier.
-    fn next_tx_hash(&self, sender: &Addr, contract: &Addr) -> String {
+    /// Mint the next synthetic tx hash: sha256 over the caller's `fields` (the tx's identifying
+    /// parts) plus the monotonic sequence, rendered as uppercase hex to match Tendermint's
+    /// tx-hash format. The mock does not build or sign a real Cosmos transaction, so this is a
+    /// stand-in that lets the same test script read a hash on both the mock and the live RPC
+    /// backend; it does not equal the hash a live node would compute and must not be treated as a
+    /// real on-chain identifier.
+    fn next_tx_hash(&self, fields: &[&[u8]]) -> String {
         let seq = self.tx_seq.get();
         self.tx_seq.set(seq + 1);
         let mut hasher = Sha256::new();
-        hasher.update(sender.as_bytes());
-        hasher.update(contract.as_bytes());
+        for field in fields {
+            hasher.update(field);
+        }
         hasher.update(seq.to_be_bytes());
         hasher
             .finalize()
@@ -157,9 +159,37 @@ impl CwMockProvider {
             .execute_contract(sender.clone(), addr.clone(), &msg, funds)
             .map_err(|e| CwError::Execute(any_chain(&e)))?;
         Ok(CwExecution {
-            tx_hash: Some(self.next_tx_hash(sender, addr)),
+            tx_hash: Some(self.next_tx_hash(&[sender.as_bytes(), addr.as_bytes()])),
             response,
         })
+    }
+
+    /// Send `amount` base units of bank `denom` from `sender` to `to`, and return the synthetic
+    /// tx hash (see [`Self::next_tx_hash`]).
+    ///
+    /// Any bank denom moves verbatim (`uosmo`, `ibc/...`), not just the chain's native denom. An
+    /// underfunded sender surfaces as [`CwError::Execute`].
+    pub async fn transfer_funds(
+        &self,
+        to: &Addr,
+        denom: &str,
+        amount: u128,
+        sender: &Addr,
+    ) -> Result<String, CwError> {
+        let msg = BankMsg::Send {
+            to_address: to.to_string(),
+            amount: vec![coin(amount, denom)],
+        };
+        self.app
+            .borrow_mut()
+            .execute(sender.clone(), CosmosMsg::Bank(msg))
+            .map_err(|e| CwError::Execute(any_chain(&e)))?;
+        Ok(self.next_tx_hash(&[
+            sender.as_bytes(),
+            to.as_bytes(),
+            denom.as_bytes(),
+            &amount.to_be_bytes(),
+        ]))
     }
 
     /// Run a read-only smart query against a contract instance.

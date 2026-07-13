@@ -169,6 +169,32 @@ impl CwChain {
         }
     }
 
+    /// Transfer `amount` base units of the bank denom `denom` from wallet `wallet` to `to`, and
+    /// return the transaction hash.
+    ///
+    /// Any bank denom moves verbatim (`uosmo`, `ibc/...`), not just the chain's native denom. An
+    /// underfunded sender surfaces as [`CwError::Execute`] on both backends.
+    ///
+    /// The mock performs a real bank send inside its in-process `App` and returns a synthetic,
+    /// deterministic hash in the same textual shape a live node uses; the RPC path signs and
+    /// broadcasts a `MsgSend` under the process-wide broadcast lock.
+    pub async fn transfer_funds(
+        &self,
+        to: &Addr,
+        denom: &str,
+        amount: u128,
+        wallet: WalletLabel<'_>,
+    ) -> Result<String, CwError> {
+        let signer = self.acquire(wallet).await?;
+        match self {
+            CwChain::Mock(p) => p.transfer_funds(to, denom, amount, &signer.address).await,
+            CwChain::Rpc(p) => {
+                let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
+                p.transfer_funds(to, denom, amount, &signer).await
+            }
+        }
+    }
+
     /// Instantiate a contract from an uploaded code id, signed by wallet `wallet`.
     pub async fn instantiate<Init: CwSerde>(
         &self,

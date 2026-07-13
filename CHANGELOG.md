@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added (VM-agnostic native transfers on `AnyChain`)
+
+* `AnyChain::transfer_funds(to, denom, amount, wallet)` fans out to the per-VM `transfer_funds` (CosmWasm, EVM, Solana, Tron) and returns the transaction hash, so a cross-VM test moves native funds without matching on the VM variant. The recipient is a VM-agnostic `Account`; one belonging to another VM surfaces as `CrossVmError::WrongVm` through the existing accessor.
+* `amount` is `u128` base units (wei, lamports, sun, or the bank denom's own units). Solana and Tron carry balances as `u64`, so an amount past `u64::MAX` is a `CrossVmError::Balance` naming the amount and the base unit instead of a silent truncation. `denom` is passed through verbatim and validated by each VM below this layer.
+
+### Added (native TRX transfers on both Tron backends)
+
+* `TronChain::transfer_funds(to, denom, amount, wallet)` sends `amount` base units (sun) of the chain's native token from a roster wallet to `to`, returning the transaction hash as unprefixed hex (the shape java-tron renders a `txID` in). `denom` must name the chain's native token case-insensitively (`TRX`), the same rule `set_balance` applies; anything else is a `TronError::Balance`.
+* The mock backend runs the transfer as a value-carrying call with empty calldata through the shared `RevmCore` and reports the core's synthetic transaction hash. Unlike the payable `call_value` path it does not mint the caller's funds on demand: an underfunded sender is a `TronError::Balance`, as a live chain would reject it.
+* The RPC backend uses java-tron's native transfer path (`/wallet/createtransaction`, sign the `txID`, `/wallet/broadcasttransaction`), then polls for the receipt before returning, holding the per-account broadcast lock across the whole send-to-confirm window like the existing deploy and call paths.
+
 ### Changed (one backend-agnostic `store_code` for CosmWasm)
 
 * **Breaking:** `CwChain::store_code_wasm` and the always-erroring RPC stub `CwRpcProvider::store_code(CwCode)` are removed. A single `CwChain::store_code(code, wallet)` now covers both backends: it takes anything convertible into the new `CwCodeSource` struct (a native `cw-multi-test` contract object via `From<CwCode>`, compiled wasm bytes via `From<Vec<u8>>`, or `CwCodeSource::both(native, wasm)` carrying both representations so identical deploy code runs on the mock and on a live chain) plus an explicit signing wallet label. A source missing the representation the active backend needs surfaces as `CwError::Unimplemented` with a message naming the fix.

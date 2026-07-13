@@ -3,9 +3,17 @@
 use std::rc::Rc;
 
 use crate::prelude::*;
+#[cfg(feature = "evm")]
+use cross_vm_solidity::U256;
 
 fn empty_wallets() -> Rc<WalletFactory> {
     Rc::new(WalletFactory::from_roster(EmptyWallets::SPECS).expect("empty roster"))
+}
+
+/// The framework roster (`alice`, `bob`, ...): `transfer_funds` signs with a wallet label, so
+/// its tests need a roster with resolvable keys rather than the empty one.
+fn test_wallets() -> Rc<WalletFactory> {
+    Rc::new(WalletFactory::from_roster(TestWallets::SPECS).expect("test roster"))
 }
 
 #[test]
@@ -98,6 +106,96 @@ fn chain_id_matches_typed_spec() {
     }
 
     let _ = &wallets;
+}
+
+#[cfg(feature = "cw")]
+#[tokio::test]
+async fn transfer_funds_moves_native_funds_on_cosmwasm() {
+    let mut chain = CwChain::from(OSMOSIS.mock(test_wallets()));
+    let denom = OSMOSIS.native_denom;
+    let alice = chain.wallet_address(TEST_WALLETS.alice).await.unwrap();
+    let bob = chain.wallet_address(TEST_WALLETS.bob).await.unwrap();
+    chain.set_balance(&alice, denom, 1_000).await.unwrap();
+
+    // The mock backends are `Rc`-backed, so the `AnyChain` clone drives the same chain the
+    // typed handle reads balances from.
+    let any = AnyChain::from(chain.clone());
+    let hash = any
+        .transfer_funds(&Account::from(bob.clone()), denom, 400, TEST_WALLETS.alice)
+        .await
+        .expect("transfer");
+
+    assert!(!hash.is_empty(), "transfer returned no tx hash");
+    assert_eq!(chain.balance(&alice).await.unwrap(), 600);
+    assert_eq!(chain.balance(&bob).await.unwrap(), 400);
+}
+
+#[cfg(feature = "evm")]
+#[tokio::test]
+async fn transfer_funds_moves_native_funds_on_evm() {
+    let mut chain = EvmChain::from(ETHEREUM.mock(test_wallets()));
+    let denom = ETHEREUM.native_symbol;
+    let alice = chain.wallet_address(TEST_WALLETS.alice).await.unwrap();
+    let bob = chain.wallet_address(TEST_WALLETS.bob).await.unwrap();
+    chain
+        .set_balance(&alice, denom, U256::from(1_000u64))
+        .await
+        .unwrap();
+
+    let any = AnyChain::from(chain.clone());
+    let hash = any
+        .transfer_funds(&Account::from(bob), denom, 400, TEST_WALLETS.alice)
+        .await
+        .expect("transfer");
+
+    assert!(!hash.is_empty(), "transfer returned no tx hash");
+    assert_eq!(chain.balance(&alice).await.unwrap(), U256::from(600u64));
+    assert_eq!(chain.balance(&bob).await.unwrap(), U256::from(400u64));
+}
+
+#[cfg(all(feature = "cw", feature = "evm"))]
+#[tokio::test]
+async fn transfer_funds_rejects_a_recipient_from_another_vm() {
+    let chain = EvmChain::from(ETHEREUM.mock(test_wallets()));
+    let recipient = Account::CosmWasm(cross_vm_cosmwasm::Addr::unchecked("osmo1xyz"));
+
+    let err = AnyChain::from(chain)
+        .transfer_funds(&recipient, ETHEREUM.native_symbol, 1, TEST_WALLETS.alice)
+        .await
+        .expect_err("a CosmWasm recipient on an EVM chain is the wrong VM");
+    assert!(matches!(
+        err,
+        CrossVmError::WrongVm {
+            expected: ChainKind::Evm,
+            found: ChainKind::CosmWasm,
+        }
+    ));
+}
+
+#[cfg(feature = "tron")]
+#[tokio::test]
+async fn transfer_funds_rejects_an_amount_past_the_u64_base_unit() {
+    // Tron (like Solana) carries balances as `u64`; the VM-agnostic `u128` amount must not be
+    // silently truncated into it.
+    let chain = TronChain::from(TRON_NILE.mock(test_wallets()));
+    let bob = chain.wallet_address(TEST_WALLETS.bob).await.unwrap();
+    let too_big = u128::from(u64::MAX) + 1;
+
+    let err = AnyChain::from(chain)
+        .transfer_funds(
+            &Account::from(bob),
+            TRON_NILE.native_symbol,
+            too_big,
+            TEST_WALLETS.alice,
+        )
+        .await
+        .expect_err("an amount past u64::MAX cannot be represented in sun");
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&too_big.to_string()),
+        "unexpected error: {msg}"
+    );
+    assert!(msg.contains("sun"), "unexpected error: {msg}");
 }
 
 mod hooks {

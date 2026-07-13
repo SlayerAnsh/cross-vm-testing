@@ -155,6 +155,36 @@ impl TronChain {
         }
     }
 
+    /// Transfer `amount` base units (sun) of `denom` from wallet `wallet` to `to`, returning the
+    /// transaction hash as unprefixed hex (the shape java-tron renders a `txID` in).
+    ///
+    /// `denom` must name this chain's native token (`TRX`, case-insensitively), matching
+    /// [`ChainProvider::set_balance`]; a TRC20 transfer goes through the token contract's
+    /// [`call`](Self::call). A sender that cannot cover `amount` is an error on both backends.
+    pub async fn transfer_funds(
+        &self,
+        to: &TronAddress,
+        denom: &str,
+        amount: u64,
+        wallet: WalletLabel<'_>,
+    ) -> Result<String, TronError> {
+        let symbol = self.chain_info().native_symbol;
+        if !denom.eq_ignore_ascii_case(symbol) {
+            return Err(TronError::Balance(format!(
+                "unknown denom '{denom}': this chain's native token is '{symbol}'"
+            )));
+        }
+        let signer = self.acquire(wallet).await?;
+        let addr = self.signer_address(&signer);
+        match self {
+            TronChain::Mock(p) => p.transfer_funds(to, amount, &addr).await,
+            TronChain::Rpc(p) => {
+                let _g = Self::broadcast_guard(p, &addr).await;
+                p.transfer_funds(to, amount, &signer).await
+            }
+        }
+    }
+
     /// Run a read-only static call against `to`.
     pub async fn static_call(
         &self,
@@ -313,7 +343,23 @@ impl ChainProvider for TronChain {
 mod tests {
     use super::*;
     use crate::chains::LOCAL;
+    use crate::tvm::resources::SUN_PER_TRX;
+    use cross_vm_macros::define_wallet_roster;
     use std::rc::Rc;
+
+    define_wallet_roster! {
+        pub const TEST_WALLETS: TestWallets = {
+            alice: auto @ 0,
+            bob: auto @ 1,
+        };
+    }
+
+    /// A mock chain carrying the test roster (its `auto` wallets start unfunded).
+    fn chain_with_wallets() -> TronChain {
+        TronChain::from(LOCAL.mock(Rc::new(
+            WalletFactory::from_roster(TestWallets::SPECS).unwrap(),
+        )))
+    }
 
     #[tokio::test]
     async fn mock_chain_funds_account() {
@@ -347,5 +393,64 @@ mod tests {
             .await
             .unwrap();
         assert!(chain.balance(&a).await.unwrap() >= huge);
+    }
+
+    #[tokio::test]
+    async fn transfer_funds_moves_native_balance_on_mock() {
+        let mut chain = chain_with_wallets();
+        let alice = chain.wallet_address(TEST_WALLETS.alice).await.unwrap();
+        let bob = chain.wallet_address(TEST_WALLETS.bob).await.unwrap();
+        chain
+            .set_balance(&alice, "TRX", 10 * SUN_PER_TRX)
+            .await
+            .unwrap();
+
+        let hash = chain
+            .transfer_funds(&bob, "TRX", 4 * SUN_PER_TRX, TEST_WALLETS.alice)
+            .await
+            .expect("native transfer succeeds");
+
+        // The mock reports the core's synthetic hash in the RPC arm's textual shape: a 32-byte
+        // hash as unprefixed hex.
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(chain.balance(&bob).await.unwrap(), 4 * SUN_PER_TRX);
+        assert_eq!(chain.balance(&alice).await.unwrap(), 6 * SUN_PER_TRX);
+    }
+
+    #[tokio::test]
+    async fn transfer_funds_rejects_unknown_denom() {
+        let mut chain = chain_with_wallets();
+        let alice = chain.wallet_address(TEST_WALLETS.alice).await.unwrap();
+        let bob = chain.wallet_address(TEST_WALLETS.bob).await.unwrap();
+        chain
+            .set_balance(&alice, "TRX", 10 * SUN_PER_TRX)
+            .await
+            .unwrap();
+
+        let err = chain
+            .transfer_funds(&bob, "BTC", SUN_PER_TRX, TEST_WALLETS.alice)
+            .await
+            .expect_err("BTC is not this chain's native token");
+        assert!(matches!(err, TronError::Balance(_)));
+        assert_eq!(chain.balance(&bob).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn transfer_funds_rejects_insufficient_balance() {
+        // The mock mints native funds on demand for a payable `call_value`; a transfer must NOT,
+        // so an underfunded sender errors instead of silently minting the shortfall.
+        let mut chain = chain_with_wallets();
+        let alice = chain.wallet_address(TEST_WALLETS.alice).await.unwrap();
+        let bob = chain.wallet_address(TEST_WALLETS.bob).await.unwrap();
+        chain.set_balance(&alice, "TRX", SUN_PER_TRX).await.unwrap();
+
+        let err = chain
+            .transfer_funds(&bob, "TRX", 5 * SUN_PER_TRX, TEST_WALLETS.alice)
+            .await
+            .expect_err("alice cannot cover 5 TRX");
+        assert!(matches!(err, TronError::Balance(_)));
+        assert_eq!(chain.balance(&alice).await.unwrap(), SUN_PER_TRX);
+        assert_eq!(chain.balance(&bob).await.unwrap(), 0);
     }
 }

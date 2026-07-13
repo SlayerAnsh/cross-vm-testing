@@ -176,6 +176,32 @@ impl TronMockProvider {
             .map_err(|f| TronError::Execute(f.call_message("call")))
     }
 
+    /// Transfer `amount` sun of the native token from `from` to `to`, returning the transaction
+    /// hash as unprefixed hex (the shape java-tron renders a `txID` in).
+    ///
+    /// A native transfer is a value-carrying call with empty calldata, so it runs through the same
+    /// [`RevmCore`] path as [`call_value`](Self::call_value) and carries the core's synthetic tx
+    /// hash. Unlike `call_value` it does NOT mint on demand: the core tops the caller up to cover
+    /// the value, so the sender's balance is checked first and a shortfall errors, as a live chain
+    /// would reject it. `amount` is sun, stored 1:1 as revm's `U256` at the boundary.
+    pub async fn transfer_funds(
+        &self,
+        to: &TronAddress,
+        amount: u64,
+        from: &TronAddress,
+    ) -> Result<String, TronError> {
+        let current = self.balance(from).await?;
+        if current < amount {
+            return Err(TronError::Balance(format!(
+                "insufficient balance: {from} holds {current} sun, needs {amount}"
+            )));
+        }
+        self.core
+            .call(to.as_evm(), &[], from.as_evm(), U256::from(amount))
+            .map(|e| hex::encode(e.tx_hash))
+            .map_err(|f| TronError::Execute(f.call_message("transfer_funds")))
+    }
+
     /// Run a read-only static call against `to`.
     pub async fn static_call(
         &self,

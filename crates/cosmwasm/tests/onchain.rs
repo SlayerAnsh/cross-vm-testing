@@ -20,6 +20,9 @@ use cross_vm_macros::define_wallet_roster;
 define_wallet_roster! {
     pub const ONCHAIN_WALLETS: OnchainWallets = {
         test: env_mnemonic("MNEMONIC_TEST") @ 0,
+        // Transfer recipient: account index 1 off the same mnemonic, so it needs no funding
+        // of its own (a bank send creates the account on first receipt).
+        sink: env_mnemonic("MNEMONIC_TEST") @ 1,
     };
 }
 
@@ -90,4 +93,53 @@ async fn live_counter_on_osmosis_testnet() {
         .expect("query count after increment");
     println!("count after increment: {}", resp.count);
     assert_eq!(resp.count, 1, "increment should raise the count to 1");
+}
+
+#[tokio::test]
+#[ignore = "live: requires Osmosis testnet RPC + funded MNEMONIC_TEST osmo address (coin 118)"]
+async fn live_transfer_funds_on_osmosis_testnet() {
+    dotenvy::from_path(ENV_PATH).unwrap_or_else(|e| panic!("load {ENV_PATH}: {e}"));
+    let wallets = Rc::new(
+        WalletFactory::from_roster(OnchainWallets::SPECS)
+            .unwrap_or_else(|e| panic!("resolve roster: {e}")),
+    );
+    let chain: CwChain = OSMOSIS_TESTNET.rpc(wallets).into();
+    let denom = chain.chain_info().native_denom;
+
+    // A bank send costs the fee plus the amount; keep the amount tiny so a faucet grant covers
+    // many runs.
+    const AMOUNT: u128 = 1_000;
+
+    let from = chain
+        .wallet_address(ONCHAIN_WALLETS.test)
+        .await
+        .expect("derive test wallet");
+    let to = chain
+        .wallet_address(ONCHAIN_WALLETS.sink)
+        .await
+        .expect("derive sink wallet");
+    let balance = chain.balance(&from).await.expect("read balance");
+    println!("sender (osmo):   {from}");
+    println!("recipient (osmo): {to}");
+    println!("balance:          {balance} {denom}");
+    assert!(
+        balance > AMOUNT,
+        "wallet {from} has no testnet OSMO; fund this osmo address (BIP-44 coin 118, distinct \
+         from the EVM address) and retry"
+    );
+
+    let before = chain.balance(&to).await.expect("read recipient balance");
+    let tx_hash = chain
+        .transfer_funds(&to, denom, AMOUNT, ONCHAIN_WALLETS.test)
+        .await
+        .expect("transfer_funds");
+    assert!(!tx_hash.is_empty(), "tx hash should be non-empty");
+    println!("transfer tx hash: {tx_hash}");
+
+    let after = chain.balance(&to).await.expect("read recipient balance");
+    assert_eq!(
+        after,
+        before + AMOUNT,
+        "recipient should be credited the transferred amount"
+    );
 }
