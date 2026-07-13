@@ -2,7 +2,7 @@
 //!
 //! Each project defines its wallet *roster* once (typically via `define_wallet_roster!`) as a
 //! compile-time [`WalletSpec`] table. Every row is self-describing: a label plus a
-//! [`WalletSource`] that fully says how the wallet resolves, one of three ways:
+//! [`WalletSource`] that fully says how the wallet resolves, one of four ways:
 //!
 //! - [`WalletSource::EnvMnemonic`] — read a BIP-39 phrase from a process env var, then derive
 //!   via the row's account index / HD path.
@@ -10,6 +10,13 @@
 //!   chains; the address is random and must be funded in the setup `fund` phase).
 //! - [`WalletSource::EnvPrivateKey`] — read a raw VM-native private key from a process env var
 //!   (hex for EVM/Cosmos, base58 for Solana); no HD derivation.
+//! - [`WalletSource::EnvAny`] — try a chain of [`EnvCandidate`]s in declaration order; the
+//!   first whose env var is set and non-blank wins and dictates the resolved kind (mnemonic
+//!   or private key).
+//!
+//! An env var that is unset, empty, or whitespace-only is uniformly treated as missing, and
+//! set values are trimmed before use, so a `FOO=` line in a `.env` behaves exactly like an
+//! absent variable.
 //!
 //! Secrets live only in the process environment (load a `.env` with `dotenvy` before the wallet is
 //! used if you keep them in a file). The [`WalletFactory`] resolves every roster row into a
@@ -65,6 +72,28 @@ impl AsRef<str> for WalletLabel<'_> {
     }
 }
 
+/// One candidate in a [`WalletSource::EnvAny`] fallback chain: a process env var plus how its
+/// value is interpreted. A candidate whose var is unset or blank (empty/whitespace-only) is
+/// skipped in favor of the next one. All fields are `&'static`/`Copy` so chains are `const`
+/// slice literals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnvCandidate {
+    /// The var holds a BIP-39 mnemonic phrase, derived with this candidate's own BIP-44
+    /// account index (the roster row's `index` is not consulted) and the row's `hd_path`.
+    Mnemonic {
+        /// Process env var holding the phrase.
+        var: &'static str,
+        /// BIP-44 account index used when this candidate wins.
+        index: u32,
+    },
+    /// The var holds a raw VM-native private key (hex for EVM/Cosmos, base58 for Solana).
+    /// Derived directly with no HD path; the row's `index`/`hd_path` are ignored.
+    PrivateKey {
+        /// Process env var holding the key.
+        var: &'static str,
+    },
+}
+
 /// How a wallet resolves its signing material. Each roster row carries exactly one. Stored by the
 /// [`WalletFactory`] and resolved dynamically (env vars are read at wallet-use time).
 #[derive(Clone, Copy, Debug)]
@@ -79,6 +108,11 @@ pub enum WalletSource {
     /// Read a raw VM-native private key from this process env var (hex for EVM/Cosmos, base58
     /// for Solana). Derived directly with no HD path; the row's `index`/`hd_path` are ignored.
     EnvPrivateKey(&'static str),
+    /// Try each [`EnvCandidate`] in declaration order; the first whose env var is set and
+    /// non-blank wins and dictates the resolved kind (mnemonic or private key). When every
+    /// candidate is missing, [`WalletFactory::resolve`] fails with
+    /// [`CrossVmError::SecretVarsAllMissing`], naming each var tried.
+    EnvAny(&'static [EnvCandidate]),
 }
 
 /// A single compile-time wallet declaration. All fields are `&'static` so roster tables are
@@ -171,7 +205,9 @@ impl WalletFactory {
     ///
     /// `Auto` returns its pre-generated mnemonic; `EnvMnemonic`/`EnvPrivateKey` read their process
     /// env var (a missing variable is a [`CrossVmError::SecretVarMissing`] error raised here, at the
-    /// signing call, not at [`from_roster`](Self::from_roster)).
+    /// signing call, not at [`from_roster`](Self::from_roster)). `EnvAny` walks its candidates in
+    /// declaration order and resolves as the first one whose var is set and non-blank; when none
+    /// is, the error is [`CrossVmError::SecretVarsAllMissing`], listing every var tried.
     pub fn resolve<'a>(&self, label: WalletLabel<'a>) -> Result<WalletDef, CrossVmError> {
         let row = self
             .rows
@@ -196,8 +232,51 @@ impl WalletFactory {
             WalletSource::EnvPrivateKey(var) => {
                 WalletDef::PrivateKey(read_env(var, label.as_str())?)
             }
+            WalletSource::EnvAny(candidates) => {
+                resolve_any(candidates, &row.hd_path, label.as_str())?
+            }
         })
     }
+}
+
+/// Walk an `EnvAny` fallback chain in declaration order; the first candidate whose env var is set
+/// and non-blank wins. A winning `Mnemonic` candidate carries its own account index (paired with
+/// the row's `hd_path`); a winning `PrivateKey` ignores both. When every candidate is missing, the
+/// error names each var tried, never any value.
+fn resolve_any(
+    candidates: &[EnvCandidate],
+    hd_path: &Option<String>,
+    label: &str,
+) -> Result<WalletDef, CrossVmError> {
+    for candidate in candidates {
+        match *candidate {
+            EnvCandidate::Mnemonic { var, index } => {
+                if let Some(phrase) = read_env_opt(var) {
+                    return Ok(WalletDef::Mnemonic {
+                        phrase,
+                        index,
+                        hd_path: hd_path.clone(),
+                    });
+                }
+            }
+            EnvCandidate::PrivateKey { var } => {
+                if let Some(key) = read_env_opt(var) {
+                    return Ok(WalletDef::PrivateKey(key));
+                }
+            }
+        }
+    }
+    Err(CrossVmError::SecretVarsAllMissing {
+        label: label.to_string(),
+        vars: candidates
+            .iter()
+            .map(|c| match c {
+                EnvCandidate::Mnemonic { var, .. } | EnvCandidate::PrivateKey { var } => {
+                    var.to_string()
+                }
+            })
+            .collect(),
+    })
 }
 
 /// Standard BIP-44 account path `m/44'/<coin>'/<index>'/0/0` (EVM and Cosmos shape). Solana
@@ -212,12 +291,21 @@ fn generate_mnemonic() -> Result<String, CrossVmError> {
         .map_err(|e| CrossVmError::wallet(format!("generating mnemonic: {e}")))
 }
 
-/// Read a secret from the process environment, mapping absence to a labelled error.
+/// Read a secret from the process environment, mapping absence (unset or blank) to a labelled
+/// error. The error carries only the var and label, never the value.
 fn read_env(var: &str, label: &str) -> Result<String, CrossVmError> {
-    std::env::var(var).map_err(|_| CrossVmError::SecretVarMissing {
+    read_env_opt(var).ok_or_else(|| CrossVmError::SecretVarMissing {
         label: label.to_string(),
         var: var.to_string(),
     })
+}
+
+/// `Some(trimmed value)` when `var` is set and non-blank; `None` when it is unset, empty, or
+/// whitespace-only, so a `FOO=` line behaves exactly like an absent variable.
+fn read_env_opt(var: &str) -> Option<String> {
+    let value = std::env::var(var).ok()?;
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// Per-VM key derivation: turn a mnemonic + HD path into that ecosystem's signer.
@@ -385,6 +473,157 @@ mod tests {
             f.resolve(NOBODY).unwrap_err(),
             CrossVmError::WalletNotFound { .. }
         ));
+    }
+
+    /// Build a one-row roster whose `alice` resolves via the given `EnvAny` chain.
+    fn any_factory(chain: &'static [EnvCandidate]) -> WalletFactory {
+        any_factory_with_path(chain, None)
+    }
+
+    fn any_factory_with_path(
+        chain: &'static [EnvCandidate],
+        hd_path: Option<&'static str>,
+    ) -> WalletFactory {
+        let roster: &[WalletSpec] = &[WalletSpec {
+            label: "alice",
+            source: WalletSource::EnvAny(chain),
+            index: 0,
+            hd_path,
+        }];
+        WalletFactory::from_roster(roster).unwrap()
+    }
+
+    #[test]
+    fn blank_env_var_is_missing_for_single_var_sources() {
+        // `FOO=` (or whitespace-only) counts as unset on the single-var paths too, erroring at
+        // resolve rather than in downstream BIP-39 parsing. Set values are trimmed.
+        std::env::set_var("CORE_TEST_BLANK_SINGLE", "   ");
+        let roster: &[WalletSpec] = &[WalletSpec {
+            label: "alice",
+            source: WalletSource::EnvMnemonic("CORE_TEST_BLANK_SINGLE"),
+            index: 0,
+            hd_path: None,
+        }];
+        let f = WalletFactory::from_roster(roster).unwrap();
+        assert!(matches!(
+            f.resolve(ALICE).unwrap_err(),
+            CrossVmError::SecretVarMissing { ref var, .. } if var == "CORE_TEST_BLANK_SINGLE"
+        ));
+
+        std::env::set_var("CORE_TEST_PADDED_SINGLE", format!("  {PHRASE}  "));
+        let roster: &[WalletSpec] = &[WalletSpec {
+            label: "alice",
+            source: WalletSource::EnvMnemonic("CORE_TEST_PADDED_SINGLE"),
+            index: 0,
+            hd_path: None,
+        }];
+        let f = WalletFactory::from_roster(roster).unwrap();
+        assert_eq!(mnemonic(&f.resolve(ALICE).unwrap()).0, PHRASE);
+    }
+
+    #[test]
+    fn env_any_first_candidate_wins() {
+        std::env::set_var("CORE_TEST_ANY_FIRST_A", PHRASE);
+        std::env::set_var("CORE_TEST_ANY_FIRST_B", "0xsecond");
+        const CHAIN: &[EnvCandidate] = &[
+            EnvCandidate::Mnemonic {
+                var: "CORE_TEST_ANY_FIRST_A",
+                index: 0,
+            },
+            EnvCandidate::PrivateKey {
+                var: "CORE_TEST_ANY_FIRST_B",
+            },
+        ];
+        let f = any_factory(CHAIN);
+        assert_eq!(mnemonic(&f.resolve(ALICE).unwrap()), (PHRASE, 0));
+    }
+
+    #[test]
+    fn env_any_blank_candidate_falls_through() {
+        // A blank (whitespace-only) first var is skipped, and the winning value is trimmed.
+        std::env::set_var("CORE_TEST_ANY_BLANK_A", "   ");
+        std::env::set_var("CORE_TEST_ANY_BLANK_B", format!(" {PHRASE} "));
+        const CHAIN: &[EnvCandidate] = &[
+            EnvCandidate::Mnemonic {
+                var: "CORE_TEST_ANY_BLANK_A",
+                index: 0,
+            },
+            EnvCandidate::Mnemonic {
+                var: "CORE_TEST_ANY_BLANK_B",
+                index: 2,
+            },
+        ];
+        let f = any_factory(CHAIN);
+        assert_eq!(mnemonic(&f.resolve(ALICE).unwrap()), (PHRASE, 2));
+    }
+
+    #[test]
+    fn env_any_private_key_wins_over_later_mnemonic() {
+        // The winning candidate's kind decides the def: a private key resolves directly even
+        // when a later mnemonic candidate is also set.
+        std::env::set_var("CORE_TEST_ANY_PK_A", "0xdeadbeef");
+        std::env::set_var("CORE_TEST_ANY_PK_B", PHRASE);
+        const CHAIN: &[EnvCandidate] = &[
+            EnvCandidate::PrivateKey {
+                var: "CORE_TEST_ANY_PK_A",
+            },
+            EnvCandidate::Mnemonic {
+                var: "CORE_TEST_ANY_PK_B",
+                index: 1,
+            },
+        ];
+        let f = any_factory(CHAIN);
+        assert!(matches!(
+            f.resolve(ALICE).unwrap(),
+            WalletDef::PrivateKey(k) if k == "0xdeadbeef"
+        ));
+    }
+
+    #[test]
+    fn env_any_mnemonic_candidate_honors_own_index() {
+        // A winning mnemonic candidate derives with its own index (not the row's, which is 0
+        // here) and the row's hd_path.
+        std::env::set_var("CORE_TEST_ANY_INDEX", PHRASE);
+        const CHAIN: &[EnvCandidate] = &[EnvCandidate::Mnemonic {
+            var: "CORE_TEST_ANY_INDEX",
+            index: 7,
+        }];
+        let f = any_factory_with_path(CHAIN, Some("m/44'/118'/7'/0/0"));
+        match f.resolve(ALICE).unwrap() {
+            WalletDef::Mnemonic {
+                phrase,
+                index,
+                hd_path,
+            } => {
+                assert_eq!(phrase, PHRASE);
+                assert_eq!(index, 7);
+                assert_eq!(hd_path.as_deref(), Some("m/44'/118'/7'/0/0"));
+            }
+            other => panic!("expected a resolved mnemonic def, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_any_all_missing_names_every_var_in_order() {
+        std::env::remove_var("CORE_TEST_ANY_MISSING_A");
+        std::env::set_var("CORE_TEST_ANY_MISSING_B", "");
+        const CHAIN: &[EnvCandidate] = &[
+            EnvCandidate::Mnemonic {
+                var: "CORE_TEST_ANY_MISSING_A",
+                index: 0,
+            },
+            EnvCandidate::PrivateKey {
+                var: "CORE_TEST_ANY_MISSING_B",
+            },
+        ];
+        let f = any_factory(CHAIN);
+        match f.resolve(ALICE).unwrap_err() {
+            CrossVmError::SecretVarsAllMissing { label, vars } => {
+                assert_eq!(label, "alice");
+                assert_eq!(vars, ["CORE_TEST_ANY_MISSING_A", "CORE_TEST_ANY_MISSING_B"]);
+            }
+            other => panic!("expected SecretVarsAllMissing, got {other:?}"),
+        }
     }
 
     #[test]
