@@ -7,7 +7,7 @@ use std::rc::Rc;
 use cosmwasm_std::{coins, Empty, Uint128};
 use cross_vm_core::{ChainProvider, WalletFactory};
 use cross_vm_cosmwasm::chains::OSMOSIS;
-use cross_vm_cosmwasm::CwChain;
+use cross_vm_cosmwasm::{CwChain, CwGasLimit};
 use cross_vm_macros::define_wallet_roster;
 use cw_multi_test::{Contract, ContractWrapper};
 use vault::{AmountResponse, ExecuteMsgFns, QueryMsgFns};
@@ -45,7 +45,7 @@ async fn payable_deposit_attaches_funds_then_borrow_and_query() {
         .expect("fund alice");
 
     let stored = chain
-        .store_code(vault_contract(), TEST_WALLETS.alice)
+        .store_code(vault_contract(), TEST_WALLETS.alice, CwGasLimit::Estimated)
         .await
         .expect("store");
     let instantiated = chain
@@ -55,21 +55,41 @@ async fn payable_deposit_attaches_funds_then_borrow_and_query() {
             TEST_WALLETS.alice,
             &[],
             "vault",
+            CwGasLimit::Estimated,
         )
         .await
         .expect("instantiate");
     let vault = chain.contract_as::<vault::VaultContract>(instantiated.address);
 
+    // Each typed execute fn has a generated `estimate_<fn>` sibling: same args minus the gas
+    // limit. On the mock (no gas meter) the forecast is absent, like the receipt's `gas` field.
+    let est = vault
+        .estimate_deposit("alice", Uint128::new(1000), &coins(100, denom))
+        .await
+        .expect("estimate deposit");
+    assert!(est.is_none(), "mock cannot meter, got {est:?}");
+
     let before = chain.balance(&alice).await.expect("balance before");
     vault
-        .deposit("alice", Uint128::new(1000), &coins(100, denom))
+        .deposit(
+            "alice",
+            Uint128::new(1000),
+            &coins(100, denom),
+            CwGasLimit::Estimated,
+        )
         .await
         .expect("deposit");
     let after = chain.balance(&alice).await.expect("balance after");
     assert!(after < before);
 
+    let est = vault
+        .estimate_borrow("alice", Uint128::new(500))
+        .await
+        .expect("estimate borrow");
+    assert!(est.is_none(), "mock cannot meter, got {est:?}");
+
     vault
-        .borrow("alice", Uint128::new(500))
+        .borrow("alice", Uint128::new(500), CwGasLimit::Estimated)
         .await
         .expect("borrow");
 

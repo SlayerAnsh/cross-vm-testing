@@ -28,7 +28,7 @@ use crate::asset::EvmAsset;
 use crate::chains::EvmChainInfo;
 use crate::error::EvmError;
 use crate::provider::address::address_from_label;
-use crate::provider::{EvmDeploy, EvmExecution, EvmGas};
+use crate::provider::{EvmDeploy, EvmExecution, EvmGas, EvmGasLimit};
 
 /// The gas a mined receipt reports: the billed gas, plus the fee it implies. The effective price
 /// already folds in the EIP-1559 base fee and priority tip, so `used * price` is the whole fee.
@@ -145,18 +145,39 @@ impl EvmRpcProvider {
 
     /// Deploy bytecode via a create transaction signed by `signer`, returning the new contract
     /// address and the broadcast transaction hash from the mined receipt.
+    ///
+    /// `limit` becomes the transaction's `gas` field: [`EvmGasLimit::Exact`] verbatim (the node
+    /// mines it out of gas if it does not suffice), [`EvmGasLimit::Estimated`] from an
+    /// `eth_estimateGas` of this very create, scaled by the chain's `gas_adjustment`. Setting the
+    /// field explicitly also stops alloy's gas filler from estimating on its own.
     pub async fn deploy_create(
         &self,
         bytecode: Bytes,
         constructor_args: impl AsRef<[u8]>,
         signer: &PrivateKeySigner,
+        limit: EvmGasLimit,
     ) -> Result<EvmDeploy, EvmError> {
+        let gas_limit = match limit {
+            EvmGasLimit::Exact(n) => n,
+            EvmGasLimit::Estimated => {
+                let quote = self
+                    .estimate_deploy_create(
+                        bytecode.clone(),
+                        constructor_args.as_ref(),
+                        &signer.address(),
+                    )
+                    .await?;
+                self.info.adjusted_gas_limit(quote.used)
+            }
+        };
         let mut initcode = bytecode.to_vec();
         initcode.extend_from_slice(constructor_args.as_ref());
         let provider = self.signing_provider(signer)?;
         // `with_deploy_code` sets the input and marks the tx kind as Create; setting only the
         // input leaves the recipient ambiguous and the wallet filler rejects it.
-        let tx = TransactionRequest::default().with_deploy_code(Bytes::from(initcode));
+        let tx = TransactionRequest::default()
+            .with_deploy_code(Bytes::from(initcode))
+            .with_gas_limit(gas_limit);
         let receipt = provider
             .send_transaction(tx)
             .await
@@ -174,6 +195,83 @@ impl EvmRpcProvider {
         })
     }
 
+    /// Gas a [`deploy_create`](Self::deploy_create) of this bytecode would be billed
+    /// (`eth_estimateGas`), plus the fee it would cost at the node's current gas price.
+    ///
+    /// Signs nothing and broadcasts nothing, so it takes the sender's address rather than its
+    /// signer, and needs no broadcast lock.
+    pub async fn estimate_deploy_create(
+        &self,
+        bytecode: Bytes,
+        constructor_args: impl AsRef<[u8]>,
+        from: &Address,
+    ) -> Result<EvmGas, EvmError> {
+        let mut initcode = bytecode.to_vec();
+        initcode.extend_from_slice(constructor_args.as_ref());
+        let tx = TransactionRequest::default()
+            .with_from(*from)
+            .with_deploy_code(Bytes::from(initcode));
+        let provider = self.provider()?;
+        let used = provider
+            .estimate_gas(tx)
+            .await
+            .map_err(|e| EvmError::Deploy(e.to_string()))?;
+        self.priced(&provider, used).await
+    }
+
+    /// Gas a [`call`](Self::call) with these arguments would be billed (see
+    /// [`estimate_call_value`](Self::estimate_call_value)).
+    pub async fn estimate_call(
+        &self,
+        to: &Address,
+        calldata: impl AsRef<[u8]>,
+        from: &Address,
+    ) -> Result<EvmGas, EvmError> {
+        self.estimate_call_value(to, calldata, from, U256::ZERO)
+            .await
+    }
+
+    /// Gas a [`call_value`](Self::call_value) with these arguments would be billed
+    /// (`eth_estimateGas`), plus the fee it would cost at the node's current gas price.
+    ///
+    /// `eth_estimateGas` executes the transaction on the node, so a call that would revert comes
+    /// back as an error (carrying the node's revert reason) rather than as a gas figure. That error
+    /// is propagated, not swallowed.
+    pub async fn estimate_call_value(
+        &self,
+        to: &Address,
+        calldata: impl AsRef<[u8]>,
+        from: &Address,
+        value: U256,
+    ) -> Result<EvmGas, EvmError> {
+        let tx = TransactionRequest::default()
+            .with_from(*from)
+            .to(*to)
+            .value(value)
+            .input(Bytes::copy_from_slice(calldata.as_ref()).into());
+        let provider = self.provider()?;
+        let used = provider
+            .estimate_gas(tx)
+            .await
+            .map_err(|e| EvmError::Execute(e.to_string()))?;
+        self.priced(&provider, used).await
+    }
+
+    /// Price `used` gas at the node's current gas price (`eth_gasPrice`), which already folds the
+    /// EIP-1559 base fee and a tip estimate into one number, so the forecast is denominated exactly
+    /// like the `effective_gas_price` the receipt will report. It is a quote at estimation time: the
+    /// base fee moves block to block, so the fee actually paid can differ.
+    async fn priced(&self, provider: &impl Provider, used: u64) -> Result<EvmGas, EvmError> {
+        let price = provider
+            .get_gas_price()
+            .await
+            .map_err(|e| EvmError::Rpc(e.to_string()))?;
+        Ok(EvmGas {
+            used,
+            fee: Some(u128::from(used) * price),
+        })
+    }
+
     /// Execute a state-mutating call against `to`, signed by `signer`.
     ///
     /// Unlike the mock, a broadcast transaction yields no return data; the [`EvmExecution`]
@@ -183,24 +281,39 @@ impl EvmRpcProvider {
         to: &Address,
         calldata: impl AsRef<[u8]>,
         signer: &PrivateKeySigner,
+        limit: EvmGasLimit,
     ) -> Result<EvmExecution, EvmError> {
-        self.call_value(to, calldata, signer, U256::ZERO).await
+        self.call_value(to, calldata, signer, U256::ZERO, limit)
+            .await
     }
 
     /// Execute a state-mutating call against `to` carrying `value` wei (a payable call), signed by
     /// `signer`. On a live chain the signer must already hold the value (no minting).
+    ///
+    /// `limit` becomes the transaction's `gas` field (see [`deploy_create`](Self::deploy_create)).
     pub async fn call_value(
         &self,
         to: &Address,
         calldata: impl AsRef<[u8]>,
         signer: &PrivateKeySigner,
         value: U256,
+        limit: EvmGasLimit,
     ) -> Result<EvmExecution, EvmError> {
+        let gas_limit = match limit {
+            EvmGasLimit::Exact(n) => n,
+            EvmGasLimit::Estimated => {
+                let quote = self
+                    .estimate_call_value(to, calldata.as_ref(), &signer.address(), value)
+                    .await?;
+                self.info.adjusted_gas_limit(quote.used)
+            }
+        };
         let provider = self.signing_provider(signer)?;
         let tx = TransactionRequest::default()
             .to(*to)
             .value(value)
-            .input(Bytes::copy_from_slice(calldata.as_ref()).into());
+            .input(Bytes::copy_from_slice(calldata.as_ref()).into())
+            .with_gas_limit(gas_limit);
         let receipt = provider
             .send_transaction(tx)
             .await

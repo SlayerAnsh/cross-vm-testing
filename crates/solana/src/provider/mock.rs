@@ -14,6 +14,7 @@ use litesvm::LiteSVM;
 use solana_account::Account;
 use solana_address::Address;
 use solana_clock::Clock;
+use solana_compute_budget_interface::ComputeBudgetInstruction;
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
 use solana_native_token::LAMPORTS_PER_SOL;
@@ -23,11 +24,47 @@ use solana_transaction::Transaction;
 
 use crate::chains::SolanaChainInfo;
 use crate::error::SvmError;
-use crate::provider::SvmDeploy;
+use crate::provider::{SvmComputeBudget, SvmDeploy, MAX_COMPUTE_UNIT_LIMIT};
 
 /// Default funding handed to accounts created via [`ChainProvider::new_account`]:
 /// 100 SOL in lamports.
 pub const DEFAULT_FUNDING_LAMPORTS: u64 = 100 * LAMPORTS_PER_SOL;
+
+/// Discriminator byte of `ComputeBudgetInstruction::SetComputeUnitLimit` in its encoded data.
+const SET_COMPUTE_UNIT_LIMIT_TAG: u8 = 2;
+
+/// Whether `ix` is a `SetComputeUnitLimit`. The runtime rejects a transaction carrying two of
+/// them, so a caller-supplied one has to be caught before it collides with the one prepended here.
+fn is_set_compute_unit_limit(ix: &Instruction) -> bool {
+    ix.program_id == solana_compute_budget_interface::ID
+        && ix.data.first() == Some(&SET_COMPUTE_UNIT_LIMIT_TAG)
+}
+
+/// The instruction list a transaction actually carries: `instructions` under a `SetComputeUnitLimit`
+/// of `units`.
+fn under_cap(instructions: &[Instruction], units: u32) -> Result<Vec<Instruction>, SvmError> {
+    if instructions.iter().any(is_set_compute_unit_limit) {
+        return Err(SvmError::Execute(
+            "instructions already set a compute unit limit: the budget is the `budget` argument, \
+             and a second SetComputeUnitLimit is rejected by the runtime as a duplicate"
+                .into(),
+        ));
+    }
+    let mut capped = Vec::with_capacity(instructions.len() + 1);
+    capped.push(ComputeBudgetInstruction::set_compute_unit_limit(units));
+    capped.extend_from_slice(instructions);
+    Ok(capped)
+}
+
+/// `consumed` compute units scaled by `adjustment` and rounded up, clamped to the runtime's
+/// per-transaction ceiling (which a `SetComputeUnitLimit` above is silently clamped to anyway).
+pub(crate) fn adjusted(consumed: u64, adjustment: f64) -> u32 {
+    let scaled = (consumed as f64) * adjustment;
+    if scaled.ceil() >= f64::from(MAX_COMPUTE_UNIT_LIMIT) {
+        return MAX_COMPUTE_UNIT_LIMIT;
+    }
+    scaled.ceil() as u32
+}
 
 /// In-process Solana provider backed by `litesvm`.
 ///
@@ -70,6 +107,8 @@ impl SvmMockProvider {
     }
 
     /// Load a program into the chain at a fresh program id.
+    ///
+    /// Takes no compute budget: see [`add_program_at`](Self::add_program_at).
     pub async fn add_program(&self, bytecode: Vec<u8>) -> Result<SvmDeploy, SvmError> {
         let program_id = Keypair::new().pubkey();
         self.add_program_at(program_id, bytecode).await
@@ -79,6 +118,12 @@ impl SvmMockProvider {
     ///
     /// Required for frameworks like Anchor whose `declare_id!` makes the program reject
     /// execution unless it is deployed at its declared address.
+    ///
+    /// Takes no compute budget, unlike the other mutating operations. `litesvm::add_program`
+    /// writes the program account straight into the account store: no transaction is built, no
+    /// instruction is executed, and no compute units are consumed (which is also why the reported
+    /// hash has to be synthesized). A cap on the compute an execution may burn has nothing to
+    /// constrain here, so the parameter is not taken rather than taken and ignored.
     pub async fn add_program_at(
         &self,
         program_id: Address,
@@ -98,20 +143,65 @@ impl SvmMockProvider {
         Ok(deploy)
     }
 
-    /// Sign and send a transaction built from `instructions`, paid and signed by `signer`.
+    /// Build the transaction `instructions` become when `signer` pays for and signs them.
+    fn signed_tx(&self, instructions: &[Instruction], signer: &Keypair) -> Transaction {
+        let blockhash = self.svm.borrow().latest_blockhash();
+        let payer = signer.pubkey();
+        Transaction::new_signed_with_payer(instructions, Some(&payer), &[signer], blockhash)
+    }
+
+    /// Simulate `instructions` under a `SetComputeUnitLimit` of `units`, without committing.
+    fn simulate(
+        &self,
+        instructions: &[Instruction],
+        units: u32,
+        signer: &Keypair,
+    ) -> Result<TransactionMetadata, SvmError> {
+        let tx = self.signed_tx(&under_cap(instructions, units)?, signer);
+        let simulated = self
+            .svm
+            .borrow()
+            .simulate_transaction(tx)
+            .map_err(|fail| SvmError::Execute(format!("{:?}", fail.err)))?;
+        Ok(simulated.meta)
+    }
+
+    /// The compute-unit cap `budget` names for `instructions`, resolving [`SvmComputeBudget::Estimated`]
+    /// by simulating the transaction at the runtime ceiling and scaling what it consumed.
+    fn resolve(
+        &self,
+        instructions: &[Instruction],
+        budget: SvmComputeBudget,
+        signer: &Keypair,
+    ) -> Result<u32, SvmError> {
+        match budget {
+            SvmComputeBudget::Exact(units) => Ok(units),
+            SvmComputeBudget::Estimated => {
+                let simulated = self.simulate(instructions, MAX_COMPUTE_UNIT_LIMIT, signer)?;
+                Ok(adjusted(
+                    simulated.compute_units_consumed,
+                    self.info.gas_adjustment,
+                ))
+            }
+        }
+    }
+
+    /// Sign and send a transaction built from `instructions`, capped at `budget` compute units,
+    /// paid and signed by `signer`.
+    ///
+    /// The cap is a `SetComputeUnitLimit` instruction prepended to `instructions`, so it is part
+    /// of the transaction that gets signed and it counts against itself (see [`SvmComputeBudget`]).
+    /// A transaction that runs past its cap aborts with [`SvmError::Execute`] having still paid its
+    /// fee, exactly as on a real cluster.
     pub async fn send_transaction(
         &self,
         instructions: impl AsRef<[Instruction]>,
         signer: &Keypair,
+        budget: SvmComputeBudget,
     ) -> Result<TransactionMetadata, SvmError> {
-        let blockhash = self.svm.borrow().latest_blockhash();
-        let payer = signer.pubkey();
-        let tx = Transaction::new_signed_with_payer(
-            instructions.as_ref(),
-            Some(&payer),
-            &[signer],
-            blockhash,
-        );
+        let instructions = instructions.as_ref();
+        let units = self.resolve(instructions, budget, signer)?;
+        let tx = self.signed_tx(&under_cap(instructions, units)?, signer);
         let meta = self
             .svm
             .borrow_mut()
@@ -123,8 +213,37 @@ impl SvmMockProvider {
         Ok(meta)
     }
 
-    /// Transfer `amount` base units (lamports) of `denom` from `signer` to `to`, returning the
-    /// base58 transaction signature.
+    /// Report what the transaction built from `instructions` would consume and pay if `signer`
+    /// sent it, without sending it.
+    ///
+    /// The transaction is run through `LiteSVM::simulate_transaction`, which executes against a
+    /// `&LiteSVM`: it neither writes back the post-execution accounts nor records the signature in
+    /// the transaction history, so the chain is left exactly as it was and the very same
+    /// transaction can still be sent afterwards. The blockhash is deliberately not expired here,
+    /// for the same reason.
+    ///
+    /// Returns the same [`TransactionMetadata`] a successful [`send_transaction`] reports, so a
+    /// forecast and a receipt are directly comparable: the simulated transaction carries the same
+    /// `SetComputeUnitLimit` instruction a sent one does (at the runtime ceiling, so the cap cannot
+    /// be what aborts it), and that instruction's own 150 compute units are therefore in the
+    /// reported figure. `Exact(estimate.compute_units_consumed)` is consequently the tightest
+    /// budget that still executes.
+    ///
+    /// A transaction that would fail is an [`SvmError::Execute`], exactly as when sent: a failing
+    /// execution has no meaningful cost to forecast, and reporting the compute units it burned
+    /// before aborting as if it were an estimate would read as a cheap success.
+    ///
+    /// [`send_transaction`]: Self::send_transaction
+    pub async fn estimate_transaction(
+        &self,
+        instructions: impl AsRef<[Instruction]>,
+        signer: &Keypair,
+    ) -> Result<TransactionMetadata, SvmError> {
+        self.simulate(instructions.as_ref(), MAX_COMPUTE_UNIT_LIMIT, signer)
+    }
+
+    /// Transfer `amount` base units (lamports) of `denom` from `signer` to `to`, capped at `budget`
+    /// compute units, returning the base58 transaction signature.
     ///
     /// `denom` must name this chain's native token (see [`ChainProvider::set_balance`]). Runs a
     /// real System Program transfer through litesvm, so an underfunded sender surfaces as
@@ -135,6 +254,7 @@ impl SvmMockProvider {
         denom: &str,
         amount: u64,
         signer: &Keypair,
+        budget: SvmComputeBudget,
     ) -> Result<String, SvmError> {
         if !denom.eq_ignore_ascii_case(self.info.native_symbol) {
             return Err(SvmError::Balance(format!(
@@ -143,7 +263,7 @@ impl SvmMockProvider {
             )));
         }
         let ix = transfer(&signer.pubkey(), to, amount);
-        let meta = self.send_transaction([ix], signer).await?;
+        let meta = self.send_transaction([ix], signer, budget).await?;
         Ok(meta.signature.to_string())
     }
 

@@ -19,6 +19,22 @@ use harness_cli::{CliDomain, ResolvedProfile, SetupBuildError};
 
 use super::setup_request::{ChainSpecData, SetupRequest, Target};
 
+/// The gas-adjustment default, applied here (not in `build_chain`) because it is the one chain
+/// default that is the same for every [`ChainKind`], so it never needs the VM-crate-gated arms:
+/// resolving it once, kind-independently, keeps it out of the `#[cfg]` split entirely. Same reason
+/// `default_native_symbol` is resolved here rather than in `build_chain`.
+///
+/// `1.3` is the value cosmjs and cw-orch converged on, and it is a deliberate cut from the
+/// `FEE_BUFFER = 2.0` that CosmWasm's RPC provider hardcodes today: the Cosmos SDK deducts the
+/// whole declared fee and refunds nothing, so `2.0` overpays by half again over `1.3` with no
+/// stated reason for the extra headroom. The default is a single number for all four VMs rather
+/// than a per-kind table. CosmWasm is the only VM where over-provisioning actually costs money,
+/// and 1.3 is precisely the number its own ecosystem settled on for exactly that reason; on EVM
+/// and Tron the unused headroom is refunded or never charged, and on Solana an over-sized compute
+/// budget does not move the per-signature base fee. So a per-kind table would add a knob without
+/// buying a difference, and a chain that genuinely needs another value declares one.
+const DEFAULT_GAS_ADJUSTMENT: f64 = 1.3;
+
 /// Cross-vm CLI flags added to `run`/`replay`.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct TargetArgs {
@@ -189,6 +205,7 @@ fn resolve_chains(
             native_symbol,
             rpc_url,
             target,
+            gas_adjustment: decl.gas_adjustment.unwrap_or(DEFAULT_GAS_ADJUSTMENT),
             params: decl.params.clone().unwrap_or_default(),
             bech32_prefix: decl.bech32_prefix.clone(),
             native_denom: decl.native_denom.clone(),
@@ -313,8 +330,8 @@ fn target_str(t: Target) -> &'static str {
 
 /// One resolved [`ChainSpecData`] rendered into the artifact's `[[chain]]` shape: owned strings,
 /// string-spelled enums (`kind`/`target`/`spec_id`/`commitment`), the resolved `rpc_url` (never a
-/// secret). Per-kind `Option` fields serialize as absent (not `null`, TOML has none) when `None`,
-/// via `skip_serializing_if`.
+/// secret), the resolved `gas_adjustment`. Per-kind `Option` fields serialize as absent (not
+/// `null`, TOML has none) when `None`, via `skip_serializing_if`.
 fn artifact_chain(spec: &ChainSpecData) -> ArtifactChain {
     ArtifactChain {
         label: spec.label.clone(),
@@ -324,6 +341,7 @@ fn artifact_chain(spec: &ChainSpecData) -> ArtifactChain {
         native_symbol: spec.native_symbol.clone(),
         rpc_url: spec.rpc_url.clone(),
         target: target_str(spec.target).to_string(),
+        gas_adjustment: spec.gas_adjustment,
         bech32_prefix: spec.bech32_prefix.clone(),
         native_denom: spec.native_denom.clone(),
         gas_price: spec.gas_price,
@@ -347,6 +365,12 @@ struct ArtifactChain {
     #[serde(skip_serializing_if = "Option::is_none")]
     rpc_url: Option<String>,
     target: String,
+    /// Written unconditionally, unlike the `Option` fields around it, because by this point it is
+    /// the *resolved* adjustment rather than the raw declaration. Pinning it into the artifact is
+    /// the point: a replay then reproduces the run's actual limits even if `DEFAULT_GAS_ADJUSTMENT`
+    /// later changes. It round-trips, since re-loading the artifact parses it back into
+    /// `ChainDecl::gas_adjustment`.
+    gas_adjustment: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     bech32_prefix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -534,6 +558,74 @@ ops = 1
         let (chain_specs, _target, _chains, _params) =
             resolve_with(&cfg, "smoke", &TargetArgs::default()).unwrap();
         assert_eq!(chain_specs[0].native_symbol, "ETH");
+    }
+
+    #[test]
+    fn gas_adjustment_defaults_when_omitted_and_is_honored_when_declared() {
+        let cfg = load(
+            r#"
+[harness]
+name = "vault"
+
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "1"
+
+[[chain]]
+label = "osmosis"
+kind = "cosmwasm"
+chain_id = "osmosis-1"
+bech32_prefix = "osmo"
+native_denom = "uosmo"
+gas_adjustment = 1.75
+
+[profile.smoke]
+mode = "fuzz"
+cases = 1
+ops = 1
+"#,
+        );
+        let (chain_specs, _target, _chains, _params) =
+            resolve_with(&cfg, "smoke", &TargetArgs::default()).unwrap();
+
+        // Omitted on a non-CosmWasm chain: the default still applies, since `gas_adjustment` is
+        // not CosmWasm-scoped the way `gas_price` is.
+        assert_eq!(chain_specs[0].label, "eth");
+        assert_eq!(chain_specs[0].gas_adjustment, DEFAULT_GAS_ADJUSTMENT);
+        // Declared: carried through verbatim, never clamped or re-defaulted.
+        assert_eq!(chain_specs[1].label, "osmosis");
+        assert_eq!(chain_specs[1].gas_adjustment, 1.75);
+    }
+
+    #[test]
+    fn artifact_pins_the_resolved_gas_adjustment() {
+        // The artifact records the *resolved* adjustment even when the declaration omitted it, so
+        // a replay reproduces this run's limits even if the default later changes.
+        let cfg = load(
+            r#"
+[harness]
+name = "vault"
+
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "1"
+
+[profile.smoke]
+mode = "fuzz"
+cases = 1
+ops = 1
+"#,
+        );
+        let (chain_specs, target, chains, _params) =
+            resolve_with(&cfg, "smoke", &TargetArgs::default()).unwrap();
+        let sections = render_artifact_sections(&chain_specs, target, &chains);
+        let chain0 = sections["chain"].as_array().unwrap()[0].as_table().unwrap();
+        assert_eq!(
+            chain0["gas_adjustment"].as_float(),
+            Some(DEFAULT_GAS_ADJUSTMENT)
+        );
     }
 
     #[test]

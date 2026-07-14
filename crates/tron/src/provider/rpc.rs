@@ -24,6 +24,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::future::Future;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -35,12 +36,17 @@ use serde_json::{json, Value};
 use crate::chains::TronChainInfo;
 use crate::error::TronError;
 use crate::provider::address::{address_from_label, address_from_pubkey, TronAddress};
-use crate::provider::execution::{TronCompute, TronDeploy, TronExecution, TronResources};
+use crate::provider::execution::{
+    with_headroom, TronCompute, TronDeploy, TronEnergyPolicy, TronExecution, TronLimit,
+    TronResources,
+};
 
-/// Default fee ceiling for a write, in sun (1000 TRX). Tron rejects a tx that would burn more.
-const DEFAULT_FEE_LIMIT: u64 = 1_000_000_000;
-/// Energy cap a deployed contract may borrow from a caller, per invocation.
-const DEFAULT_ORIGIN_ENERGY_LIMIT: u64 = 10_000_000;
+/// Bytes java-tron bills a transaction for on top of its `raw_data`: the 65-byte secp256k1
+/// signature with its protobuf framing, plus the 64-byte result slot every transaction reserves
+/// (`MAX_RESULT_SIZE_IN_TX`). Verified against mined mainnet receipts, where
+/// `receipt.net_usage - raw_data_hex/2` is exactly 134 for transfers, delegations and contract
+/// calls alike. Source: <https://developers.tron.network/docs/resource-model>
+const TX_BANDWIDTH_OVERHEAD: u64 = 134;
 /// How many times to poll `gettransactioninfobyid` for a broadcast tx's receipt.
 const TX_POLL_ATTEMPTS: u32 = 20;
 /// Delay between receipt polls (Nile/Tron block time is ~3s).
@@ -142,8 +148,64 @@ impl TronRpcProvider {
             .ok_or_else(|| TronError::Rpc("getnowblock: missing block number".into()))
     }
 
+    /// The current price of one unit of energy, in sun: the node's `getEnergyFee` chain parameter.
+    ///
+    /// This is the exact divisor java-tron applies to a transaction's `fee_limit` to decide how
+    /// much energy the transaction may burn, so pricing a forecast in energy into a fee cap with it
+    /// is a conversion, not a guess. It is a governance parameter, changed by vote, so it is read
+    /// from the node rather than pinned here; a [`TronLimit::Estimated`] operation pays one round
+    /// trip for it, on top of the one its forecast already costs.
+    ///
+    /// An absent `getEnergyFee` is an error, not a default: java-tron's protobuf omits a zero
+    /// value, and a chain that gives energy away for free would price every fee cap at zero sun,
+    /// which is the one number that cannot buy any energy at all.
+    /// Source: <https://developers.tron.network/reference/getchainparameters>
+    async fn energy_price(&self) -> Result<u64, TronError> {
+        let params = self.post("getchainparameters", json!({})).await?;
+        energy_price_of(&params)
+    }
+
+    /// Resolve `limit` into the `fee_limit` (sun) java-tron takes on a contract transaction.
+    ///
+    /// [`TronLimit::Estimated`] prices `forecast` (the energy a `triggerconstantcontract` measured
+    /// for this very operation) into sun at the chain's current [energy price](Self::energy_price),
+    /// with the chain's `gas_adjustment` headroom applied to the energy and not to the sun: the
+    /// price is exact, only the forecast is approximate. `forecast` is awaited on that path alone,
+    /// so an exact limit pays for neither round trip.
+    async fn fee_limit(
+        &self,
+        limit: TronLimit,
+        forecast: impl Future<Output = Result<TronResources, TronError>>,
+    ) -> Result<u64, TronError> {
+        match limit {
+            TronLimit::Fee(sun) => Ok(sun),
+            TronLimit::Gas(gas) => Err(TronError::Rpc(format!(
+                "a gas limit of {gas} cannot bound a live Tron transaction: java-tron meters \
+                 energy and caps a transaction by fee_limit, in sun; use TronLimit::Fee or \
+                 TronLimit::Estimated"
+            ))),
+            TronLimit::Estimated => {
+                let forecast = forecast.await?;
+                // Unreachable: this backend's estimator denominates in energy by construction
+                // (`parse_estimate`). A gas figure here would mean it had reported the mock's unit.
+                let TronCompute::Energy(energy) = forecast.compute else {
+                    return Err(TronError::Rpc(format!(
+                        "a live node forecasts energy, not gas: got {:?}",
+                        forecast.compute
+                    )));
+                };
+                let price = self.energy_price().await?;
+                Ok(with_headroom(energy, self.info.gas_adjustment).saturating_mul(price))
+            }
+        }
+    }
+
     /// Deploy bytecode via a create transaction signed by `signer`, returning the new contract
     /// address the node assigns, the broadcast transaction's `txID`, and the resources it consumed.
+    ///
+    /// `limit` caps what this create transaction may burn (see [`TronLimit`]); `energy_policy` is
+    /// not a cap on it at all, but the two `DeployContract` fields that persist on the deployed
+    /// contract and bill every future call to it (see [`TronEnergyPolicy`]).
     ///
     /// The node reports energy, bandwidth and fee only on the mined receipt, so this polls
     /// `gettransactioninfobyid` after broadcasting, as the [`call`](Self::call) path does. A deploy
@@ -154,8 +216,16 @@ impl TronRpcProvider {
         bytecode: Bytes,
         constructor_args: impl AsRef<[u8]>,
         signer: &PrivateKeySigner,
+        limit: TronLimit,
+        energy_policy: TronEnergyPolicy,
     ) -> Result<TronDeploy, TronError> {
         let owner = signer_address(signer);
+        let fee_limit = self
+            .fee_limit(
+                limit,
+                self.estimate_deploy_create(bytecode.clone(), constructor_args.as_ref(), &owner),
+            )
+            .await?;
         let mut initcode = bytecode.to_vec();
         initcode.extend_from_slice(constructor_args.as_ref());
         let unsigned = self
@@ -165,10 +235,10 @@ impl TronRpcProvider {
                     "owner_address": owner.to_hex(),
                     "abi": "[]",
                     "bytecode": hex::encode(&initcode),
-                    "fee_limit": DEFAULT_FEE_LIMIT,
+                    "fee_limit": fee_limit,
                     "call_value": 0,
-                    "consume_user_resource_percent": 100,
-                    "origin_energy_limit": DEFAULT_ORIGIN_ENERGY_LIMIT,
+                    "consume_user_resource_percent": energy_policy.consume_user_resource_percent,
+                    "origin_energy_limit": energy_policy.origin_energy_limit,
                     "visible": false,
                 }),
             )
@@ -197,7 +267,86 @@ impl TronRpcProvider {
         })
     }
 
-    /// Execute a state-mutating call against `to`, signed by `signer`.
+    /// Forecast what a [`deploy_create`](Self::deploy_create) of this bytecode would consume,
+    /// without deploying it: the node runs the initcode as a constant call and reports the energy
+    /// it burned.
+    ///
+    /// The endpoint is `triggerconstantcontract` with `data` (initcode ++ constructor args) and no
+    /// `contract_address`, which java-tron reads as a create. `estimateenergy` is the other
+    /// candidate and is NOT used: it is off unless a node operator sets both `vm.estimateEnergy`
+    /// and `vm.supportConstant` (mainnet TronGrid answers `this node does not support estimate
+    /// energy`), it returns only `energy_required` with no transaction to size bandwidth from, and
+    /// Tron's own docs name `triggerconstantcontract` as the fallback when it is unavailable. That
+    /// endpoint is also already the one [`static_call`](Self::static_call) speaks.
+    /// Source: <https://developers.tron.network/docs/set-feelimit>
+    ///
+    /// Nothing is signed or broadcast, so this needs an address, not a signer. A constructor that
+    /// reverts is an error, not a resource figure.
+    pub async fn estimate_deploy_create(
+        &self,
+        bytecode: Bytes,
+        constructor_args: impl AsRef<[u8]>,
+        from: &TronAddress,
+    ) -> Result<TronResources, TronError> {
+        let mut initcode = bytecode.to_vec();
+        initcode.extend_from_slice(constructor_args.as_ref());
+        let resp = self
+            .post(
+                "triggerconstantcontract",
+                json!({
+                    "owner_address": from.to_hex(),
+                    "data": hex::encode(&initcode),
+                    "visible": false,
+                }),
+            )
+            .await?;
+        if let Some(msg) = constant_call_failure(&resp) {
+            return Err(TronError::Deploy(format!("estimate_deploy_create: {msg}")));
+        }
+        Ok(parse_estimate(&resp))
+    }
+
+    /// Forecast what a [`call`](Self::call) with these arguments would consume, without running it.
+    pub async fn estimate_call(
+        &self,
+        to: &TronAddress,
+        calldata: impl AsRef<[u8]>,
+        from: &TronAddress,
+    ) -> Result<TronResources, TronError> {
+        self.estimate_call_value(to, calldata, from, U256::ZERO)
+            .await
+    }
+
+    /// Forecast what a [`call_value`](Self::call_value) with these arguments would consume, without
+    /// running it. The node executes the call against current state and discards the result; see
+    /// [`estimate_deploy_create`](Self::estimate_deploy_create) for why this endpoint.
+    pub async fn estimate_call_value(
+        &self,
+        to: &TronAddress,
+        calldata: impl AsRef<[u8]>,
+        from: &TronAddress,
+        value: U256,
+    ) -> Result<TronResources, TronError> {
+        let resp = self
+            .post(
+                "triggerconstantcontract",
+                json!({
+                    "owner_address": from.to_hex(),
+                    "contract_address": to.to_hex(),
+                    "data": hex::encode(calldata.as_ref()),
+                    "call_value": value.saturating_to::<u64>(),
+                    "visible": false,
+                }),
+            )
+            .await?;
+        if let Some(msg) = constant_call_failure(&resp) {
+            return Err(TronError::Execute(format!("estimate_call: {msg}")));
+        }
+        Ok(parse_estimate(&resp))
+    }
+
+    /// Execute a state-mutating call against `to`, signed by `signer`, under the `fee_limit`
+    /// `limit` resolves to (see [`TronLimit`]).
     ///
     /// java-tron's broadcast carries no logs, so after broadcasting this polls
     /// `gettransactioninfobyid` until the transaction is mined (or times out), then returns the
@@ -208,8 +357,10 @@ impl TronRpcProvider {
         to: &TronAddress,
         calldata: impl AsRef<[u8]>,
         signer: &PrivateKeySigner,
+        limit: TronLimit,
     ) -> Result<TronExecution, TronError> {
-        self.call_value(to, calldata, signer, U256::ZERO).await
+        self.call_value(to, calldata, signer, U256::ZERO, limit)
+            .await
     }
 
     /// Execute a state-mutating call against `to` carrying `value` sun (a payable call), signed by
@@ -221,8 +372,15 @@ impl TronRpcProvider {
         calldata: impl AsRef<[u8]>,
         signer: &PrivateKeySigner,
         value: U256,
+        limit: TronLimit,
     ) -> Result<TronExecution, TronError> {
         let owner = signer_address(signer);
+        let fee_limit = self
+            .fee_limit(
+                limit,
+                self.estimate_call_value(to, calldata.as_ref(), &owner, value),
+            )
+            .await?;
         let resp = self
             .post(
                 "triggersmartcontract",
@@ -231,7 +389,7 @@ impl TronRpcProvider {
                     "contract_address": to.to_hex(),
                     "data": hex::encode(calldata.as_ref()),
                     "call_value": value.saturating_to::<u64>(),
-                    "fee_limit": DEFAULT_FEE_LIMIT,
+                    "fee_limit": fee_limit,
                     "visible": false,
                 }),
             )
@@ -253,6 +411,10 @@ impl TronRpcProvider {
     /// sign-`txID`-and-broadcast step applies. The node validates the sender's balance, so an
     /// underfunded transfer is rejected at broadcast. Confirmation is polled before returning, as
     /// on the [`call`](Self::call) path.
+    ///
+    /// It takes no [`TronLimit`], because a `TransferContract` has no `fee_limit` field to take:
+    /// it runs no code, burns no energy, and is billed only in bandwidth, which the sender cannot
+    /// cap. The only knobs a `fee_limit` would bound do not exist on this transaction.
     /// Source: <https://developers.tron.network/reference/createtransaction>
     pub async fn transfer_funds(
         &self,
@@ -318,7 +480,9 @@ impl TronRpcProvider {
                 }),
             )
             .await?;
-        check_node_ok(&resp["result"], "triggerconstantcontract")?;
+        if let Some(msg) = constant_call_failure(&resp) {
+            return Err(TronError::Execute(format!("static_call: {msg}")));
+        }
         let hexstr = resp["constant_result"][0].as_str().unwrap_or("");
         let bytes = hex::decode(hexstr)
             .map_err(|e| TronError::Query(format!("constant_result hex: {e}")))?;
@@ -449,6 +613,19 @@ fn tx_failure(info: &Value) -> Option<String> {
     })
 }
 
+/// The `getEnergyFee` member of a `getchainparameters` response: the sun one unit of energy costs.
+///
+/// The parameters arrive as a flat `[{key, value}, ..]` list. An absent `getEnergyFee` is an error
+/// rather than a default: guessing the divisor java-tron will apply to the `fee_limit` would size
+/// every estimated cap off a number the chain does not use.
+fn energy_price_of(params: &Value) -> Result<u64, TronError> {
+    params["chainParameter"]
+        .as_array()
+        .and_then(|ps| ps.iter().find(|p| p["key"] == "getEnergyFee"))
+        .and_then(|p| p["value"].as_u64())
+        .ok_or_else(|| TronError::Rpc("getchainparameters: no getEnergyFee".into()))
+}
+
 /// The resources a mined `TransactionInfo` reports: energy (`receipt.energy_usage_total`, the sum
 /// of the energy the caller staked for, the contract paid, and any that was burned for), bandwidth
 /// (`receipt.net_usage`), and the `fee` the transaction was billed, in sun.
@@ -464,6 +641,56 @@ fn parse_resources(info: &Value) -> TronResources {
         compute: TronCompute::Energy(receipt["energy_usage_total"].as_u64().unwrap_or(0)),
         bandwidth: receipt["net_usage"].as_u64().unwrap_or(0),
         fee: Some(info["fee"].as_u64().unwrap_or(0)),
+    }
+}
+
+/// The failure message of a `triggerconstantcontract` response, or `None` if the constant call ran
+/// to completion.
+///
+/// java-tron reports a failed constant call in two shapes, and testing `result.result` alone
+/// catches neither: protobuf omits a `false` boolean, so a rejected call carries only
+/// `result.{code,message}` and no `result.result` at all, and a REVERT comes back as
+/// `result.result: true` *with* a `message`, still quoting an `energy_used`. Both are failures. A
+/// caller handed an energy figure for a transaction that cannot succeed has been misinformed, and
+/// the empty `constant_result` of a reverted read is not an answer either.
+fn constant_call_failure(resp: &Value) -> Option<String> {
+    if let Some(err) = resp["Error"].as_str() {
+        return Some(err.to_string());
+    }
+    let result = &resp["result"];
+    let message = result["message"].as_str().map(decode_hex_message);
+    if result["result"].as_bool() == Some(true) && message.is_none() {
+        return None;
+    }
+    let code = result["code"].as_str().unwrap_or("FAILED");
+    Some(format!("{code}: {}", message.unwrap_or_default()))
+}
+
+/// The resources a `triggerconstantcontract` response forecasts: the energy the node measured while
+/// running the call (`energy_used`, basic plus penalty), and the bandwidth the transaction it built
+/// for the estimate would be billed.
+///
+/// Energy is what a live chain meters, so a live forecast is denominated in it, exactly as the
+/// receipt is ([`TronCompute::Energy`], never gas; see [`TronCompute`]). Two honest gaps:
+///
+/// * Bandwidth is derived, not reported: java-tron bills a transaction by its serialized size, and
+///   the node hands back the transaction it built (`raw_data_hex`). The tx that actually broadcasts
+///   is a handful of bytes larger, because it carries the `fee_limit` a constant call has no use
+///   for (7 bytes, measured). The figure is also what the transaction is *billed for*: whether
+///   those points are deducted from the sender's allowance or paid for by burning TRX (leaving
+///   `net_usage: 0` on the receipt) depends on what the sender has staked at broadcast time.
+/// * `fee` is `None`. Pricing energy and bandwidth into sun needs the sender's staked resources at
+///   broadcast, which a constant call does not see; a number here would be a guess.
+///
+/// Source: <https://developers.tron.network/docs/resource-model>
+fn parse_estimate(resp: &Value) -> TronResources {
+    let bandwidth = resp["transaction"]["raw_data_hex"]
+        .as_str()
+        .map_or(0, |h| h.len() as u64 / 2 + TX_BANDWIDTH_OVERHEAD);
+    TronResources {
+        compute: TronCompute::Energy(resp["energy_used"].as_u64().unwrap_or(0)),
+        bandwidth,
+        fee: None,
     }
 }
 
@@ -594,15 +821,101 @@ mod tests {
         assert!(a.to_base58().starts_with('T'));
     }
 
+    /// The caller pays all of a call's energy, so the contract owner's ceiling never binds.
+    const CALLER_PAYS: TronEnergyPolicy = TronEnergyPolicy {
+        consume_user_resource_percent: 100,
+        origin_energy_limit: 0,
+    };
+
     #[tokio::test]
     async fn no_endpoint_errors_offline() {
         // LOCAL has no rpc_url, so a network call fails fast without touching the network.
         let c = TronRpcProvider::new(LOCAL, Rc::new(WalletFactory::from_roster(&[]).unwrap()));
         let signer = PrivateKeySigner::random();
         let res = c
-            .deploy_create(Bytes::new(), Vec::<u8>::new(), &signer)
+            .deploy_create(
+                Bytes::new(),
+                Vec::<u8>::new(),
+                &signer,
+                TronLimit::Fee(1_000_000_000),
+                CALLER_PAYS,
+            )
             .await;
         assert!(matches!(res, Err(TronError::Deploy(_) | TronError::Rpc(_))));
+    }
+
+    #[tokio::test]
+    async fn a_gas_limit_is_rejected_before_the_node_is_asked_anything() {
+        // java-tron has no gas: it meters energy and caps a transaction by `fee_limit`, in sun.
+        // A gas budget is the mock's (revm's) unit, so it is an error rather than a number quietly
+        // reinterpreted as sun. LOCAL has no rpc_url, so reaching the network at all would surface
+        // as a transport error instead: the rejection provably precedes any request.
+        let c = TronRpcProvider::new(LOCAL, Rc::new(WalletFactory::from_roster(&[]).unwrap()));
+        let signer = PrivateKeySigner::random();
+        let to = address_from_label("x");
+
+        for res in [
+            c.deploy_create(
+                Bytes::new(),
+                Vec::<u8>::new(),
+                &signer,
+                TronLimit::Gas(30_000_000),
+                CALLER_PAYS,
+            )
+            .await
+            .map(|_| ()),
+            c.call(&to, [], &signer, TronLimit::Gas(30_000_000))
+                .await
+                .map(|_| ()),
+        ] {
+            let err = res.expect_err("a gas budget cannot bound a live Tron transaction");
+            assert!(
+                matches!(&err, TronError::Rpc(m) if m.contains("gas limit") && m.contains("fee_limit")),
+                "got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn energy_price_is_read_from_the_chain_parameters() {
+        // The node returns a flat key/value list; `getEnergyFee` is the sun one energy unit costs,
+        // and the exact divisor java-tron applies to a `fee_limit`.
+        let params = json!({
+            "chainParameter": [
+                { "key": "getMaintenanceTimeInterval", "value": 21_600_000 },
+                { "key": "getEnergyFee", "value": 210 },
+                { "key": "getMaxFeeLimit", "value": 15_000_000_000i64 },
+            ],
+        });
+        assert_eq!(energy_price_of(&params).unwrap(), 210);
+
+        // A missing `getEnergyFee` is an error, not a guessed divisor: an estimated fee cap sized
+        // off a price the chain does not use is a cap in name only.
+        let missing = json!({ "chainParameter": [{ "key": "getMaxFeeLimit", "value": 1 }] });
+        assert!(matches!(energy_price_of(&missing), Err(TronError::Rpc(_))));
+    }
+
+    #[test]
+    fn an_estimated_fee_cap_prices_the_forecast_energy_with_headroom() {
+        // What `TronLimit::Estimated` computes on this backend: the node's forecast energy, scaled
+        // by the chain's `gas_adjustment`, priced into sun at the chain's energy price. The
+        // headroom lands on the energy (the approximate half) and never on the price (the exact
+        // half), so the cap buys the energy the operation is forecast to need, plus the margin.
+        let energy = parse_estimate(&constant_call()).compute;
+        let TronCompute::Energy(energy) = energy else {
+            panic!("the node forecasts energy");
+        };
+        let price = energy_price_of(&json!({
+            "chainParameter": [{ "key": "getEnergyFee", "value": 210 }],
+        }))
+        .unwrap();
+
+        let cap = with_headroom(energy, NILE.gas_adjustment).saturating_mul(price);
+        assert_eq!(cap, 92_451 * 210, "71_116 energy * 1.3, rounded up");
+        assert!(
+            cap >= energy * price,
+            "the cap must at least buy the forecast energy"
+        );
     }
 
     #[tokio::test]
@@ -666,6 +979,72 @@ mod tests {
         assert_eq!(exec.resources.compute, TronCompute::Energy(13_456));
         assert_eq!(exec.resources.bandwidth, 345);
         assert_eq!(exec.resources.fee, Some(1_345_600));
+    }
+
+    /// A `triggerconstantcontract` response, trimmed to the members the estimator reads. The
+    /// `raw_data_hex` is 8 bytes long, so the bandwidth forecast is 8 + the billing overhead.
+    fn constant_call() -> Value {
+        json!({
+            "result": { "result": true },
+            "energy_used": 71_116,
+            "constant_result": [""],
+            "transaction": { "raw_data_hex": "0a0270cf22084142" },
+        })
+    }
+
+    #[test]
+    fn rpc_estimate_reports_node_energy_never_gas() {
+        // The node meters energy, so that is the unit its forecast is denominated in, exactly as
+        // its receipts are. Gas is the mock's (revm's) unit and a different quantity entirely.
+        let r = parse_estimate(&constant_call());
+        assert_eq!(r.compute, TronCompute::Energy(71_116));
+        assert_eq!(r.bandwidth, 8 + TX_BANDWIDTH_OVERHEAD);
+        // Pricing energy into sun needs the sender's staked resources at broadcast; a constant call
+        // cannot see them, and a guess would be worse than an honest `None`.
+        assert_eq!(r.fee, None);
+    }
+
+    #[test]
+    fn a_reverting_constant_call_is_an_error_not_an_energy_figure() {
+        // The trap this guards: java-tron answers a REVERT with `result: true` AND a message, still
+        // quoting an `energy_used` (a real Nile/mainnet response shape). Reporting that energy
+        // would forecast a transaction that cannot succeed.
+        let mut resp = constant_call();
+        resp["result"] = json!({
+            "result": true,
+            "message": hex::encode("REVERT opcode executed"),
+        });
+        let msg = constant_call_failure(&resp).expect("a REVERT is a failure");
+        assert!(msg.contains("REVERT opcode executed"), "got {msg}");
+
+        // And the other shape: protobuf omits `result.result` when it is false, leaving only a code
+        // and a message, so a rejected call has no boolean to test at all.
+        let rejected = json!({
+            "result": { "code": "OTHER_ERROR", "message": hex::encode("stack too small") },
+        });
+        let msg = constant_call_failure(&rejected).expect("a rejected call is a failure");
+        assert!(
+            msg.contains("OTHER_ERROR") && msg.contains("stack too small"),
+            "got {msg}"
+        );
+
+        // A clean constant call is not a failure.
+        assert!(constant_call_failure(&constant_call()).is_none());
+    }
+
+    #[tokio::test]
+    async fn estimates_error_offline() {
+        // LOCAL has no rpc_url, so both estimate paths fail fast without touching the network.
+        let mut c = TronRpcProvider::new(LOCAL, Rc::new(WalletFactory::from_roster(&[]).unwrap()));
+        let addr = c.new_account("x").await;
+        assert!(matches!(
+            c.estimate_deploy_create(Bytes::new(), [], &addr).await,
+            Err(TronError::Rpc(_))
+        ));
+        assert!(matches!(
+            c.estimate_call(&addr, [], &addr).await,
+            Err(TronError::Rpc(_))
+        ));
     }
 
     #[test]

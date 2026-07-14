@@ -19,7 +19,9 @@ use cross_vm_core::{
 use crate::asset::EvmAsset;
 use crate::chains::EvmChainInfo;
 use crate::error::EvmError;
-use crate::provider::{EvmDeploy, EvmExecution, EvmMockProvider, EvmRpcProvider};
+use crate::provider::{
+    EvmDeploy, EvmExecution, EvmGas, EvmGasLimit, EvmMockProvider, EvmRpcProvider,
+};
 
 /// `balanceOf(address)` selector.
 const BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
@@ -108,20 +110,86 @@ impl EvmChain {
 
     /// Deploy bytecode via a create transaction signed by wallet `wallet`, returning the new
     /// contract address plus the transaction hash.
+    ///
+    /// `limit` is required (see [`EvmGasLimit`]). Resolving an
+    /// [`EvmGasLimit::Estimated`](EvmGasLimit::Estimated) happens inside the provider, under the
+    /// broadcast guard on the RPC path: safe because an estimate signs and broadcasts nothing, so
+    /// it never reaches for that lock (see [`estimate_deploy_create`](Self::estimate_deploy_create)).
     pub async fn deploy_create(
         &self,
         bytecode: Bytes,
         constructor_args: impl AsRef<[u8]>,
         wallet: WalletLabel<'_>,
+        limit: EvmGasLimit,
     ) -> Result<EvmDeploy, EvmError> {
         let signer = self.acquire(wallet).await?;
         let addr = self.signer_address(&signer);
         match self {
-            EvmChain::Mock(p) => p.deploy_create(bytecode, constructor_args, &addr).await,
+            EvmChain::Mock(p) => {
+                p.deploy_create(bytecode, constructor_args, &addr, limit)
+                    .await
+            }
             EvmChain::Rpc(p) => {
                 let _g = Self::broadcast_guard(p, &addr).await;
-                p.deploy_create(bytecode, constructor_args, &signer).await
+                p.deploy_create(bytecode, constructor_args, &signer, limit)
+                    .await
             }
+        }
+    }
+
+    /// Forecast what a [`deploy_create`](Self::deploy_create) of this bytecode would cost, without
+    /// deploying it.
+    ///
+    /// An estimate signs and broadcasts nothing, so it resolves the wallet's address without taking
+    /// the broadcast lock, and leaves the chain able to run the very op it forecast. A deploy that
+    /// would revert is an error here, not a gas number.
+    ///
+    /// Both backends report `used`; only the RPC backend reports a `fee` (see [`EvmGas::fee`]).
+    pub async fn estimate_deploy_create(
+        &self,
+        bytecode: Bytes,
+        constructor_args: impl AsRef<[u8]>,
+        wallet: WalletLabel<'_>,
+    ) -> Result<EvmGas, EvmError> {
+        let addr = self.wallet_address(wallet).await?;
+        match self {
+            EvmChain::Mock(p) => {
+                p.estimate_deploy_create(bytecode, constructor_args, &addr)
+                    .await
+            }
+            EvmChain::Rpc(p) => {
+                p.estimate_deploy_create(bytecode, constructor_args, &addr)
+                    .await
+            }
+        }
+    }
+
+    /// Forecast what a [`call`](Self::call) would cost (see
+    /// [`estimate_call_value`](Self::estimate_call_value)).
+    pub async fn estimate_call(
+        &self,
+        to: &Address,
+        calldata: impl AsRef<[u8]>,
+        wallet: WalletLabel<'_>,
+    ) -> Result<EvmGas, EvmError> {
+        self.estimate_call_value(to, calldata, wallet, U256::ZERO)
+            .await
+    }
+
+    /// Forecast what a [`call_value`](Self::call_value) would cost, without executing it. A call
+    /// that would revert is an error here, not a gas number (see
+    /// [`estimate_deploy_create`](Self::estimate_deploy_create)).
+    pub async fn estimate_call_value(
+        &self,
+        to: &Address,
+        calldata: impl AsRef<[u8]>,
+        wallet: WalletLabel<'_>,
+        value: U256,
+    ) -> Result<EvmGas, EvmError> {
+        let addr = self.wallet_address(wallet).await?;
+        match self {
+            EvmChain::Mock(p) => p.estimate_call_value(to, calldata, &addr, value).await,
+            EvmChain::Rpc(p) => p.estimate_call_value(to, calldata, &addr, value).await,
         }
     }
 
@@ -131,26 +199,31 @@ impl EvmChain {
         to: &Address,
         calldata: impl AsRef<[u8]>,
         wallet: WalletLabel<'_>,
+        limit: EvmGasLimit,
     ) -> Result<EvmExecution, EvmError> {
-        self.call_value(to, calldata, wallet, U256::ZERO).await
+        self.call_value(to, calldata, wallet, U256::ZERO, limit)
+            .await
     }
 
     /// Execute a state-mutating call against `to` carrying `value` wei (a payable call), signed by
     /// wallet `wallet`. On the mock the caller's balance is topped up to cover `value`.
+    ///
+    /// `limit` is required (see [`deploy_create`](Self::deploy_create)).
     pub async fn call_value(
         &self,
         to: &Address,
         calldata: impl AsRef<[u8]>,
         wallet: WalletLabel<'_>,
         value: U256,
+        limit: EvmGasLimit,
     ) -> Result<EvmExecution, EvmError> {
         let signer = self.acquire(wallet).await?;
         let addr = self.signer_address(&signer);
         match self {
-            EvmChain::Mock(p) => p.call_value(to, calldata, &addr, value).await,
+            EvmChain::Mock(p) => p.call_value(to, calldata, &addr, value, limit).await,
             EvmChain::Rpc(p) => {
                 let _g = Self::broadcast_guard(p, &addr).await;
-                p.call_value(to, calldata, &signer, value).await
+                p.call_value(to, calldata, &signer, value, limit).await
             }
         }
     }
@@ -167,6 +240,7 @@ impl EvmChain {
         denom: &str,
         amount: U256,
         wallet: WalletLabel<'_>,
+        limit: EvmGasLimit,
     ) -> Result<String, EvmError> {
         let native = self.chain_info().native_symbol;
         if !denom.eq_ignore_ascii_case(native) {
@@ -178,10 +252,10 @@ impl EvmChain {
         let addr = self.signer_address(&signer);
         // A native transfer is just a value-carrying call with empty calldata.
         let exec = match self {
-            EvmChain::Mock(p) => p.transfer_funds(to, &addr, amount).await?,
+            EvmChain::Mock(p) => p.transfer_funds(to, &addr, amount, limit).await?,
             EvmChain::Rpc(p) => {
                 let _g = Self::broadcast_guard(p, &addr).await;
-                p.call_value(to, [], &signer, amount).await?
+                p.call_value(to, [], &signer, amount, limit).await?
             }
         };
         Ok(exec.tx_hash.to_string())

@@ -9,7 +9,7 @@ use std::rc::Rc;
 use alloy::sol_types::SolCall;
 use cross_vm_core::{ChainProvider, WalletFactory};
 use cross_vm_solidity::chains::LOCAL;
-use cross_vm_solidity::{Address, Bytes, EvmMockProvider};
+use cross_vm_solidity::{Address, Bytes, EvmGasLimit, EvmMockProvider};
 
 alloy::sol!(
     #[sol(abi)]
@@ -37,7 +37,12 @@ async fn deploy_increment_reset_query() {
     let deployer = chain.new_account("deployer").await;
 
     let contract = chain
-        .deploy_create(Counter::BYTECODE.clone(), Bytes::new(), &deployer)
+        .deploy_create(
+            Counter::BYTECODE.clone(),
+            Bytes::new(),
+            &deployer,
+            EvmGasLimit::Estimated,
+        )
         .await
         .expect("deploy_create")
         .address;
@@ -48,6 +53,7 @@ async fn deploy_increment_reset_query() {
             &contract,
             Bytes::from(Counter::incrementCall {}.abi_encode()),
             &deployer,
+            EvmGasLimit::Estimated,
         )
         .await
         .expect("increment");
@@ -58,6 +64,7 @@ async fn deploy_increment_reset_query() {
             &contract,
             Bytes::from(Counter::resetCall {}.abi_encode()),
             &deployer,
+            EvmGasLimit::Exact(100_000),
         )
         .await
         .expect("reset");

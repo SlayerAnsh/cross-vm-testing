@@ -87,7 +87,9 @@ crates/tron/
     address.rs          base58check TronAddress (0x41 prefix; inner 20 bytes = EVM address)
     mock.rs             TronMockProvider over the revm core
     rpc.rs              TronRpcProvider (live java-tron over TronGrid HTTP: reads, static_call, signed deploy/call, get_storage_at via the /jsonrpc endpoint)
-    execution.rs        execution result / response plumbing
+    execution.rs        execution result / response plumbing: TronExecution / TronDeploy, the metered
+                        TronResources (TronCompute is Gas on the mock, Energy on the live node), and
+                        the TronLimit / TronEnergyPolicy a mutating op takes
   tvm/
     create.rs           pure tron_create_address / tron_create2_address (tx-id formula, for tooling)
     precompiles.rs      Tron precompiles injected into revm (TIP-272 relocations + validatemultisign)
@@ -273,7 +275,10 @@ impl Counter {
     async fn cw_increment(&self, wallet: &str) -> Result<AppResponse<()>, CrossVmError> {
         let chain = self.base.cosmwasm()?;            // typed handle, WrongVm on mismatch
         let addr  = self.base.cw_addr()?;             // typed deployed address
-        let raw = chain.execute_contract(&addr, ExecuteMsg::Increment {}, wallet, &[]).await?;
+        // Every mutating op takes a required limit; CwGasLimit::Estimated simulates first.
+        let raw = chain
+            .execute_contract(&addr, ExecuteMsg::Increment {}, wallet, &[], CwGasLimit::Estimated)
+            .await?;
         Ok(AppResponse::cosmwasm((), raw))            // typed payload + raw per-VM result
     }
     // evm_increment / svm_increment own their native encoding the same way
@@ -290,7 +295,9 @@ Guidelines:
 * A VM you do not support: return `CrossVmError::unimplemented(kind, "...")` from that arm.
 * Wrap a return value as `AppResponse<T>`; the caller reads `.value()` and reaches the raw result via `raw_cosmwasm` / `raw_evm` / `raw_solana` (or `transaction_hash` / `cost`), and the emitted events via `raw_cosmwasm_events` / `raw_evm_logs` / `raw_solana_logs`.
 * The EVM `call` returns an `EvmExecution { output, logs, tx_hash, gas }` (it no longer discards the logs revm produces); build the response with `AppResponse::evm((), exec.output, exec.logs, exec.tx_hash, exec.gas)`.
-* CosmWasm hooks can skip the hand-built `ExecuteMsg` / `query_wasm_smart`: declare a marker with `cross_vm_cw_interface!`, derive `CwExecuteFns` / `CwQueryFns` (from `cross-vm-macros`) on the contract's `ExecuteMsg` / `QueryMsg` (under a `cross-vm` feature so the wasm build stays clean), then call `self.base.cosmwasm()?.contract_as::<CounterContract>(addr).increment(wallet)` / `.get_count()`. Named fields become method args; tuple fields become positional `arg0`, `arg1`, ... args (cw-orch style). Query variants need `#[returns(T)]`; a variant marked `#[payable]` adds a trailing `funds: &[Coin]` arg. The generated trait is `<EnumName>Fns` by default; add `#[cross_vm(trait_name = "...")]` on the enum to rename it (e.g. to derive cw-orch's `ExecuteFns` / `QueryFns` on the same enum without colliding on the `ExecuteMsgFns` / `QueryMsgFns` name). For dynamic messages, use the untyped `chain.contract(addr)` handle. EVM already gets typed calls from `alloy::sol!`; Solana has no schema so its hooks stay hand-written.
+* CosmWasm hooks can skip the hand-built `ExecuteMsg` / `query_wasm_smart`: declare a marker with `cross_vm_cw_interface!`, derive `CwExecuteFns` / `CwQueryFns` (from `cross-vm-macros`) on the contract's `ExecuteMsg` / `QueryMsg` (under a `cross-vm` feature so the wasm build stays clean), then call `self.base.cosmwasm()?.contract_as::<CounterContract>(addr).increment(wallet, CwGasLimit::Estimated)` / `.get_count()`. Named fields become method args; tuple fields become positional `arg0`, `arg1`, ... args (cw-orch style). Query variants need `#[returns(T)]`; a variant marked `#[payable]` adds a `funds: &[Coin]` arg. Every generated execute method is a mutating op, so it ends with a required `gas: CwGasLimit` (last, after `funds`); queries take none. The generated trait is `<EnumName>Fns` by default; add `#[cross_vm(trait_name = "...")]` on the enum to rename it (e.g. to derive cw-orch's `ExecuteFns` / `QueryFns` on the same enum without colliding on the `ExecuteMsgFns` / `QueryMsgFns` name). For dynamic messages, use the untyped `chain.contract(addr)` handle. EVM already gets typed calls from `alloy::sol!`; Solana has no schema so its hooks stay hand-written.
+* Every generated execute method also gets an `estimate_<fn>` sibling beside it: the same args minus the trailing `gas: CwGasLimit`, returning `Option<CwGas>` instead of broadcasting, e.g. `counter.estimate_increment(wallet)` beside `counter.increment(wallet, gas)`. The typed `CwContract` handle itself carries the matching lifecycle estimators, `estimate_store_code` / `estimate_instantiate` / `estimate_execute` / `estimate_execute_with_funds`, gated by the same handle state as their mutating siblings: calling `estimate_instantiate` before `store_code`, or `estimate_execute` / `estimate_execute_with_funds` before the handle is bound to an address, is a `CwError`, not a silent `None`.
+* Every state-mutating op a hook calls takes a required limit, and its type is per VM: `CwGasLimit`, `EvmGasLimit`, `SvmComputeBudget`, and Tron's unit-tagged `TronLimit` (plus a `TronEnergyPolicy` on `deploy_create`, which is not a cap on the deploy but the energy-payment policy it writes into the contract for its future callers). `Estimated` forecasts the op and scales the forecast by the chain's `gas_adjustment`; `Exact` is submitted verbatim, which is what makes an out-of-gas test expressible. A hook that wants the forecast itself calls the `estimate_*` methods on the same typed chain handle (`estimate_execute_contract`, `estimate_call`, `estimate_deploy_create`, `estimate_transaction`); they return the same figure the executed op reports, so a forecast and a receipt compare directly. CosmWasm's `CwChain::estimate_execute_contract` and friends return `Option<CwGas>`, the exact type the executed op's receipt carries, and `From<CwGas> for Cost` converts it just like `EvmGas` and `TronResources` already do. There is no `AnyChain::estimate_*`, for the same reason there is no `AnyChain` contract op: the signatures do not unify across VMs. See the README's "Gas, compute budgets, and estimation" for the per backend caveats (the CosmWasm mock has no gas meter, so it estimates `None` and cannot run out of gas).
 
 ## Transaction hooks
 

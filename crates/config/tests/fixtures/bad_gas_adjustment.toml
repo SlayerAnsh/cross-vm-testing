@@ -1,0 +1,14 @@
+# `gas_adjustment` below 1.0 puts the gas limit under the estimate: a guaranteed out-of-gas.
+[harness]
+name = "h"
+
+[[chain]]
+label = "eth"
+kind = "evm"
+chain_id = "1"
+gas_adjustment = 0.9
+
+[profile.p]
+mode = "fuzz"
+cases = 1
+ops = 1

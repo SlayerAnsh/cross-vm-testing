@@ -29,7 +29,10 @@ pub use asset::SvmAsset;
 pub use chain::SvmChain;
 pub use chains::{Commitment, SolanaChainInfo};
 pub use error::SvmError;
-pub use provider::{SvmDeploy, SvmMockProvider, SvmRpcProvider, DEFAULT_FUNDING_LAMPORTS};
+pub use provider::{
+    SvmComputeBudget, SvmDeploy, SvmMockProvider, SvmRpcProvider, DEFAULT_FUNDING_LAMPORTS,
+    MAX_COMPUTE_UNIT_LIMIT,
+};
 pub use solana_address::Address;
 pub use wallet::SvmSigner;
 

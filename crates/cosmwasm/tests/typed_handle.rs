@@ -7,7 +7,7 @@ use cosmwasm_std::Empty;
 use counter::{CountResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
 use cross_vm_core::WalletFactory;
 use cross_vm_cosmwasm::chains::OSMOSIS;
-use cross_vm_cosmwasm::{CwChain, CwContract};
+use cross_vm_cosmwasm::{CwChain, CwContract, CwError, CwGasLimit};
 use cross_vm_macros::define_wallet_roster;
 use cw_multi_test::{Contract, ContractWrapper};
 
@@ -34,7 +34,11 @@ async fn handle_binds_address_for_execute_and_query() {
     let chain: CwChain = OSMOSIS.mock(wallets()).into();
 
     let stored = chain
-        .store_code(counter_contract(), TEST_WALLETS.alice)
+        .store_code(
+            counter_contract(),
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
         .await
         .expect("store");
     let instantiated = chain
@@ -44,6 +48,7 @@ async fn handle_binds_address_for_execute_and_query() {
             TEST_WALLETS.alice,
             &[],
             "counter",
+            CwGasLimit::Estimated,
         )
         .await
         .expect("instantiate");
@@ -54,7 +59,7 @@ async fn handle_binds_address_for_execute_and_query() {
     assert_eq!(res.count, 0);
 
     contract
-        .execute(ExecuteMsg::Increment {}, "alice")
+        .execute(ExecuteMsg::Increment {}, "alice", CwGasLimit::Estimated)
         .await
         .expect("increment");
 
@@ -67,10 +72,20 @@ async fn lifecycle_handle_exposes_the_deploy_tx_hashes() {
     let chain: CwChain = OSMOSIS.mock(wallets()).into();
 
     let contract = CwContract::<()>::new(chain.clone())
-        .store_code(counter_contract(), TEST_WALLETS.alice)
+        .store_code(
+            counter_contract(),
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
         .await
         .expect("store")
-        .instantiate(InstantiateMsg {}, TEST_WALLETS.alice, &[], "counter")
+        .instantiate(
+            InstantiateMsg {},
+            TEST_WALLETS.alice,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
         .await
         .expect("instantiate");
 
@@ -86,15 +101,91 @@ async fn lifecycle_handle_exposes_the_deploy_tx_hashes() {
     assert!(bound.instantiate_tx_hash().is_none());
 }
 
+/// The handle can forecast every lifecycle step it can run, gated by the same state as the step
+/// itself: estimating an upload needs nothing, estimating an instantiate needs the stored
+/// `code_id`, estimating an execute needs the bound address. On the mock every reachable
+/// forecast is `None` (no gas meter), and an unreachable one is the sibling op's `CwError`.
+#[tokio::test]
+async fn handle_estimators_mirror_the_lifecycle_gating() {
+    let chain: CwChain = OSMOSIS.mock(wallets()).into();
+
+    // A fresh handle can estimate an upload before any step has run: no state needed.
+    let fresh = CwContract::<()>::new(chain.clone());
+    let est = fresh
+        .estimate_store_code(counter_contract(), TEST_WALLETS.alice)
+        .await
+        .expect("estimate store_code");
+    assert!(est.is_none(), "mock cannot meter, got {est:?}");
+
+    // Estimating a step whose prerequisite has not run fails like the step itself would.
+    let err = fresh
+        .estimate_instantiate(InstantiateMsg {}, TEST_WALLETS.alice, &[], "counter")
+        .await
+        .expect_err("no code_id stored yet");
+    assert!(matches!(err, CwError::Deploy(_)), "got {err:?}");
+    let err = fresh
+        .estimate_execute(ExecuteMsg::Increment {}, "alice")
+        .await
+        .expect_err("no address bound yet");
+    assert!(matches!(err, CwError::Execute(_)), "got {err:?}");
+
+    // Once the prerequisite has run, the forecast is reachable; on the mock it stays absent,
+    // mirroring the `gas` field of the receipt it forecasts.
+    let stored = fresh
+        .store_code(
+            counter_contract(),
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("store");
+    let est = stored
+        .estimate_instantiate(InstantiateMsg {}, TEST_WALLETS.alice, &[], "counter")
+        .await
+        .expect("estimate instantiate");
+    assert!(est.is_none(), "mock cannot meter, got {est:?}");
+
+    let contract = stored
+        .instantiate(
+            InstantiateMsg {},
+            TEST_WALLETS.alice,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("instantiate");
+    let est = contract
+        .estimate_execute(ExecuteMsg::Increment {}, "alice")
+        .await
+        .expect("estimate execute");
+    assert!(est.is_none(), "mock cannot meter, got {est:?}");
+    let est = contract
+        .estimate_execute_with_funds(ExecuteMsg::Increment {}, "alice", &[])
+        .await
+        .expect("estimate execute_with_funds");
+    assert!(est.is_none(), "mock cannot meter, got {est:?}");
+}
+
 #[tokio::test]
 async fn lifecycle_handle_exposes_the_deploy_gas() {
     let chain: CwChain = OSMOSIS.mock(wallets()).into();
 
     let contract = CwContract::<()>::new(chain.clone())
-        .store_code(counter_contract(), TEST_WALLETS.alice)
+        .store_code(
+            counter_contract(),
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
         .await
         .expect("store")
-        .instantiate(InstantiateMsg {}, TEST_WALLETS.alice, &[], "counter")
+        .instantiate(
+            InstantiateMsg {},
+            TEST_WALLETS.alice,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
         .await
         .expect("instantiate");
 

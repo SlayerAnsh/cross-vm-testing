@@ -65,7 +65,10 @@ pub fn cross_vm_cw_interface(input: TokenStream) -> TokenStream {
 /// `impl <Name>Fns for CwContract<I>` where `I: CwInterface<ExecuteMsg = ThisEnum>`,
 /// one `async fn` per variant (snake_cased; named fields become args; tuple fields become
 /// positional `arg0`, `arg1`, ... args). A variant marked
-/// `#[payable]` gains a trailing `funds: &[Coin]` arg routed through `execute_with_funds`.
+/// `#[payable]` gains a `funds: &[Coin]` arg routed through `execute_with_funds`.
+///
+/// Every generated method is a mutating op, so every one ends with a required
+/// `gas: CwGasLimit` (after `funds`, where present). There is no default limit.
 ///
 /// The trait is named `<EnumName>Fns` unless the enum carries
 /// `#[cross_vm(trait_name = "...")]`, which renames it (useful to avoid a clash with cw-orch's

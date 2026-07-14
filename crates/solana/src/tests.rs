@@ -175,6 +175,187 @@ fn deploy_hash_is_a_signature_and_pins_the_load() {
 }
 
 #[tokio::test]
+async fn estimate_transaction_reports_cost_without_committing() {
+    use solana_keypair::Keypair;
+    use solana_signer::Signer;
+    use solana_system_interface::instruction::transfer;
+
+    let mut chain = SOLANA_LOCALNET.mock(empty_wallets());
+    let alice = Keypair::new();
+    let bob = solana_address::Address::new_unique();
+    chain
+        .set_balance(&alice.pubkey(), "SOL", 10_000_000_000)
+        .await
+        .unwrap();
+
+    let amount = 1_000_000_000;
+    let ix = transfer(&alice.pubkey(), &bob, amount);
+
+    let alice_before = chain.balance(&alice.pubkey()).await.unwrap();
+    let bob_before = chain.balance(&bob).await.unwrap();
+    let account_before = chain.get_account(&alice.pubkey()).await;
+
+    let estimate = chain
+        .estimate_transaction([ix.clone()], &alice)
+        .await
+        .expect("estimate");
+    assert!(estimate.compute_units_consumed > 0, "no compute units");
+    assert!(estimate.fee > 0, "no fee");
+
+    // Nothing was committed: no lamports moved (not even the fee) and the payer's account is
+    // byte-for-byte what it was.
+    assert_eq!(chain.balance(&alice.pubkey()).await.unwrap(), alice_before);
+    assert_eq!(chain.balance(&bob).await.unwrap(), bob_before);
+    assert_eq!(chain.get_account(&alice.pubkey()).await, account_before);
+
+    // The very same transaction still sends afterwards (the estimate did not consume its
+    // blockhash, nor record its signature as already processed) and it costs what was forecast.
+    // `Exact(MAX_COMPUTE_UNIT_LIMIT)` reproduces it byte for byte: the estimate simulates the
+    // instructions under a `SetComputeUnitLimit` at the ceiling, which is why the signatures match.
+    let receipt = chain
+        .send_transaction(
+            [ix],
+            &alice,
+            crate::SvmComputeBudget::Exact(crate::MAX_COMPUTE_UNIT_LIMIT),
+        )
+        .await
+        .expect("send");
+    assert_eq!(receipt.signature, estimate.signature, "not the same tx");
+    assert_eq!(
+        receipt.compute_units_consumed,
+        estimate.compute_units_consumed
+    );
+    assert_eq!(receipt.fee, estimate.fee);
+
+    assert_eq!(chain.balance(&bob).await.unwrap(), bob_before + amount);
+    assert_eq!(
+        chain.balance(&alice.pubkey()).await.unwrap(),
+        alice_before - amount - receipt.fee
+    );
+}
+
+#[tokio::test]
+async fn estimate_transaction_surfaces_a_failing_simulation() {
+    use solana_keypair::Keypair;
+    use solana_signer::Signer;
+    use solana_system_interface::instruction::transfer;
+
+    let mut chain = SOLANA_LOCALNET.mock(empty_wallets());
+    let alice = Keypair::new();
+    let bob = solana_address::Address::new_unique();
+    chain
+        .set_balance(&alice.pubkey(), "SOL", 1_000_000)
+        .await
+        .unwrap(); // 0.001 SOL
+
+    // Transfers more than it holds: the estimate must fail, not report a plausible cheap success.
+    let ix = transfer(&alice.pubkey(), &bob, 10_000_000_000);
+    let err = chain
+        .estimate_transaction([ix], &alice)
+        .await
+        .expect_err("insufficient funds");
+    assert!(matches!(err, crate::SvmError::Execute(_)), "got: {err}");
+    assert_eq!(chain.balance(&bob).await.unwrap(), 0);
+}
+
+#[test]
+fn an_estimated_budget_scales_by_gas_adjustment_and_clamps_to_the_ceiling() {
+    use crate::provider::adjusted;
+    use crate::MAX_COMPUTE_UNIT_LIMIT;
+
+    // The chain's headroom, rounded up: a fractional compute unit cannot be requested.
+    assert_eq!(adjusted(300, 1.3), 390);
+    assert_eq!(adjusted(301, 1.3), 392); // 391.3 -> 392
+    assert_eq!(
+        adjusted(300, 1.0),
+        300,
+        "no headroom is still the full cost"
+    );
+
+    // The runtime silently clamps a `SetComputeUnitLimit` above its per-transaction ceiling, so
+    // the number requested here is the number that will be enforced.
+    assert_eq!(
+        adjusted(u64::from(MAX_COMPUTE_UNIT_LIMIT), 1.3),
+        MAX_COMPUTE_UNIT_LIMIT
+    );
+    assert_eq!(adjusted(u64::MAX, 1.3), MAX_COMPUTE_UNIT_LIMIT);
+}
+
+#[tokio::test]
+async fn an_estimated_budget_leaves_headroom_over_the_true_cost() {
+    use solana_keypair::Keypair;
+    use solana_signer::Signer;
+    use solana_system_interface::instruction::transfer;
+
+    use crate::provider::adjusted;
+    use crate::SvmComputeBudget;
+
+    let mut chain = SOLANA_LOCALNET.mock(empty_wallets());
+    let alice = Keypair::new();
+    let bob = solana_address::Address::new_unique();
+    chain
+        .set_balance(&alice.pubkey(), "SOL", 10_000_000_000)
+        .await
+        .unwrap();
+
+    let ix = transfer(&alice.pubkey(), &bob, 1_000_000_000);
+    let cost = chain
+        .estimate_transaction([ix.clone()], &alice)
+        .await
+        .expect("estimate")
+        .compute_units_consumed;
+
+    // What `Estimated` resolves to, spelled out: strictly above the cost at the preset's 1.3, and
+    // the transaction that runs under it executes.
+    let budget = adjusted(cost, SOLANA_LOCALNET.gas_adjustment);
+    assert!(u64::from(budget) > cost, "{budget} leaves no headroom");
+
+    let receipt = chain
+        .send_transaction([ix], &alice, SvmComputeBudget::Estimated)
+        .await
+        .expect("send under an estimated budget");
+    assert_eq!(receipt.compute_units_consumed, cost);
+}
+
+#[tokio::test]
+async fn send_transaction_rejects_a_caller_supplied_compute_budget() {
+    use solana_compute_budget_interface::ComputeBudgetInstruction;
+    use solana_keypair::Keypair;
+    use solana_signer::Signer;
+    use solana_system_interface::instruction::transfer;
+
+    use crate::SvmComputeBudget;
+
+    let mut chain = SOLANA_LOCALNET.mock(empty_wallets());
+    let alice = Keypair::new();
+    let bob = solana_address::Address::new_unique();
+    chain
+        .set_balance(&alice.pubkey(), "SOL", 10_000_000_000)
+        .await
+        .unwrap();
+
+    // The budget is the `budget` argument. A hand-rolled `SetComputeUnitLimit` on top of the one
+    // this provider prepends is a duplicate instruction, which the runtime rejects outright: say
+    // so, rather than letting it surface as an opaque `DuplicateInstruction`.
+    let err = chain
+        .send_transaction(
+            [
+                ComputeBudgetInstruction::set_compute_unit_limit(50_000),
+                transfer(&alice.pubkey(), &bob, 1_000_000_000),
+            ],
+            &alice,
+            SvmComputeBudget::Exact(50_000),
+        )
+        .await
+        .expect_err("two compute unit limits");
+    assert!(
+        matches!(&err, crate::SvmError::Execute(msg) if msg.contains("already set a compute unit limit")),
+        "got: {err}"
+    );
+    assert_eq!(chain.balance(&bob).await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn blocks_advance() {
     let mut chain = SOLANA_LOCALNET.mock(empty_wallets());
     assert_eq!(chain.block_height().await, 0);

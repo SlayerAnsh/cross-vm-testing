@@ -22,6 +22,12 @@ pub struct CosmosChainInfo {
     /// Indicative gas price in `native_denom` per gas unit (metadata only; the mock
     /// VM does not charge gas).
     pub gas_price: f64,
+    /// Multiplier applied to a simulated gas figure when a mutating op runs under
+    /// [`crate::CwGasLimit::Estimated`]. Must be `>= 1.0`: a simulation runs against the latest
+    /// committed state, and real delivery lands in a later block, so the raw figure is a floor,
+    /// not a limit. It scales the gas limit only; the fee then follows from that limit, so the
+    /// adjustment is never applied twice.
+    pub gas_adjustment: f64,
     /// Default public RPC endpoint, if known.
     pub rpc_url: Option<&'static str>,
 }

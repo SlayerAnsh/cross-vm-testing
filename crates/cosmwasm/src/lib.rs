@@ -35,8 +35,8 @@ pub use cosmwasm_std::{Addr, Event};
 pub use error::CwError;
 pub use msg::CwSerde;
 pub use provider::{
-    CwApp, CwCode, CwCodeSource, CwExecution, CwGas, CwInstantiate, CwMockProvider, CwRpcProvider,
-    CwStoreCode, DEFAULT_FUNDING,
+    CwApp, CwCode, CwCodeSource, CwExecution, CwGas, CwGasLimit, CwInstantiate, CwMockProvider,
+    CwRpcProvider, CwStoreCode, DEFAULT_FUNDING,
 };
 pub use wallet::CosmosSigner;
 

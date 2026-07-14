@@ -30,7 +30,10 @@ use revm::precompile::Precompiles;
 use crate::chains::TronChainInfo;
 use crate::error::TronError;
 use crate::provider::address::{address_from_label, TronAddress};
-use crate::provider::execution::{TronCompute, TronDeploy, TronExecution, TronResources};
+use crate::provider::execution::{
+    with_headroom, TronCompute, TronDeploy, TronEnergyPolicy, TronExecution, TronLimit,
+    TronResources,
+};
 use crate::tvm::opcodes;
 use crate::tvm::precompiles::tron_precompiles;
 use crate::tvm::resources::{ResourceTracker, SUN_PER_TRX};
@@ -123,7 +126,14 @@ impl TronMockProvider {
         }
     }
 
-    /// Deploy bytecode via a create transaction, appending constructor args to the initcode.
+    /// Deploy bytecode via a create transaction, appending constructor args to the initcode, under
+    /// the EVM gas budget `limit` resolves to (see [`TronLimit`]).
+    ///
+    /// `energy_policy` is accepted and ignored: it configures how a live java-tron chain
+    /// apportions a future caller's energy between that caller and the contract's owner, and
+    /// `revm` bills one payer and meters no energy at all. The parameter is required all the same,
+    /// so a deploy states the policy it will carry on the chain it is destined for rather than
+    /// inheriting one silently.
     ///
     /// DIVERGENCE(tron): the mock returns `revm`'s EVM-derived CREATE address (wrapped as a
     /// [`TronAddress`]); real Tron derives the address from the transaction id and a per-root-call
@@ -136,23 +146,86 @@ impl TronMockProvider {
         bytecode: Bytes,
         constructor_args: impl AsRef<[u8]>,
         from: &TronAddress,
+        limit: TronLimit,
+        energy_policy: TronEnergyPolicy,
     ) -> Result<TronDeploy, TronError> {
+        let _ = energy_policy;
         let args = constructor_args.as_ref();
+        let gas_limit = match limit {
+            TronLimit::Gas(gas) => gas,
+            TronLimit::Fee(sun) => return Err(TronError::Deploy(fee_limit_on_the_mock(sun))),
+            TronLimit::Estimated => self
+                .core
+                .estimate_create(bytecode.clone(), args, from.as_evm())
+                .map(|gas| with_headroom(gas, self.info.gas_adjustment))
+                .map_err(|f| TronError::Deploy(f.deploy_message()))?,
+        };
         let bandwidth = self.charge_bandwidth(from, bytecode.len() + args.len());
         self.core
-            .deploy_create(bytecode, args, from.as_evm())
+            .deploy_create(bytecode, args, from.as_evm(), gas_limit)
             .map(|d| mock_deploy(d, bandwidth))
             .map_err(|f| TronError::Deploy(f.deploy_message()))
     }
 
-    /// Execute a state-mutating call against `to`, returning its output plus emitted logs.
+    /// Forecast what a [`deploy_create`](Self::deploy_create) of this bytecode would consume,
+    /// without deploying it.
+    ///
+    /// The compute figure is EVM gas ([`TronCompute::Gas`]), because that is what the backing
+    /// `revm` meters; see [`mock_resources`]. A reverting constructor is an error, not a resource
+    /// figure.
+    pub async fn estimate_deploy_create(
+        &self,
+        bytecode: Bytes,
+        constructor_args: impl AsRef<[u8]>,
+        from: &TronAddress,
+    ) -> Result<TronResources, TronError> {
+        let args = constructor_args.as_ref();
+        let bandwidth = self.forecast_bandwidth(from, bytecode.len() + args.len());
+        self.core
+            .estimate_create(bytecode, args, from.as_evm())
+            .map(|gas| mock_resources(gas, bandwidth))
+            .map_err(|f| TronError::Deploy(f.deploy_message()))
+    }
+
+    /// Forecast what a [`call`](Self::call) with these arguments would consume, without running it.
+    pub async fn estimate_call(
+        &self,
+        to: &TronAddress,
+        calldata: impl AsRef<[u8]>,
+        from: &TronAddress,
+    ) -> Result<TronResources, TronError> {
+        self.estimate_call_value(to, calldata, from, U256::ZERO)
+            .await
+    }
+
+    /// Forecast what a [`call_value`](Self::call_value) with these arguments would consume, without
+    /// running it. As on the executing path, a caller that cannot cover `value` is topped up first,
+    /// so an estimate does not fail where the call it forecasts would succeed; the top-up is
+    /// journaled and discarded with the rest of the simulated state.
+    pub async fn estimate_call_value(
+        &self,
+        to: &TronAddress,
+        calldata: impl AsRef<[u8]>,
+        from: &TronAddress,
+        value: U256,
+    ) -> Result<TronResources, TronError> {
+        let bandwidth = self.forecast_bandwidth(from, calldata.as_ref().len());
+        self.core
+            .estimate_call(to.as_evm(), calldata.as_ref(), from.as_evm(), value)
+            .map(|gas| mock_resources(gas, bandwidth))
+            .map_err(|f| TronError::Execute(f.call_message("estimate_call")))
+    }
+
+    /// Execute a state-mutating call against `to` under the EVM gas budget `limit` resolves to
+    /// (see [`TronLimit`]), returning its output plus emitted logs.
     pub async fn call(
         &self,
         to: &TronAddress,
         calldata: impl AsRef<[u8]>,
         from: &TronAddress,
+        limit: TronLimit,
     ) -> Result<TronExecution, TronError> {
-        self.call_value(to, calldata, from, U256::ZERO).await
+        self.call_value(to, calldata, from, U256::ZERO, limit).await
     }
 
     /// Execute a state-mutating call against `to` carrying `value` sun (a payable call), returning
@@ -165,12 +238,28 @@ impl TronMockProvider {
         calldata: impl AsRef<[u8]>,
         from: &TronAddress,
         value: U256,
+        limit: TronLimit,
     ) -> Result<TronExecution, TronError> {
+        let gas_limit = match limit {
+            TronLimit::Gas(gas) => gas,
+            TronLimit::Fee(sun) => return Err(TronError::Execute(fee_limit_on_the_mock(sun))),
+            TronLimit::Estimated => self
+                .core
+                .estimate_call(to.as_evm(), calldata.as_ref(), from.as_evm(), value)
+                .map(|gas| with_headroom(gas, self.info.gas_adjustment))
+                .map_err(|f| TronError::Execute(f.call_message("estimate_call")))?,
+        };
         // Coarse bandwidth accounting: charge the caller by encoded calldata length. The mock does
         // not gate execution on the outcome, it only reports what was deducted.
         let bandwidth = self.charge_bandwidth(from, calldata.as_ref().len());
         self.core
-            .call(to.as_evm(), calldata.as_ref(), from.as_evm(), value)
+            .call(
+                to.as_evm(),
+                calldata.as_ref(),
+                from.as_evm(),
+                value,
+                gas_limit,
+            )
             .map(|e| mock_execution(e, bandwidth))
             .map_err(|f| TronError::Execute(f.call_message("call")))
     }
@@ -183,6 +272,12 @@ impl TronMockProvider {
     /// hash. Unlike `call_value` it does NOT mint on demand: the core tops the caller up to cover
     /// the value, so the sender's balance is checked first and a shortfall errors, as a live chain
     /// would reject it. `amount` is sun, stored 1:1 as revm's `U256` at the boundary.
+    ///
+    /// It takes no [`TronLimit`], because java-tron's `TransferContract` has no `fee_limit` field
+    /// to take: a native transfer runs no code, burns no energy, and is billed only in bandwidth,
+    /// which the sender cannot cap. `revm` still needs a budget, so the mock measures the one this
+    /// transfer needs (it is the flat intrinsic transaction cost, and the estimate runs against
+    /// the state the transfer then runs against, so it is exact and needs no headroom).
     pub async fn transfer_funds(
         &self,
         to: &TronAddress,
@@ -195,8 +290,13 @@ impl TronMockProvider {
                 "insufficient balance: {from} holds {current} sun, needs {amount}"
             )));
         }
+        let value = U256::from(amount);
+        let gas_limit = self
+            .core
+            .estimate_call(to.as_evm(), &[], from.as_evm(), value)
+            .map_err(|f| TronError::Execute(f.call_message("transfer_funds")))?;
         self.core
-            .call(to.as_evm(), &[], from.as_evm(), U256::from(amount))
+            .call(to.as_evm(), &[], from.as_evm(), value, gas_limit)
             .map(|e| hex::encode(e.tx_hash))
             .map_err(|f| TronError::Execute(f.call_message("transfer_funds")))
     }
@@ -260,14 +360,50 @@ impl TronMockProvider {
             0
         }
     }
+
+    /// The points [`charge_bandwidth`](Self::charge_bandwidth) *would* deduct for a
+    /// `payload_bytes`-long transaction from `from`, deducting nothing: an estimate must not mutate
+    /// the chain, and the shim's allowance is chain state. The shim charges by payload length
+    /// alone, so this is exact without executing anything.
+    fn forecast_bandwidth(&self, from: &TronAddress, payload_bytes: usize) -> u64 {
+        let needed = payload_bytes as u64;
+        if needed <= self.resources.borrow().bandwidth(from) {
+            needed
+        } else {
+            0
+        }
+    }
 }
 
-/// The mock's compute figure is `revm`'s EVM gas, reported as [`TronCompute::Gas`], never as
-/// energy: the mock is `revm`, so gas is the quantity it genuinely meters, while the energy shim
-/// sits outside `revm`'s gas loop and is never touched by execution. `fee` is `None` for the same
-/// reason: a Tron fee is priced off energy, which nothing here metered.
+/// Why a sun fee cap cannot bound a mock transaction.
 ///
-/// This is also the one place a `revm` `B256` becomes a Tron transaction hash: the mock has no real
+/// A `fee_limit` is an energy ceiling denominated in sun: java-tron divides it by the energy price
+/// to get the energy the transaction may burn. The mock is `revm`, which meters EVM gas
+/// (see [`TronCompute`]), has no energy, and has no price at which to buy any. Honoring the number
+/// would mean inventing both, so the cap is rejected rather than silently ignored or converted.
+fn fee_limit_on_the_mock(sun: u64) -> String {
+    format!(
+        "a fee limit of {sun} sun cannot bound a mock transaction: the mock is revm, which budgets \
+         in EVM gas and meters no energy to price into sun; use TronLimit::Gas or \
+         TronLimit::Estimated"
+    )
+}
+
+/// The resources a mock operation reports, whether executed or merely forecast.
+///
+/// The compute figure is `revm`'s EVM gas, reported as [`TronCompute::Gas`], never as energy: the
+/// mock is `revm`, so gas is the quantity it genuinely meters, while the energy shim sits outside
+/// `revm`'s gas loop and is never touched by execution. `fee` is `None` for the same reason: a Tron
+/// fee is priced off energy, which nothing here metered.
+fn mock_resources(gas: u64, bandwidth: u64) -> TronResources {
+    TronResources {
+        compute: TronCompute::Gas(gas),
+        bandwidth,
+        fee: None,
+    }
+}
+
+/// This is the one place a `revm` `B256` becomes a Tron transaction hash: the mock has no real
 /// broadcast hash, so the core mints a synthetic, deterministic one, and it is rendered here into
 /// the unprefixed hex a java-tron `txID` is spoken in. Every other Tron surface already holds the
 /// hash as that `String`, so nothing round-trips.
@@ -276,11 +412,7 @@ fn mock_execution(e: cross_vm_revm_common::Execution, bandwidth: u64) -> TronExe
         output: e.output,
         logs: e.logs,
         tx_hash: hex::encode(e.tx_hash),
-        resources: TronResources {
-            compute: TronCompute::Gas(e.gas_used),
-            bandwidth,
-            fee: None,
-        },
+        resources: mock_resources(e.gas_used, bandwidth),
     }
 }
 
@@ -289,11 +421,7 @@ fn mock_deploy(d: cross_vm_revm_common::Deployment, bandwidth: u64) -> TronDeplo
     TronDeploy {
         address: TronAddress::from_evm(d.address),
         tx_hash: hex::encode(d.tx_hash),
-        resources: TronResources {
-            compute: TronCompute::Gas(d.gas_used),
-            bandwidth,
-            fee: None,
-        },
+        resources: mock_resources(d.gas_used, bandwidth),
     }
 }
 
@@ -357,8 +485,29 @@ mod tests {
     use cross_vm_core::{ChainProvider, WalletFactory};
     use std::rc::Rc;
 
+    /// A budget generous enough for every transaction below, so a test that is not about the limit
+    /// does not accidentally become one.
+    const AMPLE: TronLimit = TronLimit::Gas(30_000_000);
+
+    /// The caller pays all of a call's energy, so the contract owner's ceiling never binds. None of
+    /// the deploys below is about how the deployed contract bills its future callers.
+    const CALLER_PAYS: TronEnergyPolicy = TronEnergyPolicy {
+        consume_user_resource_percent: 100,
+        origin_energy_limit: 0,
+    };
+
     fn provider() -> TronMockProvider {
         TronMockProvider::new(LOCAL, Rc::new(WalletFactory::from_roster(&[]).unwrap()))
+    }
+
+    /// A mock chain whose forecasts are scaled by `gas_adjustment`, to prove the chain's number is
+    /// what sizes an [`TronLimit::Estimated`] limit.
+    fn provider_with_adjustment(gas_adjustment: f64) -> TronMockProvider {
+        let info = TronChainInfo {
+            gas_adjustment,
+            ..LOCAL
+        };
+        TronMockProvider::new(info, Rc::new(WalletFactory::from_roster(&[]).unwrap()))
     }
 
     #[tokio::test]
@@ -405,7 +554,7 @@ mod tests {
         let mut c = provider();
         let deployer = c.new_account("deployer").await;
         let d = c
-            .deploy_create(initcode.clone(), [], &deployer)
+            .deploy_create(initcode.clone(), [], &deployer, AMPLE, CALLER_PAYS)
             .await
             .expect("empty-runtime deploy succeeds");
         assert!(d.address.to_base58().starts_with('T'));
@@ -417,7 +566,7 @@ mod tests {
 
         // A repeat of the identical deploy is a distinct transaction, so it carries a distinct hash.
         let again = c
-            .deploy_create(initcode, [], &deployer)
+            .deploy_create(initcode, [], &deployer, AMPLE, CALLER_PAYS)
             .await
             .expect("empty-runtime deploy succeeds");
         assert_ne!(d.tx_hash, again.tx_hash);
@@ -429,13 +578,19 @@ mod tests {
         let mut c = provider();
         let deployer = c.new_account("deployer").await;
         let addr = c
-            .deploy_create(initcode, [], &deployer)
+            .deploy_create(initcode, [], &deployer, AMPLE, CALLER_PAYS)
             .await
             .expect("empty-runtime deploy succeeds")
             .address;
 
-        let first = c.call(&addr, [], &deployer).await.expect("call succeeds");
-        let second = c.call(&addr, [], &deployer).await.expect("call succeeds");
+        let first = c
+            .call(&addr, [], &deployer, AMPLE)
+            .await
+            .expect("call succeeds");
+        let second = c
+            .call(&addr, [], &deployer, AMPLE)
+            .await
+            .expect("call succeeds");
         // A 32-byte hash as unprefixed hex, the shape java-tron renders a `txID` in.
         assert_eq!(first.tx_hash.len(), 64);
         assert!(first.tx_hash.chars().all(|c| c.is_ascii_hexdigit()));
@@ -458,11 +613,11 @@ mod tests {
         let energy_before = c.energy(&deployer);
 
         let d = c
-            .deploy_create(initcode, [], &deployer)
+            .deploy_create(initcode, [], &deployer, AMPLE, CALLER_PAYS)
             .await
             .expect("empty-runtime deploy succeeds");
         let e = c
-            .call(&d.address, [], &deployer)
+            .call(&d.address, [], &deployer, AMPLE)
             .await
             .expect("call succeeds");
 
@@ -499,7 +654,7 @@ mod tests {
 
         // The deploy is charged for its payload (initcode + constructor args).
         let d = c
-            .deploy_create(initcode, [0xaa, 0xbb], &deployer)
+            .deploy_create(initcode, [0xaa, 0xbb], &deployer, AMPLE, CALLER_PAYS)
             .await
             .expect("empty-runtime deploy succeeds");
         assert_eq!(d.resources.bandwidth, 7);
@@ -507,7 +662,7 @@ mod tests {
 
         // A call is charged by calldata length, and the reported figure is the deduction.
         let e = c
-            .call(&d.address, [0x01, 0x02, 0x03], &deployer)
+            .call(&d.address, [0x01, 0x02, 0x03], &deployer, AMPLE)
             .await
             .expect("call succeeds");
         assert_eq!(e.resources.bandwidth, 3);
@@ -518,11 +673,205 @@ mod tests {
         // likewise carries `net_usage: 0`.
         let big = vec![0u8; FREE_BANDWIDTH_PER_DAY as usize];
         let e = c
-            .call(&d.address, big, &deployer)
+            .call(&d.address, big, &deployer, AMPLE)
             .await
             .expect("call succeeds");
         assert_eq!(e.resources.bandwidth, 0);
         assert_eq!(c.bandwidth(&deployer), FREE_BANDWIDTH_PER_DAY - 10);
+    }
+
+    /// Initcode returning `runtime` (a CODECOPY of the bytes trailing this 12-byte prologue).
+    fn initcode_returning(runtime: &[u8]) -> Bytes {
+        let n = runtime.len() as u8;
+        let mut code = vec![
+            0x60, n, 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, n, 0x60, 0x00, 0xf3,
+        ];
+        code.extend_from_slice(runtime);
+        Bytes::from(code)
+    }
+
+    #[tokio::test]
+    async fn estimate_reports_revm_gas_and_never_energy() {
+        // The same crux as the executed path: a forecast from a revm-backed mock is a forecast of
+        // EVM gas. Relabelling it energy would misstate the quantity, so the estimate reports the
+        // unit it measured, exactly as a receipt does.
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+        c.freeze_for_energy(&deployer, SUN_PER_TRX);
+
+        let deploy = c
+            .estimate_deploy_create(initcode.clone(), [], &deployer)
+            .await
+            .expect("empty-runtime deploy estimates");
+        let addr = c
+            .deploy_create(initcode, [], &deployer, AMPLE, CALLER_PAYS)
+            .await
+            .expect("empty-runtime deploy succeeds")
+            .address;
+        let call = c
+            .estimate_call(&addr, [], &deployer)
+            .await
+            .expect("call estimates");
+
+        for r in [deploy, call] {
+            let TronCompute::Gas(gas) = r.compute else {
+                panic!("the mock forecasts EVM gas, not Tron energy: got {r:?}");
+            };
+            assert!(
+                gas > 0,
+                "revm bills every transaction at least the tx floor"
+            );
+            // A Tron fee is priced off energy, which nothing here metered, so there is none to
+            // forecast either.
+            assert_eq!(r.fee, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn estimate_matches_the_resources_the_op_then_reports() {
+        // The point of reusing `TronResources` for a forecast: it is comparable to the receipt.
+        // The estimate commits nothing, so the op it forecasts runs against the very state the
+        // estimate measured, and the two figures agree exactly.
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+        // Fallback writes 0x2a to slot 0: PUSH1 0x2a, PUSH1 0x00, SSTORE, STOP.
+        let initcode = initcode_returning(&[0x60, 0x2a, 0x60, 0x00, 0x55, 0x00]);
+
+        let estimated = c
+            .estimate_deploy_create(initcode.clone(), [], &deployer)
+            .await
+            .expect("deploy estimates");
+        let deploy = c
+            .deploy_create(initcode, [], &deployer, AMPLE, CALLER_PAYS)
+            .await
+            .expect("deploy succeeds");
+        assert_eq!(estimated, deploy.resources);
+
+        let estimated = c
+            .estimate_call(&deploy.address, [0x01, 0x02, 0x03], &deployer)
+            .await
+            .expect("call estimates");
+        let exec = c
+            .call(&deploy.address, [0x01, 0x02, 0x03], &deployer, AMPLE)
+            .await
+            .expect("call succeeds");
+        assert_eq!(estimated, exec.resources);
+        assert_eq!(
+            estimated.bandwidth, 3,
+            "the shim charges by calldata length"
+        );
+    }
+
+    #[tokio::test]
+    async fn estimating_does_not_deduct_bandwidth() {
+        // An estimate forecasts the shim's charge; it must not levy it. The shim's allowance is
+        // chain state, and a forecast that spends the thing it is forecasting is a transaction.
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+
+        let deploy = c
+            .estimate_deploy_create(initcode.clone(), [0xaa, 0xbb], &deployer)
+            .await
+            .expect("deploy estimates");
+        assert_eq!(deploy.bandwidth, 7, "initcode (5) + constructor args (2)");
+        assert_eq!(c.bandwidth(&deployer), FREE_BANDWIDTH_PER_DAY);
+
+        let addr = c
+            .deploy_create(initcode, [0xaa, 0xbb], &deployer, AMPLE, CALLER_PAYS)
+            .await
+            .expect("empty-runtime deploy succeeds")
+            .address;
+        assert_eq!(c.bandwidth(&deployer), FREE_BANDWIDTH_PER_DAY - 7);
+
+        // Repeated estimates keep forecasting the same figure, because none of them spends it.
+        for _ in 0..3 {
+            let e = c
+                .estimate_call(&addr, [0x01, 0x02, 0x03], &deployer)
+                .await
+                .expect("call estimates");
+            assert_eq!(e.bandwidth, 3);
+            assert_eq!(c.bandwidth(&deployer), FREE_BANDWIDTH_PER_DAY - 7);
+        }
+
+        // Past the free allowance the shim would deduct nothing (it models the burn-for-fee
+        // fallback as free), and the forecast says so rather than inventing a charge.
+        let big = vec![0u8; FREE_BANDWIDTH_PER_DAY as usize];
+        let e = c
+            .estimate_call(&addr, big, &deployer)
+            .await
+            .expect("call estimates");
+        assert_eq!(e.bandwidth, 0);
+        assert_eq!(c.bandwidth(&deployer), FREE_BANDWIDTH_PER_DAY - 7);
+    }
+
+    #[tokio::test]
+    async fn estimating_a_reverting_tx_errors_rather_than_reporting_resources() {
+        // A caller told "42_000 gas" for a transaction that cannot succeed has been misinformed.
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+
+        // Initcode that reverts: the create never completes, so there is no figure to hand back.
+        let err = c
+            .estimate_deploy_create(
+                Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xfd]),
+                [],
+                &deployer,
+            )
+            .await
+            .expect_err("estimating a reverting create must error");
+        assert!(matches!(err, TronError::Deploy(_)), "got {err:?}");
+
+        // A contract whose fallback reverts with empty data.
+        let target = c
+            .deploy_create(
+                initcode_returning(&[0x60, 0x00, 0x60, 0x00, 0xfd]),
+                [],
+                &deployer,
+                AMPLE,
+                CALLER_PAYS,
+            )
+            .await
+            .expect("deploy succeeds")
+            .address;
+        let err = c
+            .estimate_call(&target, [], &deployer)
+            .await
+            .expect_err("estimating a reverting call must error");
+        assert!(matches!(err, TronError::Execute(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn estimating_a_payable_call_tops_the_caller_up_without_committing_it() {
+        // `call_value` mints the caller the funds it lacks, so its estimate must too, or the
+        // forecast would fail where the call succeeds. The top-up must not survive the estimate.
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+        let addr = c
+            .deploy_create(initcode, [], &deployer, AMPLE, CALLER_PAYS)
+            .await
+            .expect("empty-runtime deploy succeeds")
+            .address;
+        let pauper = c.new_account("pauper").await;
+        c.set_balance(&pauper, "TRX", 0).await.unwrap();
+
+        let value = U256::from(5 * SUN_PER_TRX);
+        c.estimate_call_value(&addr, [], &pauper, value)
+            .await
+            .expect("a payable call from an empty account still estimates");
+
+        assert_eq!(
+            c.balance(&pauper).await.unwrap(),
+            0,
+            "minted funds must die with the estimate"
+        );
+        assert_eq!(
+            c.balance(&addr).await.unwrap(),
+            0,
+            "an estimate moves nothing"
+        );
     }
 
     #[tokio::test]
@@ -536,7 +885,7 @@ mod tests {
         let mut c = provider();
         let deployer = c.new_account("deployer").await;
         let d = c
-            .deploy_create(initcode, [], &deployer)
+            .deploy_create(initcode, [], &deployer, AMPLE, CALLER_PAYS)
             .await
             .expect("tronc token-guard opcodes decode and deploy succeeds");
         assert!(d.address.to_base58().starts_with('T'));
@@ -551,14 +900,14 @@ mod tests {
         let mut c = provider();
         let deployer = c.new_account("deployer").await;
         let addr = c
-            .deploy_create(initcode, [], &deployer)
+            .deploy_create(initcode, [], &deployer, AMPLE, CALLER_PAYS)
             .await
             .expect("empty-runtime deploy succeeds")
             .address;
         assert_eq!(c.balance(&addr).await.unwrap(), 0);
 
         let value = 3 * SUN_PER_TRX;
-        c.call_value(&addr, [], &deployer, U256::from(value))
+        c.call_value(&addr, [], &deployer, U256::from(value), AMPLE)
             .await
             .expect("payable call succeeds");
         assert_eq!(c.balance(&addr).await.unwrap(), value);
@@ -571,12 +920,12 @@ mod tests {
         let mut c = provider();
         let deployer = c.new_account("deployer").await;
         let addr = c
-            .deploy_create(initcode, [], &deployer)
+            .deploy_create(initcode, [], &deployer, AMPLE, CALLER_PAYS)
             .await
             .expect("empty-runtime deploy succeeds")
             .address;
 
-        c.call(&addr, [], &deployer)
+        c.call(&addr, [], &deployer, AMPLE)
             .await
             .expect("value-less call succeeds");
         assert_eq!(c.balance(&addr).await.unwrap(), 0);
@@ -592,7 +941,7 @@ mod tests {
         let mut c = provider();
         let deployer = c.new_account("deployer").await;
         let addr = c
-            .deploy_create(initcode, [], &deployer)
+            .deploy_create(initcode, [], &deployer, AMPLE, CALLER_PAYS)
             .await
             .expect("storage-writing deploy succeeds")
             .address;
@@ -605,6 +954,160 @@ mod tests {
             c.get_storage_at(&addr, U256::from(1u64)).await.unwrap(),
             U256::ZERO
         );
+    }
+
+    #[tokio::test]
+    async fn an_exact_gas_limit_is_honored_and_one_below_the_cost_runs_out_of_gas() {
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+        // Fallback writes 0x2a to slot 0: PUSH1 0x2a, PUSH1 0x00, SSTORE, STOP.
+        let storing = initcode_returning(&[0x60, 0x2a, 0x60, 0x00, 0x55, 0x00]);
+
+        let needed = match c
+            .estimate_deploy_create(storing.clone(), [], &deployer)
+            .await
+            .expect("deploy estimates")
+            .compute
+        {
+            TronCompute::Gas(gas) => gas,
+            other => panic!("the mock forecasts gas: got {other:?}"),
+        };
+        let err = c
+            .deploy_create(
+                storing.clone(),
+                [],
+                &deployer,
+                TronLimit::Gas(needed - 1),
+                CALLER_PAYS,
+            )
+            .await
+            .expect_err("a budget under the true cost cannot deploy");
+        assert!(matches!(err, TronError::Deploy(_)), "got {err:?}");
+
+        // Exactly the forecast cost suffices: the limit is a budget, not a fee.
+        let deploy = c
+            .deploy_create(storing, [], &deployer, TronLimit::Gas(needed), CALLER_PAYS)
+            .await
+            .expect("a budget equal to the true cost deploys");
+        assert_eq!(deploy.resources.compute, TronCompute::Gas(needed));
+
+        let needed = match c
+            .estimate_call(&deploy.address, [], &deployer)
+            .await
+            .expect("call estimates")
+            .compute
+        {
+            TronCompute::Gas(gas) => gas,
+            other => panic!("the mock forecasts gas: got {other:?}"),
+        };
+        let err = c
+            .call(&deploy.address, [], &deployer, TronLimit::Gas(needed - 1))
+            .await
+            .expect_err("a budget under the true cost cannot run");
+        assert!(matches!(err, TronError::Execute(_)), "got {err:?}");
+        let exec = c
+            .call(&deploy.address, [], &deployer, TronLimit::Gas(needed))
+            .await
+            .expect("a budget equal to the true cost runs");
+        assert_eq!(exec.resources.compute, TronCompute::Gas(needed));
+    }
+
+    #[tokio::test]
+    async fn an_estimated_limit_covers_the_op_and_is_sized_by_the_chains_adjustment() {
+        // `Estimated` is the forecast times the chain's `gas_adjustment`, so on a chain whose
+        // adjustment is generous the op runs, and on one whose adjustment is under 1.0 (which the
+        // config layer rejects, and which only a hand-built chain can produce) the very same op
+        // runs out of gas. That is the proof the chain's number reaches revm rather than a
+        // constant standing in for it.
+        let storing = initcode_returning(&[0x60, 0x2a, 0x60, 0x00, 0x55, 0x00]);
+
+        let mut c = provider_with_adjustment(1.3);
+        let deployer = c.new_account("deployer").await;
+        let deploy = c
+            .deploy_create(
+                storing.clone(),
+                [],
+                &deployer,
+                TronLimit::Estimated,
+                CALLER_PAYS,
+            )
+            .await
+            .expect("a forecast with 30% headroom covers the deploy");
+        c.call(&deploy.address, [], &deployer, TronLimit::Estimated)
+            .await
+            .expect("a forecast with 30% headroom covers the call");
+
+        let mut starved = provider_with_adjustment(0.5);
+        let deployer = starved.new_account("deployer").await;
+        let err = starved
+            .deploy_create(storing, [], &deployer, TronLimit::Estimated, CALLER_PAYS)
+            .await
+            .expect_err("half the forecast cannot cover the deploy");
+        assert!(matches!(err, TronError::Deploy(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_sun_fee_limit_is_rejected_rather_than_ignored_or_converted() {
+        // The mock is revm: it meters EVM gas and has no energy, so it has no price at which to
+        // buy energy with sun. Honoring a `fee_limit` would mean inventing both an energy figure
+        // and a price for it; silently ignoring it would leave the caller believing a cap is in
+        // force that is not. So it is an error, exactly as `TronCompute` refuses to call the
+        // mock's gas energy.
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+
+        let err = c
+            .deploy_create(
+                initcode.clone(),
+                [],
+                &deployer,
+                TronLimit::Fee(1_000_000_000),
+                CALLER_PAYS,
+            )
+            .await
+            .expect_err("a sun fee cap cannot bound a revm transaction");
+        assert!(
+            matches!(&err, TronError::Deploy(m) if m.contains("sun") && m.contains("revm")),
+            "got {err:?}"
+        );
+
+        let addr = c
+            .deploy_create(initcode, [], &deployer, AMPLE, CALLER_PAYS)
+            .await
+            .expect("empty-runtime deploy succeeds")
+            .address;
+        let err = c
+            .call(&addr, [], &deployer, TronLimit::Fee(1_000_000_000))
+            .await
+            .expect_err("a sun fee cap cannot bound a revm transaction");
+        assert!(
+            matches!(&err, TronError::Execute(m) if m.contains("sun") && m.contains("revm")),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_limit_commits_nothing() {
+        // The limit is resolved before the transaction is submitted, so a rejected one must not
+        // have charged bandwidth or moved the chain on its way out.
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+        let height = c.block_height().await;
+
+        c.deploy_create(
+            initcode,
+            [0xaa, 0xbb],
+            &deployer,
+            TronLimit::Fee(1_000_000_000),
+            CALLER_PAYS,
+        )
+        .await
+        .expect_err("a sun fee cap cannot bound a revm transaction");
+
+        assert_eq!(c.bandwidth(&deployer), FREE_BANDWIDTH_PER_DAY);
+        assert_eq!(c.block_height().await, height);
     }
 
     #[tokio::test]

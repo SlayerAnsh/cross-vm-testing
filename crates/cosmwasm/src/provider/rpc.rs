@@ -5,6 +5,15 @@
 //! ([`store_code`], [`instantiate`], [`execute_contract`], [`transfer_funds`]) sign with the
 //! wallet's secp256k1 key (account number + sequence + `SignDoc` + `broadcast_tx_commit`) and
 //! broadcast; only `set_balance` stays [`CwError::Unimplemented`] (a live chain cannot mint).
+//! Each write path has an `estimate_*` sibling that simulates the same message against the
+//! node's `/cosmos.tx.v1beta1.Service/Simulate` endpoint and reports what the op would cost
+//! ([`CwGas`]), without broadcasting anything.
+//!
+//! Every write path takes a required [`CwGasLimit`]: [`CwGasLimit::Exact`] is declared verbatim,
+//! [`CwGasLimit::Estimated`] simulates the very message about to be broadcast and scales the
+//! node's figure by the chain's [`CosmosChainInfo::gas_adjustment`]. The declared fee follows
+//! from the resolved limit and the chain's `gas_price` alone, so the adjustment lands on the
+//! limit once and never again on the fee.
 //!
 //! [`block_height`]: CwRpcProvider::block_height
 //! [`balance`]: CwRpcProvider::balance
@@ -19,6 +28,7 @@ use cosmrs::proto::cosmos::auth::v1beta1::{
 };
 use cosmrs::proto::cosmos::bank::v1beta1::{QueryBalanceRequest, QueryBalanceResponse};
 use cosmrs::proto::cosmos::base::query::v1beta1::PageRequest;
+use cosmrs::proto::cosmos::tx::v1beta1::{SimulateRequest, SimulateResponse, TxRaw};
 use cosmrs::proto::cosmwasm::wasm::v1::{
     QueryAllContractStateRequest, QueryAllContractStateResponse, QueryRawContractStateRequest,
     QueryRawContractStateResponse, QuerySmartContractStateRequest, QuerySmartContractStateResponse,
@@ -42,7 +52,7 @@ use crate::asset::CwAsset;
 use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
-use crate::provider::{CwExecution, CwGas, CwInstantiate, CwStoreCode};
+use crate::provider::{CwExecution, CwGas, CwGasLimit, CwInstantiate, CwStoreCode};
 use crate::wallet::CosmosSigner;
 
 /// A live-RPC CosmWasm provider. Chain-level reads and contract queries hit a real node via
@@ -192,11 +202,7 @@ impl CwRpcProvider {
             .map_err(|e| CwError::Rpc(format!("chain id: {e}")))?;
         let body = Body::new(msgs, "", 0u16);
 
-        // Fee = ceil(gas_limit * gas_price * buffer) of the native denom. The buffer covers a
-        // node min-gas-price higher than the preset's indicative `gas_price` (the rounding/excess
-        // is refunded-style irrelevant on testnets and keeps the tx from bouncing on `check_tx`).
-        const FEE_BUFFER: f64 = 2.0;
-        let fee_amount = (gas_limit as f64 * self.info.gas_price * FEE_BUFFER).ceil() as u128;
+        let fee_amount = fee_for(gas_limit, self.info.gas_price);
         let denom = self
             .info
             .native_denom
@@ -251,8 +257,137 @@ impl CwRpcProvider {
         Ok((resp.hash.to_string(), resp.tx_result.events, gas))
     }
 
-    /// Upload raw wasm bytecode to the chain, signed by `signer`, and return its code id, the
-    /// broadcast transaction hash, and what the upload cost ([`CwGas`]).
+    // ----- Estimation: simulate a tx against the node without broadcasting it. -----
+
+    /// Simulate a transaction carrying `msgs` against the node and return the gas the node
+    /// reports it would consume (the Simulate response's `gas_info.gas_used`).
+    ///
+    /// The tx is assembled like [`Self::sign_and_broadcast`]'s (same messages, the signer's real
+    /// public key and on-chain sequence) but carries a dummy signature and is never broadcast
+    /// (see [`simulate_tx_bytes`] for why that is correct). Chain state is untouched and the
+    /// account's sequence does not advance.
+    ///
+    /// The figure is the node's raw report against its latest committed state. Real delivery can
+    /// land somewhat higher (a later block, different block context), which is why a gas *limit*
+    /// derived from this figure needs a buffer on top; applying one is the caller's business.
+    async fn simulate(
+        &self,
+        msgs: Vec<cosmrs::Any>,
+        signer: &CosmosSigner,
+    ) -> Result<u64, CwError> {
+        let (_, sequence) = self.account_info(signer.address.as_str()).await?;
+        let req = SimulateRequest {
+            tx_bytes: simulate_tx_bytes(msgs, signer.key.public_key(), sequence)?,
+            // Field 1 (`tx`) is deprecated in favor of `tx_bytes`; leave it unset.
+            ..Default::default()
+        };
+        let bytes = self
+            .abci_query("/cosmos.tx.v1beta1.Service/Simulate", req.encode_to_vec())
+            .await?;
+        parse_simulate_gas(&bytes)
+    }
+
+    /// Resolve a [`CwGasLimit`] into the gas figure the transaction carrying `msgs` will declare.
+    ///
+    /// [`CwGasLimit::Exact`] passes straight through. [`CwGasLimit::Estimated`] simulates `msgs`
+    /// and scales the node's figure by the chain's [`CosmosChainInfo::gas_adjustment`] (see
+    /// [`adjust_gas`]). That is the *only* place the adjustment is applied: the fee is then
+    /// derived from the resolved limit by [`fee_for`], which knows nothing about it, so an
+    /// `Estimated` limit and an `Exact` one of the same size cost the sender exactly the same.
+    ///
+    /// Called from inside the write paths, which the caller ([`crate::CwChain`]) runs while
+    /// holding the per-account broadcast lock. This is why it reaches for the provider-level
+    /// [`Self::simulate`], which takes no lock: a write path can compose its own estimate
+    /// without deadlocking against a lock it already holds.
+    async fn resolve_gas_limit(
+        &self,
+        limit: CwGasLimit,
+        msgs: Vec<cosmrs::Any>,
+        signer: &CosmosSigner,
+    ) -> Result<u64, CwError> {
+        match limit {
+            CwGasLimit::Exact(gas) => Ok(gas),
+            CwGasLimit::Estimated => {
+                let simulated = self.simulate(msgs, signer).await?;
+                Ok(adjust_gas(simulated, self.info.gas_adjustment))
+            }
+        }
+    }
+
+    /// What a simulated op would cost, as a [`CwGas`] forecast comparable to a receipt.
+    ///
+    /// See [`estimated_gas`]; this just supplies the chain's `gas_adjustment` and `gas_price`.
+    fn forecast(&self, simulated: u64) -> CwGas {
+        estimated_gas(simulated, self.info.gas_adjustment, self.info.gas_price)
+    }
+
+    /// Estimate what uploading `wasm` would cost, by simulating the `MsgStoreCode` against the
+    /// node without broadcasting it. See [`Self::simulate`] and [`estimated_gas`].
+    pub async fn estimate_store_code(
+        &self,
+        wasm: Vec<u8>,
+        signer: &CosmosSigner,
+    ) -> Result<CwGas, CwError> {
+        let simulated = self
+            .simulate(vec![store_code_msg(wasm, signer)?], signer)
+            .await?;
+        Ok(self.forecast(simulated))
+    }
+
+    /// Estimate what instantiating `code_id` with `init` would cost, by simulating the
+    /// `MsgInstantiateContract` against the node without broadcasting it. See
+    /// [`Self::simulate`] and [`estimated_gas`].
+    pub async fn estimate_instantiate<Init: CwSerde>(
+        &self,
+        code_id: u64,
+        init: Init,
+        signer: &CosmosSigner,
+        funds: &[Coin],
+        label: &str,
+    ) -> Result<CwGas, CwError> {
+        let simulated = self
+            .simulate(
+                vec![instantiate_msg(code_id, &init, signer, funds, label)?],
+                signer,
+            )
+            .await?;
+        Ok(self.forecast(simulated))
+    }
+
+    /// Estimate what executing `msg` against `addr` would cost, by simulating the
+    /// `MsgExecuteContract` against the node without broadcasting it. See [`Self::simulate`]
+    /// and [`estimated_gas`].
+    pub async fn estimate_execute_contract<Exec: CwSerde>(
+        &self,
+        addr: &Addr,
+        msg: Exec,
+        signer: &CosmosSigner,
+        funds: &[Coin],
+    ) -> Result<CwGas, CwError> {
+        let simulated = self
+            .simulate(vec![execute_msg(addr, &msg, signer, funds)?], signer)
+            .await?;
+        Ok(self.forecast(simulated))
+    }
+
+    /// Estimate what a bank send of `amount` `denom` to `to` would cost, by simulating the
+    /// `MsgSend` against the node without broadcasting it. See [`Self::simulate`] and
+    /// [`estimated_gas`].
+    pub async fn estimate_transfer_funds(
+        &self,
+        to: &Addr,
+        denom: &str,
+        amount: u128,
+        signer: &CosmosSigner,
+    ) -> Result<CwGas, CwError> {
+        let simulated = self
+            .simulate(vec![transfer_msg(to, denom, amount, signer)?], signer)
+            .await?;
+        Ok(self.forecast(simulated))
+    }
+
+    /// Upload raw wasm bytecode to the chain under `gas`, signed by `signer`, and return its code
+    /// id, the broadcast transaction hash, and what the upload cost ([`CwGas`]).
     ///
     /// This is the RPC arm of [`crate::CwChain::store_code`]: a live chain takes compiled wasm
     /// bytes, while the mock's `store_code` takes a native `cw-multi-test` `Contract` object.
@@ -260,18 +395,14 @@ impl CwRpcProvider {
         &self,
         wasm: Vec<u8>,
         signer: &CosmosSigner,
+        gas: CwGasLimit,
     ) -> Result<CwStoreCode, CwError> {
-        let msg = MsgStoreCode {
-            sender: signer_account(signer)?,
-            wasm_byte_code: wasm,
-            instantiate_permission: None,
-        };
-        let any = msg
-            .to_any()
-            .map_err(|e| CwError::Execute(format!("encode store_code: {e}")))?;
-        // Storing a contract is gas-heavy (scales with wasm size); a ~260 KB contract uses ~8M.
+        let any = store_code_msg(wasm, signer)?;
+        let gas_limit = self
+            .resolve_gas_limit(gas, vec![any.clone()], signer)
+            .await?;
         let (tx_hash, events, gas) = self
-            .sign_and_broadcast(vec![any], signer, 15_000_000)
+            .sign_and_broadcast(vec![any], signer, gas_limit)
             .await?;
         let code_id = find_attr(&events, "store_code", "code_id")?
             .parse::<u64>()
@@ -283,8 +414,8 @@ impl CwRpcProvider {
         })
     }
 
-    /// Send `amount` base units of bank `denom` from `signer` to `to`, and return the broadcast
-    /// transaction hash.
+    /// Send `amount` base units of bank `denom` from `signer` to `to` under `gas`, and return the
+    /// broadcast transaction hash.
     ///
     /// Any bank denom moves verbatim (`uosmo`, `ibc/...`), not just the chain's native denom.
     pub async fn transfer_funds(
@@ -293,30 +424,21 @@ impl CwRpcProvider {
         denom: &str,
         amount: u128,
         signer: &CosmosSigner,
+        gas: CwGasLimit,
     ) -> Result<String, CwError> {
-        let msg = MsgSend {
-            from_address: signer_account(signer)?,
-            to_address: to
-                .as_str()
-                .parse()
-                .map_err(|e| CwError::Execute(format!("recipient addr: {e}")))?,
-            amount: vec![CosmrsCoin {
-                denom: denom
-                    .parse::<Denom>()
-                    .map_err(|e| CwError::Execute(format!("denom {denom}: {e}")))?,
-                amount,
-            }],
-        };
-        let any = msg
-            .to_any()
-            .map_err(|e| CwError::Execute(format!("encode transfer: {e}")))?;
-        let (tx_hash, _, _) = self.sign_and_broadcast(vec![any], signer, 200_000).await?;
+        let any = transfer_msg(to, denom, amount, signer)?;
+        let gas_limit = self
+            .resolve_gas_limit(gas, vec![any.clone()], signer)
+            .await?;
+        let (tx_hash, _, _) = self
+            .sign_and_broadcast(vec![any], signer, gas_limit)
+            .await?;
         Ok(tx_hash)
     }
 
-    /// Instantiate a contract from an uploaded code id, signed by `signer`, and return the new
-    /// instance's address, the broadcast transaction hash, and what the instantiation cost
-    /// ([`CwGas`]).
+    /// Instantiate a contract from an uploaded code id under `gas`, signed by `signer`, and
+    /// return the new instance's address, the broadcast transaction hash, and what the
+    /// instantiation cost ([`CwGas`]).
     pub async fn instantiate<Init: CwSerde>(
         &self,
         code_id: u64,
@@ -324,19 +446,15 @@ impl CwRpcProvider {
         signer: &CosmosSigner,
         funds: &[Coin],
         label: &str,
+        gas: CwGasLimit,
     ) -> Result<CwInstantiate, CwError> {
-        let msg = MsgInstantiateContract {
-            sender: signer_account(signer)?,
-            admin: None,
-            code_id,
-            label: Some(label.to_string()),
-            msg: serde_json::to_vec(&init).map_err(|e| CwError::Deploy(e.to_string()))?,
-            funds: to_cosmrs_coins(funds)?,
-        };
-        let any = msg
-            .to_any()
-            .map_err(|e| CwError::Deploy(format!("encode instantiate: {e}")))?;
-        let (tx_hash, events, gas) = self.sign_and_broadcast(vec![any], signer, 400_000).await?;
+        let any = instantiate_msg(code_id, &init, signer, funds, label)?;
+        let gas_limit = self
+            .resolve_gas_limit(gas, vec![any.clone()], signer)
+            .await?;
+        let (tx_hash, events, gas) = self
+            .sign_and_broadcast(vec![any], signer, gas_limit)
+            .await?;
         let addr = find_attr(&events, "instantiate", "_contract_address")?;
         Ok(CwInstantiate {
             address: Addr::unchecked(addr),
@@ -345,7 +463,8 @@ impl CwRpcProvider {
         })
     }
 
-    /// Execute a state-mutating message against a contract instance, signed by `signer`.
+    /// Execute a state-mutating message against a contract instance under `gas`, signed by
+    /// `signer`.
     ///
     /// The returned [`CwExecution`] carries the broadcast transaction hash (`tx_hash`), what the
     /// execution cost (`gas`, always `Some` here: the node meters it), plus a
@@ -358,20 +477,15 @@ impl CwRpcProvider {
         msg: Exec,
         signer: &CosmosSigner,
         funds: &[Coin],
+        gas: CwGasLimit,
     ) -> Result<CwExecution, CwError> {
-        let m = MsgExecuteContract {
-            sender: signer_account(signer)?,
-            contract: addr
-                .as_str()
-                .parse()
-                .map_err(|e| CwError::Execute(format!("contract addr: {e}")))?,
-            msg: serde_json::to_vec(&msg).map_err(|e| CwError::Execute(e.to_string()))?,
-            funds: to_cosmrs_coins(funds)?,
-        };
-        let any = m
-            .to_any()
-            .map_err(|e| CwError::Execute(format!("encode execute: {e}")))?;
-        let (tx_hash, events, gas) = self.sign_and_broadcast(vec![any], signer, 300_000).await?;
+        let any = execute_msg(addr, &msg, signer, funds)?;
+        let gas_limit = self
+            .resolve_gas_limit(gas, vec![any.clone()], signer)
+            .await?;
+        let (tx_hash, events, gas) = self
+            .sign_and_broadcast(vec![any], signer, gas_limit)
+            .await?;
         Ok(CwExecution {
             tx_hash,
             gas: Some(gas),
@@ -471,6 +585,169 @@ impl CwRpcProvider {
             }
         }
         Ok(states)
+    }
+}
+
+// ----- Message builders, shared by the broadcast paths and their estimate siblings. -----
+
+/// Build the `MsgStoreCode` uploading `wasm`, encoded as a protobuf `Any`.
+fn store_code_msg(wasm: Vec<u8>, signer: &CosmosSigner) -> Result<cosmrs::Any, CwError> {
+    MsgStoreCode {
+        sender: signer_account(signer)?,
+        wasm_byte_code: wasm,
+        instantiate_permission: None,
+    }
+    .to_any()
+    .map_err(|e| CwError::Execute(format!("encode store_code: {e}")))
+}
+
+/// Build the `MsgInstantiateContract` instantiating `code_id` with `init`, encoded as a
+/// protobuf `Any`.
+fn instantiate_msg<Init: CwSerde>(
+    code_id: u64,
+    init: &Init,
+    signer: &CosmosSigner,
+    funds: &[Coin],
+    label: &str,
+) -> Result<cosmrs::Any, CwError> {
+    MsgInstantiateContract {
+        sender: signer_account(signer)?,
+        admin: None,
+        code_id,
+        label: Some(label.to_string()),
+        msg: serde_json::to_vec(init).map_err(|e| CwError::Deploy(e.to_string()))?,
+        funds: to_cosmrs_coins(funds)?,
+    }
+    .to_any()
+    .map_err(|e| CwError::Deploy(format!("encode instantiate: {e}")))
+}
+
+/// Build the `MsgExecuteContract` running `msg` against `addr`, encoded as a protobuf `Any`.
+fn execute_msg<Exec: CwSerde>(
+    addr: &Addr,
+    msg: &Exec,
+    signer: &CosmosSigner,
+    funds: &[Coin],
+) -> Result<cosmrs::Any, CwError> {
+    MsgExecuteContract {
+        sender: signer_account(signer)?,
+        contract: addr
+            .as_str()
+            .parse()
+            .map_err(|e| CwError::Execute(format!("contract addr: {e}")))?,
+        msg: serde_json::to_vec(msg).map_err(|e| CwError::Execute(e.to_string()))?,
+        funds: to_cosmrs_coins(funds)?,
+    }
+    .to_any()
+    .map_err(|e| CwError::Execute(format!("encode execute: {e}")))
+}
+
+/// Build the bank `MsgSend` moving `amount` `denom` to `to`, encoded as a protobuf `Any`.
+fn transfer_msg(
+    to: &Addr,
+    denom: &str,
+    amount: u128,
+    signer: &CosmosSigner,
+) -> Result<cosmrs::Any, CwError> {
+    MsgSend {
+        from_address: signer_account(signer)?,
+        to_address: to
+            .as_str()
+            .parse()
+            .map_err(|e| CwError::Execute(format!("recipient addr: {e}")))?,
+        amount: vec![CosmrsCoin {
+            denom: denom
+                .parse::<Denom>()
+                .map_err(|e| CwError::Execute(format!("denom {denom}: {e}")))?,
+            amount,
+        }],
+    }
+    .to_any()
+    .map_err(|e| CwError::Execute(format!("encode transfer: {e}")))
+}
+
+/// Encode the transaction the Simulate endpoint expects: fully assembled, dummy-signed.
+///
+/// Two deliberate oddities here, both simulation-specific and NOT bugs:
+///
+/// - The signature is a single empty byte string. Simulate runs the tx through the same ante
+///   chain as delivery but in simulate mode, where `SigVerificationDecorator` requires one
+///   signature slot per signer yet skips verifying its contents. Sending an empty signature is
+///   the established convention (cosmjs and the SDK's own tx factory do the same); a real
+///   signature would also pass, it would just spend a signing pass to prove nothing.
+/// - The fee is zero coins with a zero gas limit. Simulation runs on an infinite gas meter and
+///   skips fee deduction, so no declared fee is needed and none skews the report.
+///
+/// The signer's *real* public key and sequence still go in: the ante handlers meter signature
+/// verification by the declared key type, so omitting the key would understate the figure.
+fn simulate_tx_bytes(
+    msgs: Vec<cosmrs::Any>,
+    public_key: cosmrs::crypto::PublicKey,
+    sequence: u64,
+) -> Result<Vec<u8>, CwError> {
+    let body = Body::new(msgs, "", 0u16);
+    let fee = Fee {
+        amount: Vec::new(),
+        gas_limit: 0,
+        payer: None,
+        granter: None,
+    };
+    let auth_info = SignerInfo::single_direct(Some(public_key), sequence).auth_info(fee);
+    let raw = TxRaw {
+        body_bytes: body
+            .into_bytes()
+            .map_err(|e| CwError::Execute(format!("encode tx body: {e}")))?,
+        auth_info_bytes: auth_info
+            .into_bytes()
+            .map_err(|e| CwError::Execute(format!("encode auth info: {e}")))?,
+        signatures: vec![Vec::new()],
+    };
+    Ok(raw.encode_to_vec())
+}
+
+/// Pull the simulated gas figure out of a raw Simulate response.
+///
+/// `gas_info` is optional in the proto but a successful simulation always carries it, so its
+/// absence is a malformed response, not a zero.
+fn parse_simulate_gas(bytes: &[u8]) -> Result<u64, CwError> {
+    let resp = SimulateResponse::decode(bytes)
+        .map_err(|e| CwError::Rpc(format!("decode SimulateResponse: {e}")))?;
+    resp.gas_info
+        .map(|g| g.gas_used)
+        .ok_or_else(|| CwError::Rpc("simulate response carried no gas_info".into()))
+}
+
+/// Scale a simulated gas figure into the limit a transaction declares: `ceil(simulated * adj)`.
+///
+/// `adjustment` is the chain's [`CosmosChainInfo::gas_adjustment`], validated `>= 1.0` where it is
+/// configured, so this only ever rounds a limit up. The float cast saturates at [`u64::MAX`]
+/// rather than wrapping.
+fn adjust_gas(simulated: u64, adjustment: f64) -> u64 {
+    (simulated as f64 * adjustment).ceil() as u64
+}
+
+/// The fee a transaction declares for `gas_limit`: `ceil(gas_limit * gas_price)`, in base units of
+/// the chain's native denom.
+///
+/// A pure function of the *resolved* limit, whichever way that limit was arrived at. An
+/// `Estimated` limit already carries the chain's `gas_adjustment` ([`adjust_gas`]); multiplying
+/// here again would apply it twice and silently overpay by that factor. The SDK deducts the
+/// declared fee in full and refunds no unspent gas, so an overpayment is real money, not headroom.
+fn fee_for(gas_limit: u64, gas_price: f64) -> u128 {
+    (gas_limit as f64 * gas_price).ceil() as u128
+}
+
+/// The [`CwGas`] an estimate reports, shaped exactly like a receipt so the two compare directly.
+///
+/// `used` is the node's raw simulated figure, the forecast of the `gas_used` a receipt reports.
+/// `fee` is what a broadcast under [`CwGasLimit::Estimated`] would actually declare and pay:
+/// the fee for the *adjusted* limit ([`fee_for`] of [`adjust_gas`]), not for the raw figure,
+/// because the SDK deducts the declared fee in full and the declared limit carries the
+/// adjustment. A fee computed from the raw figure would systematically undershoot every receipt.
+fn estimated_gas(simulated: u64, adjustment: f64, gas_price: f64) -> CwGas {
+    CwGas {
+        used: simulated,
+        fee: fee_for(adjust_gas(simulated, adjustment), gas_price),
     }
 }
 
@@ -579,5 +856,140 @@ impl ChainProvider for CwRpcProvider {
 
     async fn advance_blocks(&mut self, _n: u64, _time: BlockTime) {
         // No-op: a real chain advances on its own; tests poll instead of forcing blocks.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosmrs::proto::cosmos::base::abci::v1beta1::GasInfo;
+    use cosmrs::proto::cosmos::tx::v1beta1::{AuthInfo as ProtoAuthInfo, TxBody};
+
+    #[test]
+    fn parse_simulate_gas_reads_gas_used() {
+        let resp = SimulateResponse {
+            gas_info: Some(GasInfo {
+                gas_wanted: 0,
+                gas_used: 173_456,
+            }),
+            result: None,
+        };
+        assert_eq!(parse_simulate_gas(&resp.encode_to_vec()).unwrap(), 173_456);
+    }
+
+    #[test]
+    fn parse_simulate_gas_rejects_a_response_without_gas_info() {
+        let resp = SimulateResponse {
+            gas_info: None,
+            result: None,
+        };
+        let err = parse_simulate_gas(&resp.encode_to_vec()).unwrap_err();
+        assert!(matches!(err, CwError::Rpc(_)), "unexpected error: {err:?}");
+    }
+
+    #[test]
+    fn parse_simulate_gas_rejects_garbage_bytes() {
+        // 0xFF opens a field with the invalid tag 0.
+        assert!(parse_simulate_gas(&[0xFF, 0xFF, 0xFF]).is_err());
+    }
+
+    #[test]
+    fn adjust_gas_scales_the_simulated_figure_and_rounds_up() {
+        assert_eq!(adjust_gas(100_000, 1.3), 130_000);
+        // Never rounds a limit down: 3 * 1.3 = 3.9 gas is 4 gas of headroom, not 3.
+        assert_eq!(adjust_gas(3, 1.3), 4);
+        // An adjustment of exactly 1.0 (the configured floor) is the raw simulated figure.
+        assert_eq!(adjust_gas(173_456, 1.0), 173_456);
+    }
+
+    /// The `gas_adjustment` scales the gas *limit* and nothing else. The fee is a pure function of
+    /// the resolved limit, so it inherits the adjustment exactly once, through the limit. Applying
+    /// it a second time to the fee (the shape of the deleted `FEE_BUFFER`) would overpay by the
+    /// adjustment factor on every transaction, and the SDK refunds none of it.
+    #[test]
+    fn the_gas_adjustment_reaches_the_fee_exactly_once() {
+        const GAS_PRICE: f64 = 0.025;
+        const ADJUSTMENT: f64 = 1.3;
+
+        let limit = adjust_gas(100_000, ADJUSTMENT);
+        assert_eq!(limit, 130_000);
+        assert_eq!(fee_for(limit, GAS_PRICE), 3_250);
+
+        // What double-applying would produce, spelled out so the two cannot be confused.
+        let double_applied = (limit as f64 * GAS_PRICE * ADJUSTMENT).ceil() as u128;
+        assert_eq!(double_applied, 4_225);
+        assert_ne!(fee_for(limit, GAS_PRICE), double_applied);
+
+        // And an `Exact` limit of the same size costs the same: the fee cannot tell where the
+        // limit came from.
+        assert_eq!(fee_for(130_000, GAS_PRICE), fee_for(limit, GAS_PRICE));
+    }
+
+    /// An estimate is a receipt-shaped forecast: `used` is the raw simulated figure (what the
+    /// receipt's `used` forecasts), while `fee` prices the *adjusted* limit, because that is
+    /// what a broadcast under `Estimated` declares and the SDK deducts in full. Pricing the raw
+    /// figure instead would undershoot every receipt by the adjustment factor.
+    #[test]
+    fn an_estimate_reports_raw_gas_but_prices_the_adjusted_limit() {
+        let est = estimated_gas(100_000, 1.3, 0.025);
+        assert_eq!(est.used, 100_000, "used is the node's raw simulated figure");
+        // fee_for(adjust_gas(100_000, 1.3)) = fee_for(130_000) = 3_250, not fee_for(100_000).
+        assert_eq!(est.fee, 3_250);
+        assert_ne!(est.fee, fee_for(100_000, 0.025));
+
+        // Exactly what a broadcast under `Estimated` would declare and pay for this simulation.
+        assert_eq!(est.fee, fee_for(adjust_gas(100_000, 1.3), 0.025));
+    }
+
+    #[test]
+    fn fee_rounds_up_so_a_sub_unit_fee_is_never_free() {
+        // 1 gas at 0.025 is 0.025 base units, which the chain cannot express: pay 1, not 0.
+        assert_eq!(fee_for(1, 0.025), 1);
+        // A chain with a zero gas price (the LOCAL preset) declares a zero fee.
+        assert_eq!(fee_for(300_000, 0.0), 0);
+    }
+
+    /// The simulate tx must decode back to exactly what the Simulate endpoint requires: the
+    /// real message, the real public key and sequence, a zero fee, and one signature slot per
+    /// signer holding an *empty* signature (present because the ante chain demands a slot,
+    /// empty because simulate mode never verifies it).
+    #[test]
+    fn simulate_tx_carries_a_dummy_signature_and_zero_fee() {
+        let key = cosmrs::crypto::secp256k1::SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let account = AccountId::new("osmo", &[7u8; 20]).unwrap();
+        let msg = MsgSend {
+            from_address: account.clone(),
+            to_address: account,
+            amount: vec![CosmrsCoin {
+                denom: "uosmo".parse().unwrap(),
+                amount: 1,
+            }],
+        }
+        .to_any()
+        .unwrap();
+
+        let bytes = simulate_tx_bytes(vec![msg], key.public_key(), 42).unwrap();
+
+        let raw = TxRaw::decode(bytes.as_slice()).unwrap();
+        assert_eq!(
+            raw.signatures,
+            vec![Vec::<u8>::new()],
+            "exactly one signature slot, empty"
+        );
+
+        let auth = ProtoAuthInfo::decode(raw.auth_info_bytes.as_slice()).unwrap();
+        let fee = auth.fee.expect("fee present");
+        assert_eq!(fee.gas_limit, 0, "simulation declares no gas limit");
+        assert!(fee.amount.is_empty(), "simulation declares no fee");
+        assert_eq!(auth.signer_infos.len(), 1);
+        assert_eq!(auth.signer_infos[0].sequence, 42);
+        assert!(
+            auth.signer_infos[0].public_key.is_some(),
+            "the real key must be declared: ante handlers meter sig verification by key type"
+        );
+
+        let body = TxBody::decode(raw.body_bytes.as_slice()).unwrap();
+        assert_eq!(body.messages.len(), 1);
+        assert_eq!(body.messages[0].type_url, "/cosmos.bank.v1beta1.MsgSend");
     }
 }

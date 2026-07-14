@@ -70,7 +70,7 @@ async fn three_chains_in_one_env() {
     let ix = transfer(&sol_alice, &sol_bob, amount);
     env.solana("sol")
         .unwrap()
-        .send_transaction(vec![ix], TEST_WALLETS.alice)
+        .send_transaction(vec![ix], TEST_WALLETS.alice, SvmComputeBudget::Estimated)
         .await
         .expect("solana transfer");
     assert_eq!(

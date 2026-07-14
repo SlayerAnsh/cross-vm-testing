@@ -739,6 +739,95 @@ world = "inherit"
     assert!(message.contains('a') && message.contains('b') && message.contains('c'));
 }
 
+// --- `gas_adjustment`: declared on any kind, validated to be finite and >= 1.0 ---
+
+/// One `[[chain]]` of the given `kind` (with the CosmWasm-required fields always present, so the
+/// same body is reusable across kinds), carrying `body` as extra declaration lines.
+fn chain_of_kind(kind: &str, body: &str) -> String {
+    format!(
+        r#"
+[harness]
+name = "h"
+
+[[chain]]
+label = "c"
+kind = "{kind}"
+chain_id = "1"
+bech32_prefix = "osmo"
+native_denom = "uosmo"
+{body}
+
+[profile.p]
+mode = "fuzz"
+cases = 1
+ops = 1
+"#
+    )
+}
+
+#[test]
+fn gas_adjustment_parses_on_every_kind() {
+    // Unlike `gas_price`, `gas_adjustment` is not CosmWasm-only: every VM derives a limit from an
+    // estimate, so every kind accepts the field.
+    for kind in ["cosmwasm", "evm", "svm", "tron"] {
+        let toml = chain_of_kind(kind, "gas_adjustment = 1.6");
+        let cfg = cross_vm_config::from_toml_str(&toml, &no_vars)
+            .unwrap_or_else(|e| panic!("kind `{kind}` should accept gas_adjustment: {e}"));
+        assert_eq!(cfg.ext.chain[0].gas_adjustment, Some(1.6));
+    }
+}
+
+#[test]
+fn gas_adjustment_omitted_stays_none_for_the_framework_to_default() {
+    let cfg = cross_vm_config::from_toml_str(&chain_of_kind("evm", ""), &no_vars).unwrap();
+    assert_eq!(cfg.ext.chain[0].gas_adjustment, None);
+}
+
+#[test]
+fn gas_adjustment_of_exactly_one_is_allowed() {
+    // 1.0 means "take the estimate as-is, with no headroom". That is a coherent request (EVM's
+    // `eth_estimateGas` actually executes the call), so the bound is inclusive.
+    let cfg =
+        cross_vm_config::from_toml_str(&chain_of_kind("evm", "gas_adjustment = 1.0"), &no_vars)
+            .expect("1.0 is a legal adjustment");
+    assert_eq!(cfg.ext.chain[0].gas_adjustment, Some(1.0));
+}
+
+#[test]
+fn gas_adjustment_below_one_is_a_config_error() {
+    // Below 1.0 the limit lands under the estimate: not a trade-off, a guaranteed out-of-gas.
+    let err =
+        cross_vm_config::from_toml_str(&chain_of_kind("evm", "gas_adjustment = 0.5"), &no_vars)
+            .unwrap_err();
+    assert!(matches!(err, ConfigError::Domain(_)), "unexpected: {err}");
+    let message = err.to_string();
+    assert!(message.contains("gas_adjustment"), "unexpected: {message}");
+    assert!(
+        message.contains("0.5"),
+        "message should echo the value: {message}"
+    );
+}
+
+#[test]
+fn gas_adjustment_non_finite_is_a_config_error() {
+    // `NaN` compares false against every bound and `inf` saturates the limit; neither is coherent,
+    // and TOML can spell both, so both must be rejected explicitly rather than by the `< 1.0` test.
+    for value in ["nan", "inf", "-inf"] {
+        let toml = chain_of_kind("evm", &format!("gas_adjustment = {value}"));
+        let Err(err) = cross_vm_config::from_toml_str(&toml, &no_vars) else {
+            panic!("`gas_adjustment = {value}` must be rejected");
+        };
+        assert!(
+            matches!(err, ConfigError::Domain(_)),
+            "`{value}`: unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("gas_adjustment"),
+            "`{value}`: unexpected error: {err}"
+        );
+    }
+}
+
 #[test]
 fn linear_inherit_chain_stays_valid() {
     // a -> b -> c, each phase inheriting from exactly one distinct donor, is legal.

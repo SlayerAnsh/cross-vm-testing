@@ -14,6 +14,12 @@ pub struct EvmChainInfo {
     pub spec_id: SpecId,
     /// Native token symbol, e.g. `"ETH"`.
     pub native_symbol: &'static str,
+    /// Multiplier applied to an estimate to get the gas limit an
+    /// [`EvmGasLimit::Estimated`](crate::EvmGasLimit::Estimated) op is submitted with. At least
+    /// 1.0 (the config loader validates this); 1.3 by default, which covers the largest EIP-3529
+    /// refund an estimate can hide (capped at a fifth of the gas burned, so a limit of 1.25x the
+    /// billed figure always suffices).
+    pub gas_adjustment: f64,
     /// Default public RPC endpoint, if known.
     pub rpc_url: Option<&'static str>,
 }
@@ -22,6 +28,13 @@ impl EvmChainInfo {
     /// Numeric chain id used to configure the VM.
     pub fn numeric_id(&self) -> u64 {
         self.chain_id.parse().unwrap_or(1)
+    }
+
+    /// The limit to submit for an op that estimates at `estimated` gas: the estimate scaled by
+    /// [`gas_adjustment`](Self::gas_adjustment), rounded up so the adjustment can never round a
+    /// limit *below* the estimate it came from.
+    pub fn adjusted_gas_limit(&self, estimated: u64) -> u64 {
+        (estimated as f64 * self.gas_adjustment).ceil() as u64
     }
 }
 

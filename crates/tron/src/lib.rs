@@ -26,6 +26,6 @@ pub use chain::TronChain;
 pub use chains::TronChainInfo;
 pub use error::TronError;
 pub use provider::{
-    address_from_pubkey, TronAddress, TronCompute, TronDeploy, TronExecution, TronMockProvider,
-    TronResources, TronRpcProvider, DEFAULT_FUNDING_SUN,
+    address_from_pubkey, TronAddress, TronCompute, TronDeploy, TronEnergyPolicy, TronExecution,
+    TronLimit, TronMockProvider, TronResources, TronRpcProvider, DEFAULT_FUNDING_SUN,
 };

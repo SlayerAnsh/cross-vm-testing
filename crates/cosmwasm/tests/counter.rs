@@ -9,7 +9,7 @@ use cosmwasm_std::Empty;
 use counter::{CountResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
 use cross_vm_core::{ChainProvider, WalletFactory};
 use cross_vm_cosmwasm::chains::OSMOSIS;
-use cross_vm_cosmwasm::CwMockProvider;
+use cross_vm_cosmwasm::{CwGasLimit, CwMockProvider};
 use cw_multi_test::{Contract, ContractWrapper};
 
 fn counter_contract() -> Box<dyn Contract<Empty, Empty>> {
@@ -30,11 +30,18 @@ async fn deploy_increment_query() {
     let deployer = chain.new_account("deployer").await;
 
     let code_id = chain
-        .store_code(&deployer, counter_contract())
+        .store_code(&deployer, counter_contract(), CwGasLimit::Estimated)
         .await
         .code_id;
     let contract = chain
-        .instantiate(code_id, InstantiateMsg {}, &deployer, &[], "counter")
+        .instantiate(
+            code_id,
+            InstantiateMsg {},
+            &deployer,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
         .await
         .expect("instantiate")
         .address;
@@ -46,11 +53,25 @@ async fn deploy_increment_query() {
     assert_eq!(res.count, 0);
 
     let exec1 = chain
-        .execute_contract(&contract, ExecuteMsg::Increment {}, &deployer, &[])
+        .execute_contract(
+            &contract,
+            ExecuteMsg::Increment {},
+            &deployer,
+            &[],
+            CwGasLimit::Estimated,
+        )
         .await
         .expect("execute 1");
+    // A limit far below what a real chain would charge for this execute. The mock has no gas
+    // meter, so it cannot run out of gas: the second increment lands exactly like the first.
     let exec2 = chain
-        .execute_contract(&contract, ExecuteMsg::Increment {}, &deployer, &[])
+        .execute_contract(
+            &contract,
+            ExecuteMsg::Increment {},
+            &deployer,
+            &[],
+            CwGasLimit::Exact(1),
+        )
         .await
         .expect("execute 2");
     // The mock mints a synthetic, deterministic tx hash (uppercase sha256 hex, Tendermint shape),
@@ -69,7 +90,13 @@ async fn deploy_increment_query() {
     assert_eq!(res.count, 2);
 
     chain
-        .execute_contract(&contract, ExecuteMsg::Reset {}, &deployer, &[])
+        .execute_contract(
+            &contract,
+            ExecuteMsg::Reset {},
+            &deployer,
+            &[],
+            CwGasLimit::Estimated,
+        )
         .await
         .expect("reset");
 

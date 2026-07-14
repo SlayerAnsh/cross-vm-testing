@@ -21,7 +21,10 @@ use crate::asset::TronAsset;
 use crate::chains::TronChainInfo;
 use crate::error::TronError;
 use crate::provider::address::TronAddress;
-use crate::provider::{TronDeploy, TronExecution, TronMockProvider, TronRpcProvider};
+use crate::provider::{
+    TronDeploy, TronEnergyPolicy, TronExecution, TronLimit, TronMockProvider, TronResources,
+    TronRpcProvider,
+};
 
 /// `balanceOf(address)` selector (TRC20 is ERC20-shaped, same selector).
 const BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
@@ -109,31 +112,97 @@ impl TronChain {
 
     /// Deploy bytecode via a create transaction signed by wallet `wallet`, returning the contract's
     /// address and the transaction hash.
+    ///
+    /// `limit` caps what the create transaction itself may spend (see [`TronLimit`]).
+    /// `energy_policy` caps nothing about it: it is the pair of `DeployContract` fields that
+    /// persist on the deployed contract and bill every future call to it (see
+    /// [`TronEnergyPolicy`]), which is why the two are separate arguments and not one struct.
     pub async fn deploy_create(
         &self,
         bytecode: Bytes,
         constructor_args: impl AsRef<[u8]>,
         wallet: WalletLabel<'_>,
+        limit: TronLimit,
+        energy_policy: TronEnergyPolicy,
     ) -> Result<TronDeploy, TronError> {
         let signer = self.acquire(wallet).await?;
         let addr = self.signer_address(&signer);
         match self {
-            TronChain::Mock(p) => p.deploy_create(bytecode, constructor_args, &addr).await,
+            TronChain::Mock(p) => {
+                p.deploy_create(bytecode, constructor_args, &addr, limit, energy_policy)
+                    .await
+            }
             TronChain::Rpc(p) => {
                 let _g = Self::broadcast_guard(p, &addr).await;
-                p.deploy_create(bytecode, constructor_args, &signer).await
+                p.deploy_create(bytecode, constructor_args, &signer, limit, energy_policy)
+                    .await
             }
         }
     }
 
-    /// Execute a state-mutating call against `to`, signed by wallet `wallet`.
+    /// Forecast what a [`deploy_create`](Self::deploy_create) of this bytecode would consume, in
+    /// the unit the backend can actually measure: EVM gas on the `revm`-backed mock, the node's
+    /// energy on a live chain (see [`TronCompute`](crate::TronCompute)).
+    ///
+    /// Nothing is signed or broadcast, so no backend needs the wallet's signer and the RPC arm
+    /// takes no broadcast lock. A deploy that cannot succeed is an error, not a resource figure.
+    pub async fn estimate_deploy_create(
+        &self,
+        bytecode: Bytes,
+        constructor_args: impl AsRef<[u8]>,
+        wallet: WalletLabel<'_>,
+    ) -> Result<TronResources, TronError> {
+        let addr = self.wallet_address(wallet).await?;
+        match self {
+            TronChain::Mock(p) => {
+                p.estimate_deploy_create(bytecode, constructor_args, &addr)
+                    .await
+            }
+            TronChain::Rpc(p) => {
+                p.estimate_deploy_create(bytecode, constructor_args, &addr)
+                    .await
+            }
+        }
+    }
+
+    /// Forecast what a [`call`](Self::call) with these arguments would consume, without running it.
+    pub async fn estimate_call(
+        &self,
+        to: &TronAddress,
+        calldata: impl AsRef<[u8]>,
+        wallet: WalletLabel<'_>,
+    ) -> Result<TronResources, TronError> {
+        self.estimate_call_value(to, calldata, wallet, U256::ZERO)
+            .await
+    }
+
+    /// Forecast what a [`call_value`](Self::call_value) with these arguments would consume, without
+    /// running it.
+    pub async fn estimate_call_value(
+        &self,
+        to: &TronAddress,
+        calldata: impl AsRef<[u8]>,
+        wallet: WalletLabel<'_>,
+        value: U256,
+    ) -> Result<TronResources, TronError> {
+        let addr = self.wallet_address(wallet).await?;
+        match self {
+            TronChain::Mock(p) => p.estimate_call_value(to, calldata, &addr, value).await,
+            TronChain::Rpc(p) => p.estimate_call_value(to, calldata, &addr, value).await,
+        }
+    }
+
+    /// Execute a state-mutating call against `to`, signed by wallet `wallet`, under the ceiling
+    /// `limit` states (see [`TronLimit`]).
     pub async fn call(
         &self,
         to: &TronAddress,
         calldata: impl AsRef<[u8]>,
         wallet: WalletLabel<'_>,
+        limit: TronLimit,
     ) -> Result<TronExecution, TronError> {
-        self.call_value(to, calldata, wallet, U256::ZERO).await
+        self.call_value(to, calldata, wallet, U256::ZERO, limit)
+            .await
     }
 
     /// Execute a state-mutating call against `to` carrying `value` sun (a payable call), signed by
@@ -144,14 +213,15 @@ impl TronChain {
         calldata: impl AsRef<[u8]>,
         wallet: WalletLabel<'_>,
         value: U256,
+        limit: TronLimit,
     ) -> Result<TronExecution, TronError> {
         let signer = self.acquire(wallet).await?;
         let addr = self.signer_address(&signer);
         match self {
-            TronChain::Mock(p) => p.call_value(to, calldata, &addr, value).await,
+            TronChain::Mock(p) => p.call_value(to, calldata, &addr, value, limit).await,
             TronChain::Rpc(p) => {
                 let _g = Self::broadcast_guard(p, &addr).await;
-                p.call_value(to, calldata, &signer, value).await
+                p.call_value(to, calldata, &signer, value, limit).await
             }
         }
     }
@@ -161,7 +231,12 @@ impl TronChain {
     ///
     /// `denom` must name this chain's native token (`TRX`, case-insensitively), matching
     /// [`ChainProvider::set_balance`]; a TRC20 transfer goes through the token contract's
-    /// [`call`](Self::call). A sender that cannot cover `amount` is an error on both backends.
+    /// [`call`](Self::call), which does take a limit. A sender that cannot cover `amount` is an
+    /// error on both backends.
+    ///
+    /// It takes no [`TronLimit`], alone among the mutating operations, because java-tron's
+    /// `TransferContract` has no `fee_limit` field: a native transfer runs no code, burns no
+    /// energy, and is billed only in bandwidth, which the sender cannot cap.
     pub async fn transfer_funds(
         &self,
         to: &TronAddress,
@@ -355,6 +430,16 @@ mod tests {
         };
     }
 
+    /// A budget generous enough for every transaction below, so a test that is not about the limit
+    /// does not accidentally become one.
+    const AMPLE: TronLimit = TronLimit::Gas(30_000_000);
+
+    /// The caller pays all of a call's energy, so the contract owner's ceiling never binds.
+    const CALLER_PAYS: TronEnergyPolicy = TronEnergyPolicy {
+        consume_user_resource_percent: 100,
+        origin_energy_limit: 0,
+    };
+
     /// A mock chain carrying the test roster (its `auto` wallets start unfunded).
     fn chain_with_wallets() -> TronChain {
         TronChain::from(LOCAL.mock(Rc::new(
@@ -403,7 +488,7 @@ mod tests {
         let chain = chain_with_wallets();
 
         let deploy = chain
-            .deploy_create(initcode, [], TEST_WALLETS.alice)
+            .deploy_create(initcode, [], TEST_WALLETS.alice, AMPLE, CALLER_PAYS)
             .await
             .expect("empty-runtime deploy succeeds");
         assert!(deploy.address.to_base58().starts_with('T'));
@@ -413,7 +498,7 @@ mod tests {
         assert!(deploy.tx_hash.chars().all(|c| c.is_ascii_hexdigit()));
 
         let exec = chain
-            .call(&deploy.address, [], TEST_WALLETS.alice)
+            .call(&deploy.address, [], TEST_WALLETS.alice, AMPLE)
             .await
             .expect("value-less call succeeds");
         assert_eq!(exec.tx_hash.len(), 64);
@@ -421,6 +506,42 @@ mod tests {
             exec.tx_hash, deploy.tx_hash,
             "the deploy and the call are distinct transactions"
         );
+    }
+
+    #[tokio::test]
+    async fn estimates_plumb_through_chain_and_match_the_op_on_mock() {
+        // PUSH1 0x00, PUSH1 0x00, RETURN: deploys a zero-length runtime.
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+        let chain = chain_with_wallets();
+
+        let estimated = chain
+            .estimate_deploy_create(initcode.clone(), [], TEST_WALLETS.alice)
+            .await
+            .expect("deploy estimates");
+        // The mock is revm: it forecasts EVM gas, and calling that energy would be a lie.
+        assert!(
+            matches!(estimated.compute, crate::TronCompute::Gas(g) if g > 0),
+            "expected revm gas, got {:?}",
+            estimated.compute
+        );
+
+        let deploy = chain
+            .deploy_create(initcode, [], TEST_WALLETS.alice, AMPLE, CALLER_PAYS)
+            .await
+            .expect("empty-runtime deploy succeeds");
+        // A forecast and a receipt are the same type, so they compare directly: the estimate
+        // committed nothing, so the deploy it forecast ran against the state it measured.
+        assert_eq!(estimated, deploy.resources);
+
+        let estimated = chain
+            .estimate_call(&deploy.address, [], TEST_WALLETS.alice)
+            .await
+            .expect("call estimates");
+        let exec = chain
+            .call(&deploy.address, [], TEST_WALLETS.alice, AMPLE)
+            .await
+            .expect("call succeeds");
+        assert_eq!(estimated, exec.resources);
     }
 
     #[tokio::test]

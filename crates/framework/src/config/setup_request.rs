@@ -29,9 +29,10 @@ impl From<cross_vm_config::TargetStr> for Target {
 /// input to [`crate::config::build_chain::build_chain`].
 ///
 /// Per-kind fields (`bech32_prefix`, `native_denom`, `gas_price`, `spec_id`, `ws_url`,
-/// `commitment`) are `Some` only when they apply to `kind`; the rest are `None`. See the module
-/// docs on [`build_chain`](crate::config::build_chain) for exactly where each field's default is
-/// applied (some in `resolve`, some in `build_chain`).
+/// `commitment`) are `Some` only when they apply to `kind`; the rest are `None`. `gas_adjustment`
+/// is deliberately not among them: it applies to every kind, so it is a plain resolved `f64`. See
+/// the module docs on [`build_chain`](crate::config::build_chain) for exactly where each field's
+/// default is applied (some in `resolve`, some in `build_chain`).
 #[derive(Debug, Clone)]
 pub struct ChainSpecData {
     /// Injection key into `MultiChainEnv`, and the value used in op fields (e.g. `chain = "eth"`).
@@ -50,6 +51,12 @@ pub struct ChainSpecData {
     /// This chain's resolved mock-vs-rpc target (the output of
     /// [`cross_vm_config::resolve_chain_target`], not a raw declaration field).
     pub target: Target,
+    /// Every kind: the multiplier an op applies to a gas/compute estimate to get the limit it
+    /// submits. Already resolved (the `1.3` default is applied by `resolve_chains`, so this is
+    /// never `Option`), and already validated by the config crate to be finite and `>= 1.0`.
+    /// Unlike `gas_price`, this is not CosmWasm-specific: it is the value every VM's build arm
+    /// hands to that VM's chain info, whatever unit that VM's limit is denominated in.
+    pub gas_adjustment: f64,
     /// Free form metadata table, passed through to the setup fn verbatim.
     pub params: toml::Table,
     /// CosmWasm only: address prefix (e.g. `"osmo"`).
