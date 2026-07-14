@@ -21,7 +21,8 @@ use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
 use crate::provider::{
-    CwCodeSource, CwExecution, CwInstantiate, CwMockProvider, CwRpcProvider, CwStoreCode,
+    CwCodeSource, CwExecution, CwGasLimit, CwInstantiate, CwMockProvider, CwRpcProvider,
+    CwStoreCode,
 };
 use crate::wallet::CosmosSigner;
 
@@ -142,10 +143,16 @@ impl CwChain {
     /// The mock records the wallet's address as the code creator and mints a synthetic tx hash;
     /// the RPC path signs and broadcasts a `MsgStoreCode` under the process-wide broadcast lock
     /// and reports the real one.
+    ///
+    /// `gas` is required, as on every mutating op. [`CwGasLimit::Estimated`] resolves inside the
+    /// RPC path, which already holds the broadcast lock: it simulates through the *provider*'s
+    /// unlocked estimator, not through [`Self::estimate_store_code`], which would re-enter this
+    /// account's lock and deadlock. It is inert on the mock, which cannot run out of gas.
     pub async fn store_code(
         &self,
         code: impl Into<CwCodeSource>,
         wallet: WalletLabel<'_>,
+        gas: CwGasLimit,
     ) -> Result<CwStoreCode, CwError> {
         let signer = self.acquire(wallet).await?;
         match self {
@@ -157,7 +164,7 @@ impl CwChain {
                             .into(),
                     )
                 })?;
-                Ok(p.store_code(&signer.address, native).await)
+                Ok(p.store_code(&signer.address, native, gas).await)
             }
             CwChain::Rpc(p) => {
                 let wasm = code.into().wasm.ok_or_else(|| {
@@ -168,7 +175,7 @@ impl CwChain {
                     )
                 })?;
                 let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
-                p.store_code(wasm, &signer).await
+                p.store_code(wasm, &signer, gas).await
             }
         }
     }
@@ -182,25 +189,33 @@ impl CwChain {
     /// The mock performs a real bank send inside its in-process `App` and returns a synthetic,
     /// deterministic hash in the same textual shape a live node uses; the RPC path signs and
     /// broadcasts a `MsgSend` under the process-wide broadcast lock.
+    ///
+    /// `gas` is required and behaves as on [`Self::store_code`].
     pub async fn transfer_funds(
         &self,
         to: &Addr,
         denom: &str,
         amount: u128,
         wallet: WalletLabel<'_>,
+        gas: CwGasLimit,
     ) -> Result<String, CwError> {
         let signer = self.acquire(wallet).await?;
         match self {
-            CwChain::Mock(p) => p.transfer_funds(to, denom, amount, &signer.address).await,
+            CwChain::Mock(p) => {
+                p.transfer_funds(to, denom, amount, &signer.address, gas)
+                    .await
+            }
             CwChain::Rpc(p) => {
                 let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
-                p.transfer_funds(to, denom, amount, &signer).await
+                p.transfer_funds(to, denom, amount, &signer, gas).await
             }
         }
     }
 
-    /// Instantiate a contract from an uploaded code id, signed by wallet `wallet`, and return the
-    /// new instance's address plus the transaction hash.
+    /// Instantiate a contract from an uploaded code id under `gas`, signed by wallet `wallet`, and
+    /// return the new instance's address plus the transaction hash.
+    ///
+    /// `gas` is required and behaves as on [`Self::store_code`].
     pub async fn instantiate<Init: CwSerde>(
         &self,
         code_id: u64,
@@ -208,37 +223,155 @@ impl CwChain {
         wallet: WalletLabel<'_>,
         funds: &[Coin],
         label: &str,
+        gas: CwGasLimit,
     ) -> Result<CwInstantiate, CwError> {
         let signer = self.acquire(wallet).await?;
         match self {
             CwChain::Mock(p) => {
-                p.instantiate(code_id, init, &signer.address, funds, label)
+                p.instantiate(code_id, init, &signer.address, funds, label, gas)
                     .await
             }
             CwChain::Rpc(p) => {
                 let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
-                p.instantiate(code_id, init, &signer, funds, label).await
+                p.instantiate(code_id, init, &signer, funds, label, gas)
+                    .await
             }
         }
     }
 
-    /// Execute a state-mutating message against a contract instance, signed by wallet `wallet`.
+    /// Execute a state-mutating message against a contract instance under `gas`, signed by wallet
+    /// `wallet`.
     ///
     /// The returned [`CwExecution`] carries the transaction hash (the broadcast one on the live
     /// RPC backend, a synthetic one on the in-process mock) alongside the raw execution response.
+    ///
+    /// `gas` is required and behaves as on [`Self::store_code`].
     pub async fn execute_contract<Exec: CwSerde>(
         &self,
         addr: &Addr,
         msg: Exec,
         wallet: WalletLabel<'_>,
         funds: &[Coin],
+        gas: CwGasLimit,
     ) -> Result<CwExecution, CwError> {
         let signer = self.acquire(wallet).await?;
         match self {
-            CwChain::Mock(p) => p.execute_contract(addr, msg, &signer.address, funds).await,
+            CwChain::Mock(p) => {
+                p.execute_contract(addr, msg, &signer.address, funds, gas)
+                    .await
+            }
             CwChain::Rpc(p) => {
                 let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
-                p.execute_contract(addr, msg, &signer, funds).await
+                p.execute_contract(addr, msg, &signer, funds, gas).await
+            }
+        }
+    }
+
+    // ----- Estimation: gas forecasts without broadcasting. -----
+    //
+    // Every `estimate_*` mirrors its mutating sibling's shape. The RPC backend simulates the
+    // exact message it would broadcast (`/cosmos.tx.v1beta1.Service/Simulate`) and reports the
+    // node's raw `gas_used`; the mock reports `None` because `cw-multi-test` has no gas meter,
+    // so there is nothing to simulate against and no honest figure to fabricate (the same rule
+    // as the `gas` field on the op results; see `NO_GAS_METER` on the mock provider).
+    //
+    // The RPC arms hold the per-account broadcast lock: the simulated tx carries the account's
+    // current on-chain sequence, so racing an in-flight broadcast from the same account could
+    // capture a sequence mid-bump.
+    //
+    // The provider's own `estimate_*` methods deliberately do not lock, and that asymmetry is
+    // load-bearing: it is what lets a write path, which already holds this account's lock, resolve
+    // its own `CwGasLimit::Estimated` by simulating in place. The write paths therefore call the
+    // provider, never these methods. Calling one of these from inside a write path would re-enter
+    // a lock the same task already holds, which is a deadlock, not a wait.
+
+    /// Estimate the gas [`Self::store_code`] would consume, without broadcasting anything.
+    /// `Some(gas_units)` on the RPC backend, `None` on the mock (which cannot meter).
+    pub async fn estimate_store_code(
+        &self,
+        code: impl Into<CwCodeSource>,
+        wallet: WalletLabel<'_>,
+    ) -> Result<Option<u64>, CwError> {
+        match self {
+            CwChain::Mock(_) => Ok(None),
+            CwChain::Rpc(p) => {
+                let wasm = code.into().wasm.ok_or_else(|| {
+                    CwError::Unimplemented(
+                        "rpc estimate_store_code cannot simulate a native contract object; \
+                         provide compiled wasm bytes (via From<Vec<u8>> or CwCodeSource::both)"
+                            .into(),
+                    )
+                })?;
+                let signer = self.acquire(wallet).await?;
+                let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
+                Ok(Some(p.estimate_store_code(wasm, &signer).await?))
+            }
+        }
+    }
+
+    /// Estimate the gas [`Self::instantiate`] would consume, without broadcasting anything.
+    /// `Some(gas_units)` on the RPC backend, `None` on the mock (which cannot meter).
+    pub async fn estimate_instantiate<Init: CwSerde>(
+        &self,
+        code_id: u64,
+        init: Init,
+        wallet: WalletLabel<'_>,
+        funds: &[Coin],
+        label: &str,
+    ) -> Result<Option<u64>, CwError> {
+        match self {
+            CwChain::Mock(_) => Ok(None),
+            CwChain::Rpc(p) => {
+                let signer = self.acquire(wallet).await?;
+                let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
+                Ok(Some(
+                    p.estimate_instantiate(code_id, init, &signer, funds, label)
+                        .await?,
+                ))
+            }
+        }
+    }
+
+    /// Estimate the gas [`Self::execute_contract`] would consume, without broadcasting
+    /// anything. `Some(gas_units)` on the RPC backend, `None` on the mock (which cannot meter).
+    pub async fn estimate_execute_contract<Exec: CwSerde>(
+        &self,
+        addr: &Addr,
+        msg: Exec,
+        wallet: WalletLabel<'_>,
+        funds: &[Coin],
+    ) -> Result<Option<u64>, CwError> {
+        match self {
+            CwChain::Mock(_) => Ok(None),
+            CwChain::Rpc(p) => {
+                let signer = self.acquire(wallet).await?;
+                let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
+                Ok(Some(
+                    p.estimate_execute_contract(addr, msg, &signer, funds)
+                        .await?,
+                ))
+            }
+        }
+    }
+
+    /// Estimate the gas [`Self::transfer_funds`] would consume, without broadcasting anything.
+    /// `Some(gas_units)` on the RPC backend, `None` on the mock (which cannot meter).
+    pub async fn estimate_transfer_funds(
+        &self,
+        to: &Addr,
+        denom: &str,
+        amount: u128,
+        wallet: WalletLabel<'_>,
+    ) -> Result<Option<u64>, CwError> {
+        match self {
+            CwChain::Mock(_) => Ok(None),
+            CwChain::Rpc(p) => {
+                let signer = self.acquire(wallet).await?;
+                let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
+                Ok(Some(
+                    p.estimate_transfer_funds(to, denom, amount, &signer)
+                        .await?,
+                ))
             }
         }
     }

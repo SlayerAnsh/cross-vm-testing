@@ -19,6 +19,12 @@ pub struct SolanaChainInfo {
     pub ws_url: Option<&'static str>,
     /// Default commitment level.
     pub commitment: Commitment,
+    /// Multiplier applied to a simulated compute-unit consumption to derive the cap a
+    /// [`SvmComputeBudget::Estimated`] transaction runs under. Must be `>= 1.0`: a value below 1
+    /// would cap a transaction under what it was measured to consume, aborting it.
+    ///
+    /// [`SvmComputeBudget::Estimated`]: crate::SvmComputeBudget::Estimated
+    pub gas_adjustment: f64,
 }
 
 impl ChainSpec for SolanaChainInfo {

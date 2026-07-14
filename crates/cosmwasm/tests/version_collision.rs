@@ -15,7 +15,7 @@ use std::rc::Rc;
 use cosmwasm_std::Empty;
 use cross_vm_core::WalletFactory;
 use cross_vm_cosmwasm::chains::OSMOSIS;
-use cross_vm_cosmwasm::CwChain;
+use cross_vm_cosmwasm::{CwChain, CwGasLimit};
 use cross_vm_macros::define_wallet_roster;
 use cw_multi_test::{Contract, ContractWrapper};
 
@@ -53,7 +53,11 @@ async fn shared_method_names_resolve_per_contract() {
     let chain: CwChain = OSMOSIS.mock(wallets()).into();
 
     let counter_code = chain
-        .store_code(counter_contract(), TEST_WALLETS.alice)
+        .store_code(
+            counter_contract(),
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
         .await
         .expect("store counter")
         .code_id;
@@ -64,13 +68,14 @@ async fn shared_method_names_resolve_per_contract() {
             TEST_WALLETS.alice,
             &[],
             "counter",
+            CwGasLimit::Estimated,
         )
         .await
         .expect("instantiate counter")
         .address;
 
     let vault_code = chain
-        .store_code(vault_contract(), TEST_WALLETS.alice)
+        .store_code(vault_contract(), TEST_WALLETS.alice, CwGasLimit::Estimated)
         .await
         .expect("store vault")
         .code_id;
@@ -81,6 +86,7 @@ async fn shared_method_names_resolve_per_contract() {
             TEST_WALLETS.alice,
             &[],
             "vault",
+            CwGasLimit::Estimated,
         )
         .await
         .expect("instantiate vault")
@@ -91,10 +97,12 @@ async fn shared_method_names_resolve_per_contract() {
     let c = chain.contract_as::<counter::CounterContract>(counter_addr);
     let v = chain.contract_as::<vault::VaultContract>(vault_addr);
 
-    c.set_version("alice", 7)
+    c.set_version("alice", 7, CwGasLimit::Estimated)
         .await
         .expect("counter set_version");
-    v.set_version("alice", 9).await.expect("vault set_version");
+    v.set_version("alice", 9, CwGasLimit::Estimated)
+        .await
+        .expect("vault set_version");
 
     assert_eq!(
         c.get_version().await.expect("counter get_version").version,

@@ -30,6 +30,14 @@ const DISC_RECEIVE_PACKET: [u8; 8] = svm::DISC_RECEIVE_PACKET;
 const DISC_ACKNOWLEDGE_PACKET: [u8; 8] = svm::DISC_ACKNOWLEDGE_PACKET;
 const PING_PONG_SO: &[u8] = svm::PROGRAM_SO;
 
+/// The energy-payment policy the Tron deploy writes into the contract: a relayer calling
+/// `receive_packet` / `acknowledge_packet` pays all of that call's energy, so the deployer's
+/// ceiling never binds. The mock ignores it (`revm` bills one payer), but a deploy must state it.
+const CALLER_PAYS: TronEnergyPolicy = TronEnergyPolicy {
+    consume_user_resource_percent: 100,
+    origin_energy_limit: 0,
+};
+
 /// A VM-agnostic snapshot of a ping-pong contract's counters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct StatsView {
@@ -81,7 +89,11 @@ impl PingPong {
         // CosmWasm derives its port from the runtime block chain_id, not a constructor arg.
         let chain = self.base.cosmwasm()?;
         let stored = chain
-            .store_code(cosmos_pp::contract(), WalletLabel::wrap(wallet))
+            .store_code(
+                cosmos_pp::contract(),
+                WalletLabel::wrap(wallet),
+                CwGasLimit::Estimated,
+            )
             .await?;
         let instantiated = chain
             .instantiate(
@@ -90,6 +102,7 @@ impl PingPong {
                 WalletLabel::wrap(wallet),
                 &[],
                 "ping-pong",
+                CwGasLimit::Estimated,
             )
             .await?;
         self.base
@@ -106,7 +119,11 @@ impl PingPong {
             .base
             .cosmwasm()?
             .contract(self.base.cw_addr()?)
-            .execute(cosmos_pp::ExecuteMsg::Ping { destination_port }, wallet)
+            .execute(
+                cosmos_pp::ExecuteMsg::Ping { destination_port },
+                wallet,
+                CwGasLimit::Estimated,
+            )
             .await?;
         Ok(AppResponse::cosmwasm(
             (),
@@ -136,6 +153,7 @@ impl PingPong {
                     msg,
                 },
                 wallet,
+                CwGasLimit::Estimated,
             )
             .await?;
         Ok(AppResponse::cosmwasm(
@@ -164,6 +182,7 @@ impl PingPong {
                     sequence,
                 },
                 wallet,
+                CwGasLimit::Estimated,
             )
             .await?;
         Ok(AppResponse::cosmwasm(
@@ -218,6 +237,7 @@ impl PingPong {
                 evm_pp::PingPong::BYTECODE.clone(),
                 args,
                 WalletLabel::wrap(wallet),
+                EvmGasLimit::Estimated,
             )
             .await?;
         self.base.set_address(Account::Evm(deployed.address));
@@ -238,7 +258,12 @@ impl PingPong {
             .abi_encode(),
         );
         let exec = chain
-            .call(&self.base.evm_addr()?, calldata, WalletLabel::wrap(wallet))
+            .call(
+                &self.base.evm_addr()?,
+                calldata,
+                WalletLabel::wrap(wallet),
+                EvmGasLimit::Estimated,
+            )
             .await?;
         Ok(AppResponse::evm(
             (),
@@ -269,7 +294,12 @@ impl PingPong {
             .abi_encode(),
         );
         let exec = chain
-            .call(&self.base.evm_addr()?, calldata, WalletLabel::wrap(wallet))
+            .call(
+                &self.base.evm_addr()?,
+                calldata,
+                WalletLabel::wrap(wallet),
+                EvmGasLimit::Estimated,
+            )
             .await?;
         Ok(AppResponse::evm(
             (),
@@ -298,7 +328,12 @@ impl PingPong {
             .abi_encode(),
         );
         let exec = chain
-            .call(&self.base.evm_addr()?, calldata, WalletLabel::wrap(wallet))
+            .call(
+                &self.base.evm_addr()?,
+                calldata,
+                WalletLabel::wrap(wallet),
+                EvmGasLimit::Estimated,
+            )
             .await?;
         Ok(AppResponse::evm(
             (),
@@ -375,6 +410,8 @@ impl PingPong {
                 tron_pp::PingPong::BYTECODE.clone(),
                 args,
                 WalletLabel::wrap(wallet),
+                TronLimit::Estimated,
+                CALLER_PAYS,
             )
             .await?;
         self.base.set_address(Account::Tron(deployed.address));
@@ -395,7 +432,12 @@ impl PingPong {
             .abi_encode(),
         );
         let exec = chain
-            .call(&self.base.tron_addr()?, calldata, WalletLabel::wrap(wallet))
+            .call(
+                &self.base.tron_addr()?,
+                calldata,
+                WalletLabel::wrap(wallet),
+                TronLimit::Estimated,
+            )
             .await?;
         Ok(AppResponse::tron(
             (),
@@ -426,7 +468,12 @@ impl PingPong {
             .abi_encode(),
         );
         let exec = chain
-            .call(&self.base.tron_addr()?, calldata, WalletLabel::wrap(wallet))
+            .call(
+                &self.base.tron_addr()?,
+                calldata,
+                WalletLabel::wrap(wallet),
+                TronLimit::Estimated,
+            )
             .await?;
         Ok(AppResponse::tron(
             (),
@@ -455,7 +502,12 @@ impl PingPong {
             .abi_encode(),
         );
         let exec = chain
-            .call(&self.base.tron_addr()?, calldata, WalletLabel::wrap(wallet))
+            .call(
+                &self.base.tron_addr()?,
+                calldata,
+                WalletLabel::wrap(wallet),
+                TronLimit::Estimated,
+            )
             .await?;
         Ok(AppResponse::tron(
             (),
@@ -542,7 +594,11 @@ impl PingPong {
             ],
         );
         chain
-            .send_transaction(vec![ix], WalletLabel::wrap(wallet))
+            .send_transaction(
+                vec![ix],
+                WalletLabel::wrap(wallet),
+                SvmComputeBudget::Estimated,
+            )
             .await?;
         self.base.set_address(Account::Svm(pda));
         Ok(())
@@ -580,7 +636,11 @@ impl PingPong {
         let meta = self
             .base
             .solana()?
-            .send_transaction(vec![ix], WalletLabel::wrap(wallet))
+            .send_transaction(
+                vec![ix],
+                WalletLabel::wrap(wallet),
+                SvmComputeBudget::Estimated,
+            )
             .await?;
         Ok(AppResponse::solana((), meta))
     }
@@ -602,7 +662,11 @@ impl PingPong {
         let meta = self
             .base
             .solana()?
-            .send_transaction(vec![ix], WalletLabel::wrap(wallet))
+            .send_transaction(
+                vec![ix],
+                WalletLabel::wrap(wallet),
+                SvmComputeBudget::Estimated,
+            )
             .await?;
         Ok(AppResponse::solana((), meta))
     }
@@ -622,7 +686,11 @@ impl PingPong {
         let meta = self
             .base
             .solana()?
-            .send_transaction(vec![ix], WalletLabel::wrap(wallet))
+            .send_transaction(
+                vec![ix],
+                WalletLabel::wrap(wallet),
+                SvmComputeBudget::Estimated,
+            )
             .await?;
         Ok(AppResponse::solana((), meta))
     }

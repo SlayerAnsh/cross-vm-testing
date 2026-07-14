@@ -10,9 +10,11 @@
 //!
 //! ```ignore
 //! let counter = CwContract::<CounterContract>::new(chain)
-//!     .store_code(wasm, wallet).await?       // stores code_id + its tx hash + its gas internally
-//!     .instantiate(msg, wallet, &[], "counter").await?;  // stores address + tx hash + gas
-//! counter.increment(wallet.as_str()).await?; // typed call, no address passing
+//!     // Every mutating step declares its gas limit: `Estimated` simulates and scales by the
+//!     // chain's `gas_adjustment`, `Exact(n)` declares `n`. There is no default.
+//!     .store_code(wasm, wallet, CwGasLimit::Estimated).await?  // stores code_id + tx hash + gas
+//!     .instantiate(msg, wallet, &[], "counter", CwGasLimit::Estimated).await?;  // + address
+//! counter.increment(wallet.as_str(), CwGasLimit::Exact(300_000)).await?; // typed, no address
 //! let n = counter.get_count().await?.count;
 //! let deploy_tx = counter.instantiate_tx_hash().expect("instantiated");
 //! // `Some(gas)` on a live chain, `Some(None)` on the mock, which cannot meter.
@@ -32,7 +34,7 @@ use crate::chain::CwChain;
 use crate::error::CwError;
 use crate::msg::CwSerde;
 use crate::provider::CwCodeSource;
-use crate::{CwExecution, CwGas};
+use crate::{CwExecution, CwGas, CwGasLimit};
 
 /// Compile-time marker tying a CosmWasm contract's message types to a zero-sized handle tag.
 ///
@@ -112,12 +114,15 @@ impl<I> CwContract<I> {
     /// Backend-agnostic like [`CwChain::store_code`]: pass compiled wasm bytes for a live RPC
     /// chain, a native `cw-multi-test` contract object for the mock, or a
     /// [`CwCodeSource::both`] carrying both so the same handle code runs on either backend.
+    ///
+    /// `gas` is required, as on every mutating op; see [`CwGasLimit`].
     pub async fn store_code(
         mut self,
         code: impl Into<CwCodeSource>,
         wallet: WalletLabel<'_>,
+        gas: CwGasLimit,
     ) -> Result<Self, CwError> {
-        let stored = self.chain.store_code(code, wallet).await?;
+        let stored = self.chain.store_code(code, wallet, gas).await?;
         self.code_id = Some(stored.code_id);
         self.store_code_tx = Some(stored.tx_hash);
         self.store_code_gas = Some(stored.gas);
@@ -129,19 +134,22 @@ impl<I> CwContract<I> {
     /// have run first. Read them back with
     /// [`instantiate_tx_hash`](Self::instantiate_tx_hash) and
     /// [`instantiate_gas`](Self::instantiate_gas).
+    ///
+    /// `gas` is required, as on every mutating op; see [`CwGasLimit`].
     pub async fn instantiate<Init: CwSerde>(
         mut self,
         init: Init,
         wallet: WalletLabel<'_>,
         funds: &[Coin],
         label: &str,
+        gas: CwGasLimit,
     ) -> Result<Self, CwError> {
         let code_id = self.code_id.ok_or_else(|| {
             CwError::Deploy("store_code() must be called before instantiate()".into())
         })?;
         let instantiated = self
             .chain
-            .instantiate(code_id, init, wallet, funds, label)
+            .instantiate(code_id, init, wallet, funds, label, gas)
             .await?;
         self.addr = Some(instantiated.address);
         self.instantiate_tx = Some(instantiated.tx_hash);
@@ -206,23 +214,36 @@ impl<I> CwContract<I> {
         })
     }
 
-    /// Execute a state-mutating message against the bound contract, signed by wallet `wallet`,
-    /// sending no funds. For a funded call use [`execute_with_funds`](Self::execute_with_funds)
-    /// (the path the `CwExecuteFns` derive's `#[payable]` variants take).
-    pub async fn execute<E: CwSerde>(&self, msg: E, wallet: &str) -> Result<CwExecution, CwError> {
-        self.execute_with_funds(msg, wallet, &[]).await
+    /// Execute a state-mutating message against the bound contract under `gas`, signed by wallet
+    /// `wallet`, sending no funds. For a funded call use
+    /// [`execute_with_funds`](Self::execute_with_funds) (the path the `CwExecuteFns` derive's
+    /// `#[payable]` variants take).
+    pub async fn execute<E: CwSerde>(
+        &self,
+        msg: E,
+        wallet: &str,
+        gas: CwGasLimit,
+    ) -> Result<CwExecution, CwError> {
+        self.execute_with_funds(msg, wallet, &[], gas).await
     }
 
-    /// Execute a message against the bound contract while attaching `funds`, signed by `wallet`.
-    /// The funded path behind the `CwExecuteFns` derive's `#[payable]` variants.
+    /// Execute a message against the bound contract under `gas` while attaching `funds`, signed by
+    /// `wallet`. The funded path behind the `CwExecuteFns` derive's `#[payable]` variants.
     pub async fn execute_with_funds<E: CwSerde>(
         &self,
         msg: E,
         wallet: &str,
         funds: &[Coin],
+        gas: CwGasLimit,
     ) -> Result<CwExecution, CwError> {
         self.chain
-            .execute_contract(self.require_addr()?, msg, WalletLabel::wrap(wallet), funds)
+            .execute_contract(
+                self.require_addr()?,
+                msg,
+                WalletLabel::wrap(wallet),
+                funds,
+                gas,
+            )
             .await
     }
 

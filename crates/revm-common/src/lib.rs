@@ -32,8 +32,17 @@ use revm::{DatabaseRef, ExecuteCommitEvm, ExecuteEvm, MainBuilder, MainContext};
 /// The concrete in-memory `revm` instance behind every EVM-derived mock provider.
 pub type RevmInner = MainnetEvm<MainnetContext<InMemoryDB>>;
 
-/// Gas limit used for every mock transaction.
-pub const TX_GAS_LIMIT: u64 = 30_000_000;
+/// Ceiling a *non-billed* run executes under: [`estimate_create`](RevmCore::estimate_create),
+/// [`estimate_call`](RevmCore::estimate_call) and [`static_call`](RevmCore::static_call).
+///
+/// A transaction takes its limit from the caller. A simulation cannot: capping "how much gas does
+/// this need" at the number the caller guessed is circular, and under a too-small cap an estimate
+/// would report an out-of-gas failure instead of the cost it was asked for. So a simulation runs
+/// under a block-sized ceiling instead, which is what a node does for `eth_estimateGas` /
+/// `eth_call` on a request that carries no gas field. It is a ceiling, not a budget: it exists so
+/// that a non-terminating call fails rather than spinning forever, and it is a mainnet block's
+/// worth of gas, so no transaction a mock can plausibly run is clipped by it.
+pub const SIMULATION_GAS_LIMIT: u64 = 30_000_000;
 
 /// How one `revm` interaction failed, transport-agnostic and message-preserving.
 ///
@@ -164,11 +173,17 @@ impl RevmCore {
 
     /// Deploy bytecode via a create transaction, appending constructor args to the initcode,
     /// returning the deployed address plus a synthetic transaction hash.
+    ///
+    /// `gas_limit` is the caller's budget, honored as a chain honors it: a limit the create
+    /// outruns fails ([`ExecFailure::Halt`], or [`ExecFailure::Internal`] when it is under the
+    /// intrinsic cost and revm rejects the transaction before executing it) and commits nothing.
+    /// [`estimate_create`](RevmCore::estimate_create) answers what limit suffices.
     pub fn deploy_create(
         &self,
         bytecode: Bytes,
         constructor_args: &[u8],
         from: Address,
+        gas_limit: u64,
     ) -> Result<Deployment, ExecFailure> {
         let mut initcode = bytecode.to_vec();
         initcode.extend_from_slice(constructor_args);
@@ -178,7 +193,7 @@ impl RevmCore {
             .chain_id(None)
             .create()
             .data(initcode.clone())
-            .gas_limit(TX_GAS_LIMIT)
+            .gas_limit(gas_limit)
             .build_fill();
         let result = self
             .evm
@@ -202,15 +217,43 @@ impl RevmCore {
         }
     }
 
+    /// Gas a [`deploy_create`](RevmCore::deploy_create) of this bytecode would be billed, measured
+    /// against current state without committing it (see [`RevmCore::simulate`]). Runs under
+    /// [`SIMULATION_GAS_LIMIT`], not under any caller limit: the answer is what the limit should
+    /// be, so it cannot be conditioned on one.
+    pub fn estimate_create(
+        &self,
+        bytecode: Bytes,
+        constructor_args: &[u8],
+        from: Address,
+    ) -> Result<u64, ExecFailure> {
+        let mut initcode = bytecode.to_vec();
+        initcode.extend_from_slice(constructor_args);
+        let tx = TxEnv::builder()
+            .caller(from)
+            .chain_id(None)
+            .create()
+            .data(Bytes::from(initcode))
+            .gas_limit(SIMULATION_GAS_LIMIT)
+            .build_fill();
+        self.simulate(tx, from, U256::ZERO)
+    }
+
     /// Execute a state-mutating call against `to` carrying `value` (a payable call when nonzero),
     /// returning its output plus emitted logs. On a nonzero `value` the caller's balance is topped
     /// up to cover it first (a mock mints native funds on demand).
+    ///
+    /// `gas_limit` is the caller's budget, honored as a chain honors it: a limit the call outruns
+    /// fails ([`ExecFailure::Halt`], or [`ExecFailure::Internal`] when it is under the intrinsic
+    /// cost and revm rejects the transaction before executing it) and commits nothing.
+    /// [`estimate_call`](RevmCore::estimate_call) answers what limit suffices.
     pub fn call(
         &self,
         to: Address,
         calldata: &[u8],
         from: Address,
         value: U256,
+        gas_limit: u64,
     ) -> Result<Execution, ExecFailure> {
         if !value.is_zero() {
             let mut evm = self.evm.borrow_mut();
@@ -227,7 +270,7 @@ impl RevmCore {
             .call(to)
             .value(value)
             .data(Bytes::copy_from_slice(calldata))
-            .gas_limit(TX_GAS_LIMIT)
+            .gas_limit(gas_limit)
             .build_fill();
         let result = self
             .evm
@@ -239,15 +282,79 @@ impl RevmCore {
         Ok(exec)
     }
 
+    /// Gas a [`call`](RevmCore::call) with these arguments would be billed, measured against
+    /// current state without committing it (see [`RevmCore::simulate`]). Runs under
+    /// [`SIMULATION_GAS_LIMIT`], not under any caller limit: the answer is what the limit should
+    /// be, so it cannot be conditioned on one.
+    pub fn estimate_call(
+        &self,
+        to: Address,
+        calldata: &[u8],
+        from: Address,
+        value: U256,
+    ) -> Result<u64, ExecFailure> {
+        let tx = TxEnv::builder()
+            .caller(from)
+            .chain_id(None)
+            .call(to)
+            .value(value)
+            .data(Bytes::copy_from_slice(calldata))
+            .gas_limit(SIMULATION_GAS_LIMIT)
+            .build_fill();
+        self.simulate(tx, from, value)
+    }
+
+    /// Run `tx` for its gas figure alone, leaving the chain exactly as it was found.
+    ///
+    /// A simulation is not a transaction, so it must not look like one afterwards:
+    /// - `transact` (not `transact_commit`) finalizes the journal and hands the state changes back
+    ///   instead of applying them, so nothing reaches the database: no storage write, no nonce
+    ///   bump, no balance move,
+    /// - nothing here draws from `tx_seq`, so an estimate mints no synthetic tx hash and does not
+    ///   shift the hash a later real transaction gets.
+    ///
+    /// A revert or halt is an error, not a gas figure: a caller told "42_000 gas" for a
+    /// transaction that cannot succeed has been misinformed.
+    fn simulate(&self, tx: TxEnv, from: Address, value: U256) -> Result<u64, ExecFailure> {
+        let mut evm = self.evm.borrow_mut();
+        if !value.is_zero() {
+            // `call` mints the caller the funds it lacks, so an estimate must too, or it would
+            // fail where the call it forecasts succeeds. The top-up is journaled, never written to
+            // the database, so it dies with the rest of the simulated state.
+            let held = evm
+                .ctx
+                .journaled_state
+                .db()
+                .basic_ref(from)
+                .ok()
+                .flatten()
+                .map(|i| i.balance)
+                .unwrap_or_default();
+            if held < value {
+                evm.ctx
+                    .journaled_state
+                    .balance_incr(from, value - held)
+                    .map_err(|e| ExecFailure::Internal(format!("{e:?}")))?;
+            }
+        }
+        let outcome = evm
+            .transact(tx)
+            .map_err(|e| ExecFailure::Internal(format!("{e:?}")))?;
+        exec_or_err(outcome.result).map(|e| e.gas_used)
+    }
+
     /// Run a read-only static call against `to`. Logs are dropped: getters do not emit, and a
     /// static call leaves no state.
+    ///
+    /// A read is not billed to anyone, so it takes no caller limit and runs under
+    /// [`SIMULATION_GAS_LIMIT`].
     pub fn static_call(&self, to: Address, calldata: &[u8]) -> Result<Bytes, ExecFailure> {
         let tx = TxEnv::builder()
             .caller(Address::ZERO)
             .chain_id(None)
             .call(to)
             .data(Bytes::copy_from_slice(calldata))
-            .gas_limit(TX_GAS_LIMIT)
+            .gas_limit(SIMULATION_GAS_LIMIT)
             .build_fill();
         let outcome = self
             .evm
@@ -343,8 +450,40 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// A limit generous enough for every transaction these tests submit, so a test that is not
+    /// about the limit does not accidentally become one.
+    const AMPLE_GAS: u64 = 30_000_000;
+
     fn core() -> RevmCore {
         RevmCore::new(1, SpecId::CANCUN, |_| {})
+    }
+
+    /// Initcode returning `runtime` (CODECOPY of the bytes trailing this 12-byte prologue).
+    fn initcode_returning(runtime: &[u8]) -> Bytes {
+        let n = runtime.len() as u8;
+        let mut code = vec![
+            0x60, n, 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, n, 0x60, 0x00, 0xf3,
+        ];
+        code.extend_from_slice(runtime);
+        Bytes::from(code)
+    }
+
+    /// A contract whose fallback writes 0x2a to slot 0: PUSH1 0x2a, PUSH1 0x00, SSTORE, STOP.
+    fn storing_contract() -> Bytes {
+        initcode_returning(&[0x60, 0x2a, 0x60, 0x00, 0x55, 0x00])
+    }
+
+    /// A contract whose fallback reverts with empty data: PUSH1 0x00, PUSH1 0x00, REVERT.
+    fn reverting_contract() -> Bytes {
+        initcode_returning(&[0x60, 0x00, 0x60, 0x00, 0xfd])
+    }
+
+    /// The account nonce as the database holds it; the core exposes no accessor, and only a test
+    /// needs one (to prove an estimate does not bump it).
+    fn nonce(c: &RevmCore, addr: Address) -> u64 {
+        let evm = c.evm.borrow();
+        let info = evm.ctx.journaled_state.db().basic_ref(addr).unwrap();
+        info.map(|i| i.nonce).unwrap_or_default()
     }
 
     #[test]
@@ -364,14 +503,14 @@ mod tests {
         let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
 
         let first = c
-            .deploy_create(initcode.clone(), &[], from)
+            .deploy_create(initcode.clone(), &[], from, AMPLE_GAS)
             .expect("empty-runtime deploy succeeds");
         assert_ne!(first.address, Address::ZERO);
         assert_ne!(first.tx_hash, B256::ZERO);
 
         // The monotonic seq makes a repeat of the identical deploy carry a distinct hash.
         let second = c
-            .deploy_create(initcode, &[], from)
+            .deploy_create(initcode, &[], from, AMPLE_GAS)
             .expect("empty-runtime deploy succeeds");
         assert_ne!(second.tx_hash, B256::ZERO);
         assert_ne!(
@@ -389,11 +528,17 @@ mod tests {
         // A deploy consumes a seq slot, so an otherwise identical call order hashes differently
         // once a deploy precedes it: the two paths draw from the one counter.
         let c = core();
-        c.deploy_create(initcode, &[], from).unwrap();
-        let after_deploy = c.call(to, &[], from, U256::ZERO).unwrap().tx_hash;
+        c.deploy_create(initcode, &[], from, AMPLE_GAS).unwrap();
+        let after_deploy = c
+            .call(to, &[], from, U256::ZERO, AMPLE_GAS)
+            .unwrap()
+            .tx_hash;
 
         let c2 = core();
-        let without_deploy = c2.call(to, &[], from, U256::ZERO).unwrap().tx_hash;
+        let without_deploy = c2
+            .call(to, &[], from, U256::ZERO, AMPLE_GAS)
+            .unwrap()
+            .tx_hash;
 
         assert_ne!(after_deploy, without_deploy);
     }
@@ -405,7 +550,8 @@ mod tests {
         let to = Address::repeat_byte(0x44);
         assert_eq!(c.balance(from).unwrap(), U256::ZERO);
         // A plain value transfer to an empty account succeeds after the top-up.
-        c.call(to, &[], from, U256::from(5u64)).expect("value call");
+        c.call(to, &[], from, U256::from(5u64), AMPLE_GAS)
+            .expect("value call");
         assert_eq!(c.balance(to).unwrap(), U256::from(5u64));
     }
 
@@ -416,16 +562,32 @@ mod tests {
 
         // Two calls in a run: both carry a nonzero hash, and the monotonic seq makes them differ.
         let c = core();
-        let h1 = c.call(to, &[], from, U256::ZERO).unwrap().tx_hash;
-        let h2 = c.call(to, &[], from, U256::ZERO).unwrap().tx_hash;
+        let h1 = c
+            .call(to, &[], from, U256::ZERO, AMPLE_GAS)
+            .unwrap()
+            .tx_hash;
+        let h2 = c
+            .call(to, &[], from, U256::ZERO, AMPLE_GAS)
+            .unwrap()
+            .tx_hash;
         assert_ne!(h1, B256::ZERO);
         assert_ne!(h2, B256::ZERO);
         assert_ne!(h1, h2, "repeated identical calls must get distinct hashes");
 
         // A fresh core replays the same call order to the same hashes (deterministic).
         let c2 = core();
-        assert_eq!(c2.call(to, &[], from, U256::ZERO).unwrap().tx_hash, h1);
-        assert_eq!(c2.call(to, &[], from, U256::ZERO).unwrap().tx_hash, h2);
+        assert_eq!(
+            c2.call(to, &[], from, U256::ZERO, AMPLE_GAS)
+                .unwrap()
+                .tx_hash,
+            h1
+        );
+        assert_eq!(
+            c2.call(to, &[], from, U256::ZERO, AMPLE_GAS)
+                .unwrap()
+                .tx_hash,
+            h2
+        );
     }
 
     #[test]
@@ -435,8 +597,8 @@ mod tests {
         let to = Address::repeat_byte(0x99);
         let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
 
-        let deploy = c.deploy_create(initcode, &[], from).unwrap();
-        let call = c.call(to, &[], from, U256::ZERO).unwrap();
+        let deploy = c.deploy_create(initcode, &[], from, AMPLE_GAS).unwrap();
+        let call = c.call(to, &[], from, U256::ZERO, AMPLE_GAS).unwrap();
 
         // A value-free, calldata-free call to an empty account executes nothing, so it is billed
         // exactly the EVM intrinsic transaction cost. Anything else means the figure is synthetic.
@@ -449,7 +611,7 @@ mod tests {
             call.gas_used
         );
         assert!(
-            deploy.gas_used >= 53_000 && deploy.gas_used < TX_GAS_LIMIT,
+            deploy.gas_used >= 53_000 && deploy.gas_used < AMPLE_GAS,
             "deploy gas ({}) outside the plausible band",
             deploy.gas_used
         );
@@ -463,12 +625,229 @@ mod tests {
 
         let run = || {
             let c = core();
-            let deploy = c.deploy_create(initcode.clone(), &[], from).unwrap();
-            let call = c.call(to, &[], from, U256::ZERO).unwrap();
+            let deploy = c
+                .deploy_create(initcode.clone(), &[], from, AMPLE_GAS)
+                .unwrap();
+            let call = c.call(to, &[], from, U256::ZERO, AMPLE_GAS).unwrap();
             (deploy.gas_used, call.gas_used)
         };
 
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn estimating_leaves_state_untouched() {
+        let c = core();
+        let from = Address::repeat_byte(0xaa);
+        let payee = Address::repeat_byte(0xbb);
+        let target = c
+            .deploy_create(storing_contract(), &[], from, AMPLE_GAS)
+            .unwrap()
+            .address;
+        let nonce_before = nonce(&c, from);
+
+        // A call that writes storage, and a payable call that moves funds the caller does not
+        // have: neither may leave a trace once estimated.
+        c.estimate_call(target, &[], from, U256::ZERO).unwrap();
+        c.estimate_call(payee, &[], from, U256::from(5u64)).unwrap();
+
+        assert_eq!(
+            c.storage(target, U256::ZERO).unwrap(),
+            U256::ZERO,
+            "an estimated SSTORE must not land"
+        );
+        assert_eq!(c.balance(payee).unwrap(), U256::ZERO);
+        assert_eq!(
+            c.balance(from).unwrap(),
+            U256::ZERO,
+            "the funds an estimate mints for the caller must not be committed"
+        );
+        assert_eq!(
+            nonce(&c, from),
+            nonce_before,
+            "an estimate must not bump the sender nonce"
+        );
+    }
+
+    #[test]
+    fn estimating_does_not_advance_the_tx_hash_sequence() {
+        let from = Address::repeat_byte(0xcc);
+        let to = Address::repeat_byte(0xdd);
+
+        let c = core();
+        c.estimate_create(storing_contract(), &[], from).unwrap();
+        c.estimate_call(to, &[], from, U256::ZERO).unwrap();
+        let after_estimates = c
+            .call(to, &[], from, U256::ZERO, AMPLE_GAS)
+            .unwrap()
+            .tx_hash;
+
+        // The same call on a core that estimated nothing hashes identically: estimates minted no
+        // hash and consumed no seq slot.
+        let c2 = core();
+        let without_estimates = c2
+            .call(to, &[], from, U256::ZERO, AMPLE_GAS)
+            .unwrap()
+            .tx_hash;
+
+        assert_eq!(after_estimates, without_estimates);
+    }
+
+    #[test]
+    fn estimate_matches_the_gas_the_committed_op_is_billed() {
+        let c = core();
+        let from = Address::repeat_byte(0xee);
+
+        // Create: the estimate runs at the nonce the real deploy will run at, so the two are the
+        // same transaction and revm meters them identically.
+        let estimated_deploy = c.estimate_create(storing_contract(), &[], from).unwrap();
+        let deploy = c
+            .deploy_create(storing_contract(), &[], from, AMPLE_GAS)
+            .unwrap();
+        assert_eq!(estimated_deploy, deploy.gas_used);
+
+        // Call: likewise, the estimated SSTORE is cold and 0 -> nonzero, exactly as the real one is.
+        let estimated_call = c
+            .estimate_call(deploy.address, &[], from, U256::ZERO)
+            .unwrap();
+        let call = c
+            .call(deploy.address, &[], from, U256::ZERO, AMPLE_GAS)
+            .unwrap();
+        assert_eq!(estimated_call, call.gas_used);
+        assert!(
+            estimated_call > 21_000,
+            "an SSTORE costs more than intrinsic gas"
+        );
+        assert_eq!(
+            c.storage(deploy.address, U256::ZERO).unwrap(),
+            U256::from(0x2au64)
+        );
+    }
+
+    #[test]
+    fn a_call_limit_that_covers_the_cost_succeeds_and_one_below_it_runs_out_of_gas() {
+        let c = core();
+        let from = Address::repeat_byte(0x12);
+        let target = c
+            .deploy_create(storing_contract(), &[], from, AMPLE_GAS)
+            .unwrap()
+            .address;
+        let needed = c.estimate_call(target, &[], from, U256::ZERO).unwrap();
+
+        // One gas short of the true cost: past the intrinsic check, so revm executes and the
+        // SSTORE exhausts the budget mid-flight. Out of gas, not a revert and not a zero-gas
+        // success, and the storage write it was running dies with it.
+        let err = c
+            .call(target, &[], from, U256::ZERO, needed - 1)
+            .expect_err("a limit under the true cost must fail");
+        match &err {
+            ExecFailure::Halt(reason) => assert!(
+                reason.contains("OutOfGas"),
+                "halt must be out-of-gas, got {reason}"
+            ),
+            other => panic!("expected a halt, got {other:?}"),
+        }
+        assert_eq!(
+            c.storage(target, U256::ZERO).unwrap(),
+            U256::ZERO,
+            "an out-of-gas call must commit nothing"
+        );
+
+        // Exactly the true cost: the limit is a budget, not a fee, so nothing is left over to pay
+        // and the transaction is billed precisely what it was forecast.
+        let exec = c
+            .call(target, &[], from, U256::ZERO, needed)
+            .expect("a limit equal to the true cost must succeed");
+        assert_eq!(exec.gas_used, needed);
+        assert_eq!(c.storage(target, U256::ZERO).unwrap(), U256::from(0x2au64));
+    }
+
+    #[test]
+    fn a_deploy_limit_below_the_cost_runs_out_of_gas() {
+        let c = core();
+        let from = Address::repeat_byte(0x13);
+        let needed = c.estimate_create(storing_contract(), &[], from).unwrap();
+
+        let err = c
+            .deploy_create(storing_contract(), &[], from, needed - 1)
+            .expect_err("a limit under the true cost must fail");
+        match &err {
+            ExecFailure::Halt(reason) => assert!(
+                reason.contains("OutOfGas"),
+                "halt must be out-of-gas, got {reason}"
+            ),
+            other => panic!("expected a halt, got {other:?}"),
+        }
+
+        let deploy = c
+            .deploy_create(storing_contract(), &[], from, needed)
+            .expect("a limit equal to the true cost must succeed");
+        assert_eq!(deploy.gas_used, needed);
+    }
+
+    #[test]
+    fn a_limit_below_the_intrinsic_cost_fails_cleanly_rather_than_panicking() {
+        let c = core();
+        let from = Address::repeat_byte(0x14);
+        let to = Address::repeat_byte(0x15);
+
+        // Under the intrinsic cost revm rejects the transaction before executing it, so the
+        // failure surfaces as `Internal` (revm's own gas error) rather than a `Halt`. Both are
+        // clean `ExecFailure`s; what matters is that neither panics nor reports a success.
+        let err = c
+            .call(to, &[], from, U256::ZERO, 20_999)
+            .expect_err("a sub-intrinsic limit must fail");
+        assert!(matches!(err, ExecFailure::Internal(_)), "got {err:?}");
+
+        let err = c
+            .deploy_create(storing_contract(), &[], from, 0)
+            .expect_err("a zero limit must fail");
+        assert!(matches!(err, ExecFailure::Internal(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn an_estimate_is_the_true_cost_whatever_limit_a_later_call_uses() {
+        let from = Address::repeat_byte(0x16);
+
+        // The estimate runs under `SIMULATION_GAS_LIMIT`, never under a caller's number, so it
+        // reports the same cost no matter what limit the transaction it forecasts goes on to use:
+        // a generous one, or exactly the estimate itself (which would be circular if the estimate
+        // had been capped by it).
+        for limit in [AMPLE_GAS, 60_000] {
+            let c = core();
+            let target = c
+                .deploy_create(storing_contract(), &[], from, AMPLE_GAS)
+                .unwrap()
+                .address;
+            let estimated = c.estimate_call(target, &[], from, U256::ZERO).unwrap();
+            let billed = c
+                .call(target, &[], from, U256::ZERO, limit)
+                .unwrap()
+                .gas_used;
+            assert_eq!(estimated, billed, "at limit {limit}");
+            assert!(estimated < limit, "the estimate must fit under {limit}");
+        }
+    }
+
+    #[test]
+    fn estimating_a_reverting_tx_errors_rather_than_reporting_gas() {
+        let c = core();
+        let from = Address::repeat_byte(0xff);
+        let target = c
+            .deploy_create(reverting_contract(), &[], from, AMPLE_GAS)
+            .unwrap()
+            .address;
+
+        let err = c
+            .estimate_call(target, &[], from, U256::ZERO)
+            .expect_err("estimating a reverting call must error");
+        assert!(matches!(err, ExecFailure::Revert(_)), "got {err:?}");
+
+        // Initcode that reverts: the create never completes, so there is no gas figure to hand back.
+        let err = c
+            .estimate_create(Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xfd]), &[], from)
+            .expect_err("estimating a reverting create must error");
+        assert!(matches!(err, ExecFailure::Revert(_)), "got {err:?}");
     }
 
     #[test]

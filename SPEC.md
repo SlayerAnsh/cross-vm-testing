@@ -118,6 +118,39 @@ A contract wrapper holds a `ContractBase` and writes one dispatcher per logical 
 
 The example wrapper covers all three VMs: an in-process CosmWasm counter (`ContractWrapper`), a Solidity `Counter` (committed creation bytecode, `alloy::sol!`), and an Anchor counter loaded at its `declare_id!` (built by `make compile-solana`, instructions built from the 8-byte discriminators and the PDA seeds).
 
+### Cost, limits, and estimation
+
+Three surfaces, one per question a caller can ask about the cost of an operation: what did it cost, what will it cost, and what may it cost at most.
+
+**What it cost.** `AppResponse::cost()` (and `RawResponse::cost()` / `HookContext::cost()`), described under the contract layer above: a self-describing `Cost` whose `units` carry the `CostUnit` the backend actually metered, so a figure is never mistaken for a quantity it is not.
+
+**What it will cost.** Each VM's concrete chain carries `estimate_*` methods that forecast an operation without running it, returning the same type the executed operation reports so a forecast and a receipt compare directly. `CwChain::estimate_store_code` / `estimate_instantiate` / `estimate_execute_contract` / `estimate_transfer_funds` return `Option<u64>` gas (the live backend simulates against `/cosmos.tx.v1beta1.Service/Simulate`; the mock returns `None`, having no meter to simulate against). `EvmChain::estimate_deploy_create` / `estimate_call` / `estimate_call_value` return `EvmGas` (`eth_estimateGas` live, an uncommitted `revm` transact on the mock). `TronChain::estimate_deploy_create` / `estimate_call` / `estimate_call_value` return `TronResources` (live: `triggerconstantcontract`, whose `energy_used` was already on the wire, rather than the `estimateenergy` endpoint, which nodes disable by default). `SvmChain::estimate_transaction` returns the `TransactionMetadata` of a `LiteSVM::simulate_transaction`, run under the same `SetComputeUnitLimit` instruction a sent transaction carries, since that instruction burns 150 compute units of the budget it sets.
+
+These live on the concrete chains, not on `AnyChain`, and reaching them is the same downcast (`ContractBase::cosmwasm()` / `evm()` / `solana()`) every contract operation already uses. `AnyChain` exposes no contract operation by the same design decision (irreconcilable per VM signatures), and a VM erased "call intent" type invented purely to give it an `estimate` method was considered and rejected. `AnyChain` participates through `cost()`, which is already VM erased.
+
+**What it may cost at most.** Every state-mutating operation takes a required limit, with no default. The type is per VM, because "limit" is not the same quantity from one chain to the next and a shared `Exact(n)` would silently mean gas on EVM and CosmWasm, sun on Tron, and compute units on Solana:
+
+```rust
+pub enum CwGasLimit       { Exact(u64), Estimated }  // gas units
+pub enum EvmGasLimit      { Exact(u64), Estimated }  // gas units
+pub enum SvmComputeBudget { Exact(u32), Estimated }  // compute units
+pub enum TronLimit        { Fee(u64), Gas(u64), Estimated }  // sun (live) or EVM gas (mock)
+
+pub struct TronEnergyPolicy {          // deploy_create only; not a per-tx cap
+    pub consume_user_resource_percent: u8,
+    pub origin_energy_limit: u64,
+}
+```
+
+`Exact` is submitted verbatim and never corrected upward, so an out-of-gas test stays expressible. `Estimated` runs the estimator above and scales it by the chain's `gas_adjustment` (a `[[chain]]` config field, default `1.3`, validated finite and `>= 1.0`, since below `1.0` the limit lands under the estimate and always runs out of gas), at the price of one extra round trip.
+
+Four consequences the API deliberately does not smooth over:
+
+* `TronLimit` is unit tagged because Tron's two backends meter different quantities. `Fee(sun)` is java-tron's `fee_limit` and only the live backend takes it; `Gas` is an EVM gas budget and only the mock takes it, its engine being `revm`, which has no energy and no price to buy energy with. Handing a backend the other unit is an error, not a silently ignored cap.
+* `TronEnergyPolicy` is a separate argument, on `deploy_create` alone. Its two fields are not a cap on the create: they persist as properties of the deployed contract and bill every future call to it, splitting that call's energy between caller and owner and capping what the owner pays. They travel as a pair because at `consume_user_resource_percent: 100` the owner pays nothing and `origin_energy_limit` never binds. Neither field exists on `call`. The mock ignores the policy, since `revm` bills one payer.
+* Operations that cap nothing take no limit. `TronChain::transfer_funds` (a `TransferContract` runs no code and has no `fee_limit` field, paying only bandwidth for its bytes), and `SvmChain::add_program` / `add_program_at` (litesvm writes the program account straight into the account store, so no transaction runs). `AnyChain::transfer_funds` takes none either and always resolves `Estimated`, the only limit whose meaning survives VM erasure.
+* A limit on the CosmWasm mock is inert: `cw-multi-test` has no gas meter, so the mock cannot run out of gas and `Exact(1)` executes exactly as `Exact(15_000_000)` does. It still takes the limit so one script runs on either backend, and an out-of-gas failure is only reproducible against live RPC.
+
 ### Property-testing harness (`cross-vm-framework`)
 
 The `harness` module drives a contract wrapper over many generated operation sequences. It is VM agnostic: it runs over whatever chain the test injects, so the same property is checked on CosmWasm, EVM, Solana, or Tron. A developer implements one `Harness` trait, with associated types `World` (persisted bookkeeping / a model), `Operation`, `Invariant`, and `OpKind` (the data free operation kinds), plus `apply` (run one operation against the env and model), `check` (evaluate one invariant), and `generate_op(rng, world, kind)` (build a random instance of one kind). The runner picks each kind by weight and calls `generate_op`. A provided `weight(ctx, world, kind)` returns 1 by default (a uniform mix); a harness overrides it to bias the mix dynamically, and a weight of 0 excludes a kind for as long as the current state makes it meaningless. Config supplied static weights multiply the dynamic weight.
@@ -155,4 +188,4 @@ Both `.mock(wallets)` and `.rpc(wallets)` take the shared `Rc<WalletFactory>`; t
 
 ## Out of scope (later phases)
 
-The Solana RPC write paths (signed `add_program`/`send_transaction`, blocked on decoupling their mock-backend return types); the mock's tx-id-based `CREATE` / `CREATE2` derivation (Tron); the cross VM orchestration layer that runs one script across all four (its first piece, declarative TOML driven test runs, is now specified in [docs/config-runs-spec.md](docs/config-runs-spec.md)); gas/compute cost estimation ahead of running an op, and configurable per op gas/compute limits (`AppResponse::cost()` reports what an op already consumed; forecasting that figure before running it, and capping it with a caller supplied limit, are not built); fork from live.
+The Solana RPC write paths (signed `add_program`/`send_transaction`, blocked on decoupling their mock-backend return types, which also leaves `SvmChain::estimate_transaction` `Unimplemented` there); the mock's tx-id-based `CREATE` / `CREATE2` derivation (Tron); the cross VM orchestration layer that runs one script across all four (its first piece, declarative TOML driven test runs, is now specified in [docs/config-runs-spec.md](docs/config-runs-spec.md)); estimation on `AnyChain` itself, which is deliberate rather than pending (see "Cost, limits, and estimation" above); fork from live.

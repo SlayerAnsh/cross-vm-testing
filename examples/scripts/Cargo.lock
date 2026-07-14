@@ -2920,6 +2920,8 @@ dependencies = [
  "solana-account",
  "solana-address 1.1.0",
  "solana-clock",
+ "solana-compute-budget",
+ "solana-compute-budget-interface",
  "solana-derivation-path",
  "solana-instruction",
  "solana-keypair",

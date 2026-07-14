@@ -7,12 +7,51 @@ use solana_address::Address;
 use solana_sha256_hasher::hashv;
 use solana_signature::Signature;
 
+/// Test-visible so the budget arithmetic (`gas_adjustment`, the ceiling clamp) can be pinned
+/// directly, rather than inferred from a transaction that merely executes.
+#[cfg(test)]
+pub(crate) use mock::adjusted;
 pub use mock::{SvmMockProvider, DEFAULT_FUNDING_LAMPORTS};
 pub use rpc::SvmRpcProvider;
+
+/// The runtime's per-transaction compute-unit ceiling. Re-exported from the crate litesvm itself
+/// derives its limits from, so the ceiling named here is the one actually enforced.
+pub use solana_compute_budget::compute_budget_limits::MAX_COMPUTE_UNIT_LIMIT;
 
 /// Domain tag for the mock's synthetic deploy signature, so its preimage can never collide with
 /// bytes hashed for another purpose.
 const DEPLOY_DOMAIN: &[u8] = b"cross-vm:svm:add_program";
+
+/// The compute-unit ceiling a mutating Solana transaction runs under.
+///
+/// This is not a gas limit and it does not bound what the transaction costs. Solana's fee is per
+/// signature (plus an opt-in priority fee, set by a separate `SetComputeUnitPrice` instruction);
+/// it is not a function of compute units. A compute budget constrains *execution*: it is a
+/// `ComputeBudgetInstruction::SetComputeUnitLimit` prepended to the instruction list, and a
+/// transaction that runs past it aborts with "Computational budget exceeded" (having still paid
+/// its fee). The budget is therefore about not letting a runaway program burn the block's compute,
+/// not about not overpaying.
+///
+/// Two consequences the API cannot hide:
+///
+/// - The cap covers the whole transaction *including the `SetComputeUnitLimit` instruction itself*,
+///   which invokes the compute-budget builtin and burns 150 CU of the very budget it sets. Every
+///   number here (both what [`Exact`] must cover and what an estimate reports) is for the
+///   transaction as sent, budget instruction included.
+/// - Instructions that run no transaction take no budget. `add_program` / `add_program_at` write
+///   the program account straight into the mock's account store, so there is nothing to cap.
+///
+/// [`Exact`]: SvmComputeBudget::Exact
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SvmComputeBudget {
+    /// Cap the transaction at exactly this many compute units. Below what it actually consumes,
+    /// it aborts. The runtime silently clamps anything above `MAX_COMPUTE_UNIT_LIMIT` (1_400_000).
+    Exact(u32),
+    /// Simulate the transaction and cap it at what it consumed, scaled by the chain's
+    /// [`gas_adjustment`](crate::SolanaChainInfo::gas_adjustment) and clamped to the runtime's
+    /// per-transaction ceiling. Costs one extra simulation.
+    Estimated,
+}
 
 /// The outcome of loading a program: the id it is executable at, and the base58 signature of the
 /// transaction that loaded it.

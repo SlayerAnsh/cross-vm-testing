@@ -19,6 +19,28 @@ pub struct EvmGas {
     pub fee: Option<u128>,
 }
 
+/// The gas a state-mutating EVM op may burn. Required on every such op: there is no default, and
+/// no fallback when the caller does not supply one.
+///
+/// The unit is EVM gas. Each VM has its own limit type precisely because "limit" is not the same
+/// quantity from one chain to the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvmGasLimit {
+    /// Submit exactly this limit, honored as a chain honors it: a limit under what the op needs
+    /// fails out of gas and commits nothing. That is the point of `Exact` (an out-of-gas test must
+    /// be expressible), so a too-low limit is not corrected.
+    Exact(u64),
+    /// Simulate the op first ([`EvmGas::used`] from the matching `estimate_*` method) and submit
+    /// that figure scaled by the chain's [`gas_adjustment`](crate::EvmChainInfo::gas_adjustment).
+    ///
+    /// Costs one extra round trip (an `eth_estimateGas` on the RPC backend, an uncommitted `revm`
+    /// transact on the mock). The headroom is not optional padding: an estimate reports the gas the
+    /// op is *billed*, which is already net of the EIP-3529 refund, while the limit must cover the
+    /// gas the op *burns* before that refund. A refunding transaction therefore needs a limit above
+    /// its own estimate, and the adjustment is what supplies it.
+    Estimated,
+}
+
 /// The result of a state-mutating EVM call: the return data, the logs (events) emitted during
 /// execution, the transaction hash, and what the transaction cost.
 ///

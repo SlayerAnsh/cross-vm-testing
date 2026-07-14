@@ -34,6 +34,7 @@ pub(crate) fn validate_chains(cfg: &RunConfig) -> Result<(), String> {
     for decl in chains {
         validate_chain_kind_non_empty(decl)?;
         validate_chain_fields(decl)?;
+        validate_gas_adjustment(decl)?;
     }
 
     for (name, profile) in &cfg.profiles {
@@ -81,6 +82,33 @@ fn validate_chain_fields(decl: &ChainDecl) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// `gas_adjustment` is finite and at least `1.0`.
+///
+/// The field scales an estimate up into the limit an op submits, so a value below `1.0` sets the
+/// limit *under* the estimate, which is a guaranteed out-of-gas failure rather than a tunable
+/// trade-off. That is rejected outright: a caller who deliberately wants a limit below the
+/// estimate (say, to exercise the out-of-gas path) states it with an exact limit, which says so
+/// directly instead of dressing it up as an estimate. `1.0` itself is allowed, meaning "take the
+/// estimate as-is, with no headroom".
+///
+/// Non-finite values are rejected for the same reason they would be for any multiplier: `NaN`
+/// compares false against every bound and would silently cast to `0`, and an infinite adjustment
+/// saturates to the widest possible limit. Neither is a coherent request.
+///
+/// There is deliberately no upper bound. An adjustment far above `1.0` over-provisions, which is
+/// wasteful but never broken (on EVM and Tron the unused headroom is not even charged), and
+/// picking a ceiling would be inventing a policy nobody asked for.
+fn validate_gas_adjustment(decl: &ChainDecl) -> Result<(), String> {
+    match decl.gas_adjustment {
+        Some(v) if !v.is_finite() || v < 1.0 => Err(format!(
+            "chain `{}`: `gas_adjustment` must be a finite number >= 1.0 (got {v}); \
+             below 1.0 the gas limit lands under the estimate, which always runs out of gas",
+            decl.label
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn validate_env_selection(

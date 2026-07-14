@@ -47,6 +47,19 @@ pub(crate) fn describe(cost: Option<Cost>) -> String {
     )
 }
 
+/// Render a CosmWasm gas forecast, which is bare gas units rather than a full [`Cost`]: a
+/// simulation reports what the transaction would meter, not what it would be charged (the fee
+/// follows from the limit the forecast resolves into, and does not exist yet).
+///
+/// `None` carries the same meaning as in [`describe`]: the backend cannot simulate (the mock has
+/// no gas meter), not that the operation is free.
+pub(crate) fn describe_units(units: Option<u64>) -> String {
+    units.map_or_else(
+        || "unmetered by this backend".to_string(),
+        |units| format!("{units} gas"),
+    )
+}
+
 /// Run the identical chain-agnostic flow against one chain.
 async fn run(chain: AnyChain) -> Result<u64, CrossVmError> {
     let wallet = ONCHAIN_WALLETS.test.as_str();

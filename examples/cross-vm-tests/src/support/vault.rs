@@ -23,6 +23,14 @@ const VDISC_BORROW: [u8; 8] = svm::DISC_BORROW;
 const VDISC_REPAY: [u8; 8] = svm::DISC_REPAY;
 const VAULT_SO: &[u8] = svm::PROGRAM_SO;
 
+/// The energy-payment policy the Tron deploy writes into the vault: a caller of a later
+/// deposit/withdraw/borrow/repay pays all of that call's energy, so the deployer's ceiling never
+/// binds. The mock ignores it (`revm` bills one payer), but a deploy must state a policy.
+const CALLER_PAYS: TronEnergyPolicy = TronEnergyPolicy {
+    consume_user_resource_percent: 100,
+    origin_energy_limit: 0,
+};
+
 /// A cross-VM collateralized-debt vault: deposit / withdraw / borrow / repay, identical on any
 /// supported VM. Ledger-only (no token transfers), 50% LTV. The same logic and reverts on each
 /// VM let one harness drive all three.
@@ -57,7 +65,11 @@ impl Vault {
             ChainKind::CosmWasm => {
                 let chain = self.base.cosmwasm()?;
                 let stored = chain
-                    .store_code(cw_vault::contract(), WalletLabel::wrap(wallet))
+                    .store_code(
+                        cw_vault::contract(),
+                        WalletLabel::wrap(wallet),
+                        CwGasLimit::Estimated,
+                    )
                     .await?;
                 let instantiated = chain
                     .instantiate(
@@ -66,6 +78,7 @@ impl Vault {
                         WalletLabel::wrap(wallet),
                         &[],
                         "vault",
+                        CwGasLimit::Estimated,
                     )
                     .await?;
                 self.base
@@ -79,6 +92,7 @@ impl Vault {
                         evm_vault::Vault::BYTECODE.clone(),
                         Bytes::new(),
                         WalletLabel::wrap(wallet),
+                        EvmGasLimit::Estimated,
                     )
                     .await?;
                 self.base.set_address(Account::Evm(deployed.address));
@@ -91,6 +105,8 @@ impl Vault {
                         tron_vault::Vault::BYTECODE.clone(),
                         Bytes::new(),
                         WalletLabel::wrap(wallet),
+                        TronLimit::Estimated,
+                        CALLER_PAYS,
                     )
                     .await?;
                 self.base.set_address(Account::Tron(deployed.address));
@@ -223,7 +239,13 @@ impl Vault {
         let chain = self.base.cosmwasm()?;
         let addr = self.base.cw_addr()?;
         let exec = chain
-            .execute_contract(&addr, msg, WalletLabel::wrap(wallet), &[])
+            .execute_contract(
+                &addr,
+                msg,
+                WalletLabel::wrap(wallet),
+                &[],
+                CwGasLimit::Estimated,
+            )
             .await?;
         Ok(AppResponse::cosmwasm(
             (),
@@ -258,7 +280,12 @@ impl Vault {
         let chain = self.base.evm()?;
         let addr = self.base.evm_addr()?;
         let exec = chain
-            .call(&addr, calldata, WalletLabel::wrap(wallet))
+            .call(
+                &addr,
+                calldata,
+                WalletLabel::wrap(wallet),
+                EvmGasLimit::Estimated,
+            )
             .await?;
         Ok(AppResponse::evm(
             (),
@@ -298,7 +325,12 @@ impl Vault {
         let chain = self.base.tron()?;
         let addr = self.base.tron_addr()?;
         let exec = chain
-            .call(&addr, calldata, WalletLabel::wrap(wallet))
+            .call(
+                &addr,
+                calldata,
+                WalletLabel::wrap(wallet),
+                TronLimit::Estimated,
+            )
             .await?;
         Ok(AppResponse::tron(
             (),
@@ -355,7 +387,11 @@ impl Vault {
                 ],
             );
             chain
-                .send_transaction(vec![ix], WalletLabel::wrap(wallet))
+                .send_transaction(
+                    vec![ix],
+                    WalletLabel::wrap(wallet),
+                    SvmComputeBudget::Estimated,
+                )
                 .await?;
         }
         Ok(())
@@ -382,7 +418,11 @@ impl Vault {
             ],
         );
         let meta = chain
-            .send_transaction(vec![ix], WalletLabel::wrap(wallet))
+            .send_transaction(
+                vec![ix],
+                WalletLabel::wrap(wallet),
+                SvmComputeBudget::Estimated,
+            )
             .await?;
         Ok(AppResponse::solana((), meta))
     }

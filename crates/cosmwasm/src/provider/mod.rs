@@ -79,6 +79,32 @@ pub struct CwGas {
     pub fee: u128,
 }
 
+/// The gas limit a mutating CosmWasm op runs under. Required on every one of them: there is no
+/// default and no fallback, because a limit that is wrong by default is a limit that fails in
+/// production.
+///
+/// The unit is CosmWasm gas, the same quantity [`CwGas::used`] reports, so a limit and a receipt
+/// are directly comparable.
+///
+/// On the live RPC backend the resolved limit is what the signed transaction declares
+/// (`Fee::gas_limit`), and the fee follows from it: `ceil(limit * gas_price)` of the chain's
+/// native denom. The Cosmos SDK deducts that declared fee in full and refunds nothing, so a
+/// limit is not free headroom: raising it raises what the sender pays.
+///
+/// On the mock backend a limit is inert: `cw-multi-test` has no gas meter, so it cannot run out of
+/// gas and has nothing to simulate against. It still takes the limit, so one script runs on either
+/// backend. An out-of-gas failure is therefore only reproducible against live RPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CwGasLimit {
+    /// Declare exactly this many gas units. Broadcast as given, never simulated.
+    Exact(u64),
+    /// Simulate the transaction against the node and scale the reported figure by the chain's
+    /// [`crate::CosmosChainInfo::gas_adjustment`]. Costs one extra round trip (the simulation),
+    /// and the adjustment is applied exactly once, here: the fee is then computed from the
+    /// resolved limit like any other, with no second multiplication.
+    Estimated,
+}
+
 /// The result of uploading contract code: the assigned code id, the transaction hash, and what
 /// the upload cost.
 ///

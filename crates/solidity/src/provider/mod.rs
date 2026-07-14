@@ -5,6 +5,6 @@ mod execution;
 mod mock;
 mod rpc;
 
-pub use execution::{EvmDeploy, EvmExecution, EvmGas};
+pub use execution::{EvmDeploy, EvmExecution, EvmGas, EvmGasLimit};
 pub use mock::{EvmInner, EvmMockProvider, DEFAULT_FUNDING_WEI};
 pub use rpc::EvmRpcProvider;

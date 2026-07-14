@@ -31,5 +31,6 @@ pub use chain::EvmChain;
 pub use chains::EvmChainInfo;
 pub use error::EvmError;
 pub use provider::{
-    EvmDeploy, EvmExecution, EvmGas, EvmInner, EvmMockProvider, EvmRpcProvider, DEFAULT_FUNDING_WEI,
+    EvmDeploy, EvmExecution, EvmGas, EvmGasLimit, EvmInner, EvmMockProvider, EvmRpcProvider,
+    DEFAULT_FUNDING_WEI,
 };

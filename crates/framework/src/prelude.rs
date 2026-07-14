@@ -31,7 +31,7 @@ pub use harness_core_macros::{endurance_runner, fuzz_runner, invariant_runner};
 pub use cross_vm_cosmwasm::chains::{COSMOS_HUB, JUNO, LOCAL as CW_LOCAL, NEUTRON, OSMOSIS};
 #[cfg(feature = "cw")]
 pub use cross_vm_cosmwasm::{
-    CwAsset, CwChain, CwContract, CwInterface, CwMockProvider, CwRpcProvider, CwSerde,
+    CwAsset, CwChain, CwContract, CwGasLimit, CwInterface, CwMockProvider, CwRpcProvider, CwSerde,
 };
 
 // EVM
@@ -41,14 +41,14 @@ pub use cross_vm_solidity::chains::{
 };
 #[cfg(feature = "evm")]
 pub use cross_vm_solidity::{
-    EvmAsset, EvmChain, EvmExecution, EvmMockProvider, EvmRpcProvider, Log,
+    EvmAsset, EvmChain, EvmExecution, EvmGasLimit, EvmMockProvider, EvmRpcProvider, Log,
 };
 
 // Solana
 #[cfg(all(feature = "solana", feature = "presets"))]
 pub use cross_vm_solana::chains::{SOLANA_DEVNET, SOLANA_LOCALNET, SOLANA_MAINNET, SOLANA_TESTNET};
 #[cfg(feature = "solana")]
-pub use cross_vm_solana::{SvmAsset, SvmChain, SvmMockProvider, SvmRpcProvider};
+pub use cross_vm_solana::{SvmAsset, SvmChain, SvmComputeBudget, SvmMockProvider, SvmRpcProvider};
 
 // Tron
 #[cfg(all(feature = "tron", feature = "presets"))]
@@ -57,5 +57,6 @@ pub use cross_vm_tron::chains::{
 };
 #[cfg(feature = "tron")]
 pub use cross_vm_tron::{
-    TronAddress, TronAsset, TronChain, TronExecution, TronMockProvider, TronRpcProvider,
+    TronAddress, TronAsset, TronChain, TronEnergyPolicy, TronExecution, TronLimit,
+    TronMockProvider, TronRpcProvider,
 };

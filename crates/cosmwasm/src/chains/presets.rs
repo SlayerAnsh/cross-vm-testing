@@ -5,6 +5,11 @@
 
 use super::info::CosmosChainInfo;
 
+/// The [`CosmosChainInfo::gas_adjustment`] every preset carries: 30% headroom over the node's
+/// simulated figure. Same value the config layer defaults `gas_adjustment` to, so a chain built
+/// from a preset and one built from a config file that omits the field behave identically.
+const DEFAULT_GAS_ADJUSTMENT: f64 = 1.3;
+
 /// Osmosis mainnet.
 pub const OSMOSIS: CosmosChainInfo = CosmosChainInfo {
     chain_id: "osmosis-1",
@@ -13,6 +18,7 @@ pub const OSMOSIS: CosmosChainInfo = CosmosChainInfo {
     native_denom: "uosmo",
     native_symbol: "OSMO",
     gas_price: 0.025,
+    gas_adjustment: DEFAULT_GAS_ADJUSTMENT,
     rpc_url: Some("https://rpc.osmosis.zone:443"),
 };
 
@@ -24,6 +30,7 @@ pub const OSMOSIS_TESTNET: CosmosChainInfo = CosmosChainInfo {
     native_denom: "uosmo",
     native_symbol: "OSMO",
     gas_price: 0.025,
+    gas_adjustment: DEFAULT_GAS_ADJUSTMENT,
     rpc_url: Some("https://rpc.testnet.osmosis.zone:443"),
 };
 
@@ -35,6 +42,7 @@ pub const JUNO: CosmosChainInfo = CosmosChainInfo {
     native_denom: "ujuno",
     native_symbol: "JUNO",
     gas_price: 0.075,
+    gas_adjustment: DEFAULT_GAS_ADJUSTMENT,
     rpc_url: Some("https://rpc-juno.itastakers.com:443"),
 };
 
@@ -46,6 +54,7 @@ pub const NEUTRON: CosmosChainInfo = CosmosChainInfo {
     native_denom: "untrn",
     native_symbol: "NTRN",
     gas_price: 0.0053,
+    gas_adjustment: DEFAULT_GAS_ADJUSTMENT,
     rpc_url: Some("https://rpc-kralum.neutron-1.neutron.org:443"),
 };
 
@@ -57,6 +66,7 @@ pub const COSMOS_HUB: CosmosChainInfo = CosmosChainInfo {
     native_denom: "uatom",
     native_symbol: "ATOM",
     gas_price: 0.025,
+    gas_adjustment: DEFAULT_GAS_ADJUSTMENT,
     rpc_url: Some("https://cosmos-rpc.publicnode.com:443"),
 };
 
@@ -68,5 +78,6 @@ pub const LOCAL: CosmosChainInfo = CosmosChainInfo {
     native_denom: "ustake",
     native_symbol: "STAKE",
     gas_price: 0.0,
+    gas_adjustment: DEFAULT_GAS_ADJUSTMENT,
     rpc_url: None,
 };

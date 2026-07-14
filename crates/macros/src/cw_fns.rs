@@ -28,26 +28,29 @@ pub fn expand_execute_fns(input: DeriveInput) -> syn::Result<TokenStream> {
         let (arg_decls, field_idents) = variant_fields(v)?;
         let ctor = variant_ctor(enum_ident, v, &field_idents);
 
+        // Every generated method is a mutating op, so each takes a trailing, required
+        // `CwGasLimit` (last, after `funds` on a `#[payable]` variant): the underlying
+        // `CwContract::execute` / `execute_with_funds` have no default to fall back on.
         if is_payable(v) {
             sigs.push(quote! {
-                async fn #method(&self, wallet: &str #(, #arg_decls)*, funds: &[::cosmwasm_std::Coin])
+                async fn #method(&self, wallet: &str #(, #arg_decls)*, funds: &[::cosmwasm_std::Coin], gas: ::cross_vm_cosmwasm::CwGasLimit)
                     -> Result<::cross_vm_cosmwasm::CwExecution, ::cross_vm_cosmwasm::CwError>;
             });
             methods.push(quote! {
-                async fn #method(&self, wallet: &str #(, #arg_decls)*, funds: &[::cosmwasm_std::Coin])
+                async fn #method(&self, wallet: &str #(, #arg_decls)*, funds: &[::cosmwasm_std::Coin], gas: ::cross_vm_cosmwasm::CwGasLimit)
                     -> Result<::cross_vm_cosmwasm::CwExecution, ::cross_vm_cosmwasm::CwError> {
-                    self.execute_with_funds(#ctor, wallet, funds).await
+                    self.execute_with_funds(#ctor, wallet, funds, gas).await
                 }
             });
         } else {
             sigs.push(quote! {
-                async fn #method(&self, wallet: &str #(, #arg_decls)*)
+                async fn #method(&self, wallet: &str #(, #arg_decls)*, gas: ::cross_vm_cosmwasm::CwGasLimit)
                     -> Result<::cross_vm_cosmwasm::CwExecution, ::cross_vm_cosmwasm::CwError>;
             });
             methods.push(quote! {
-                async fn #method(&self, wallet: &str #(, #arg_decls)*)
+                async fn #method(&self, wallet: &str #(, #arg_decls)*, gas: ::cross_vm_cosmwasm::CwGasLimit)
                     -> Result<::cross_vm_cosmwasm::CwExecution, ::cross_vm_cosmwasm::CwError> {
-                    self.execute(#ctor, wallet).await
+                    self.execute(#ctor, wallet, gas).await
                 }
             });
         }
@@ -233,6 +236,9 @@ mod tests {
         // Non-payable: no funds and the plain execute path.
         assert!(!out.contains("funds"));
         assert!(!out.contains("execute_with_funds"));
+        // Mutating: the gas limit is required, never defaulted.
+        assert!(out.contains("gas : :: cross_vm_cosmwasm :: CwGasLimit"));
+        assert!(out.contains("self . execute (ExecuteMsg :: Increment { } , wallet , gas)"));
     }
 
     #[test]
@@ -249,6 +255,10 @@ mod tests {
         assert!(out.contains("funds"));
         assert!(out.contains("execute_with_funds"));
         assert!(out.contains("Coin"));
+        // The gas limit trails `funds`, and both reach the funded execute path.
+        assert!(out.contains(
+            "self . execute_with_funds (ExecuteMsg :: Deposit { amount } , wallet , funds , gas)"
+        ));
     }
 
     #[test]

@@ -43,7 +43,7 @@ async fn main() {
     let ix = transfer(&alice, &bob, 1_000_000_000); // 1 SOL
     env.solana("sol")
         .unwrap()
-        .send_transaction(vec![ix], TEST_WALLETS.alice)
+        .send_transaction(vec![ix], TEST_WALLETS.alice, SvmComputeBudget::Estimated)
         .await
         .expect("transfer");
 

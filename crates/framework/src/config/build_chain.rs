@@ -7,7 +7,10 @@
 //! per-kind constants independent of any profile: `spec_id` (`cancun`), `commitment`
 //! (`finalized`), and `gas_price` (`0.025`). A spec whose `resolve_profile` already parsed a
 //! `spec_id`/`commitment` string, or set a `gas_price`, keeps that value; `build_chain` only
-//! fills the gap when the field is `None`.
+//! fills the gap when the field is `None`. `gas_adjustment` is the exception that proves the
+//! rule: its default is the same for every kind, so it needs no per-kind arm and `resolve_chains`
+//! resolves it once (see `DEFAULT_GAS_ADJUSTMENT` there); `build_chain` receives it already
+//! resolved, as a plain `f64`.
 //!
 //! **String interning.** The per-VM `*ChainInfo` structs store `&'static str` fields (required
 //! for their `const` presets), but `ChainSpecData` holds owned `String`s sourced from config.
@@ -151,6 +154,7 @@ fn build_cosmwasm(
         native_denom: intern(native_denom),
         native_symbol: intern(&spec.native_symbol),
         gas_price,
+        gas_adjustment: spec.gas_adjustment,
         rpc_url: spec.rpc_url.as_deref().map(intern),
     };
     Ok(match spec.target {
@@ -183,6 +187,7 @@ fn build_evm(spec: &ChainSpecData, wallets: Rc<WalletFactory>) -> Result<AnyChai
         name: intern(&spec.name),
         spec_id,
         native_symbol: intern(&spec.native_symbol),
+        gas_adjustment: spec.gas_adjustment,
         rpc_url: spec.rpc_url.as_deref().map(intern),
     };
     Ok(match spec.target {
@@ -219,6 +224,7 @@ fn build_svm(spec: &ChainSpecData, wallets: Rc<WalletFactory>) -> Result<AnyChai
         rpc_url: spec.rpc_url.as_deref().map(intern),
         ws_url: spec.ws_url.as_deref().map(intern),
         commitment,
+        gas_adjustment: spec.gas_adjustment,
     };
     Ok(match spec.target {
         Target::Mock => info.mock(wallets).into(),
@@ -247,6 +253,7 @@ fn build_tron(spec: &ChainSpecData, wallets: Rc<WalletFactory>) -> Result<AnyCha
         name: intern(&spec.name),
         spec_id,
         native_symbol: intern(&spec.native_symbol),
+        gas_adjustment: spec.gas_adjustment,
         rpc_url: spec.rpc_url.as_deref().map(intern),
     };
     Ok(match spec.target {
@@ -281,6 +288,7 @@ mod tests {
             native_symbol: "SYM".to_string(),
             rpc_url: Some("http://localhost:8545".to_string()),
             target: Target::Mock,
+            gas_adjustment: 1.3,
             params: toml::Table::new(),
             bech32_prefix: Some("osmo".to_string()),
             native_denom: Some("uosmo".to_string()),
@@ -357,6 +365,51 @@ mod tests {
         spec.target = Target::Rpc;
         let chain = build_chain(&spec, wallets()).expect("build_chain");
         assert!(matches!(chain, AnyChain::Tron(_)));
+    }
+
+    /// The resolved `gas_adjustment` must land on every VM's `*ChainInfo`, not just build: a
+    /// dropped field here would silently run every `Estimated` op under the preset default.
+    #[test]
+    fn build_threads_gas_adjustment_into_chain_info() {
+        use cross_vm_core::ChainProvider;
+
+        #[cfg(feature = "cw")]
+        {
+            let mut spec = base_spec(ChainKind::CosmWasm);
+            spec.gas_adjustment = 1.7;
+            let AnyChain::CosmWasm(chain) = build_chain(&spec, wallets()).expect("build_chain")
+            else {
+                panic!("expected a CosmWasm chain");
+            };
+            assert_eq!(chain.chain_info().gas_adjustment, 1.7);
+        }
+        #[cfg(feature = "evm")]
+        {
+            let mut spec = base_spec(ChainKind::Evm);
+            spec.gas_adjustment = 1.7;
+            let AnyChain::Evm(chain) = build_chain(&spec, wallets()).expect("build_chain") else {
+                panic!("expected an EVM chain");
+            };
+            assert_eq!(chain.chain_info().gas_adjustment, 1.7);
+        }
+        #[cfg(feature = "solana")]
+        {
+            let mut spec = base_spec(ChainKind::Svm);
+            spec.gas_adjustment = 1.7;
+            let AnyChain::Svm(chain) = build_chain(&spec, wallets()).expect("build_chain") else {
+                panic!("expected a Solana chain");
+            };
+            assert_eq!(chain.chain_info().gas_adjustment, 1.7);
+        }
+        #[cfg(feature = "tron")]
+        {
+            let mut spec = base_spec(ChainKind::Tron);
+            spec.gas_adjustment = 1.7;
+            let AnyChain::Tron(chain) = build_chain(&spec, wallets()).expect("build_chain") else {
+                panic!("expected a Tron chain");
+            };
+            assert_eq!(chain.chain_info().gas_adjustment, 1.7);
+        }
     }
 
     #[cfg(feature = "evm")]

@@ -153,6 +153,59 @@ async fn transfer_funds_moves_native_funds_on_evm() {
     assert_eq!(chain.balance(&bob).await.unwrap(), U256::from(400u64));
 }
 
+#[cfg(feature = "solana")]
+#[tokio::test]
+async fn transfer_funds_moves_native_funds_on_solana() {
+    let mut chain = SvmChain::from(SOLANA_DEVNET.mock(test_wallets()));
+    let denom = SOLANA_DEVNET.native_symbol;
+    let alice = chain.wallet_address(TEST_WALLETS.alice).await.unwrap();
+    let bob = chain.wallet_address(TEST_WALLETS.bob).await.unwrap();
+    chain
+        .set_balance(&alice, denom, 5_000_000_000)
+        .await
+        .unwrap();
+
+    // This arm resolves `SvmComputeBudget::Estimated`, so the transfer also exercises the
+    // simulate-then-cap path on the mock.
+    let any = AnyChain::from(chain.clone());
+    let hash = any
+        .transfer_funds(
+            &Account::from(bob),
+            denom,
+            1_000_000_000,
+            TEST_WALLETS.alice,
+        )
+        .await
+        .expect("transfer");
+
+    assert!(!hash.is_empty(), "transfer returned no tx hash");
+    assert_eq!(chain.balance(&bob).await.unwrap(), 1_000_000_000);
+    // The sender also pays the signature fee, so its debit is at least the amount.
+    assert!(chain.balance(&alice).await.unwrap() <= 4_000_000_000);
+}
+
+#[cfg(feature = "tron")]
+#[tokio::test]
+async fn transfer_funds_moves_native_funds_on_tron() {
+    let mut chain = TronChain::from(TRON_NILE.mock(test_wallets()));
+    let denom = TRON_NILE.native_symbol;
+    let alice = chain.wallet_address(TEST_WALLETS.alice).await.unwrap();
+    let bob = chain.wallet_address(TEST_WALLETS.bob).await.unwrap();
+    chain.set_balance(&alice, denom, 1_000).await.unwrap();
+
+    // Tron's `transfer_funds` takes no limit (a `TransferContract` burns only bandwidth), so
+    // this arm forwards nothing and the balances move exactly.
+    let any = AnyChain::from(chain.clone());
+    let hash = any
+        .transfer_funds(&Account::from(bob), denom, 400, TEST_WALLETS.alice)
+        .await
+        .expect("transfer");
+
+    assert!(!hash.is_empty(), "transfer returned no tx hash");
+    assert_eq!(chain.balance(&alice).await.unwrap(), 600);
+    assert_eq!(chain.balance(&bob).await.unwrap(), 400);
+}
+
 #[cfg(all(feature = "cw", feature = "evm"))]
 #[tokio::test]
 async fn transfer_funds_rejects_a_recipient_from_another_vm() {

@@ -71,6 +71,20 @@ fn bad_missing_cosmwasm_field_errors() {
 }
 
 #[test]
+fn bad_gas_adjustment_below_one_errors() {
+    let err =
+        cross_vm_config::from_toml_str(fixture!("bad_gas_adjustment.toml"), &no_vars).unwrap_err();
+    assert!(matches!(err, ConfigError::Domain(_)), "unexpected: {err}");
+    let message = err.to_string();
+    assert!(
+        message.contains("chain `eth`") && message.contains("gas_adjustment"),
+        "unexpected error: {err}"
+    );
+    // The message must say what the bound is, so the user can self-correct without reading source.
+    assert!(message.contains(">= 1.0"), "unexpected error: {err}");
+}
+
+#[test]
 fn bad_unknown_selection_label_errors() {
     let err =
         cross_vm_config::from_toml_str(fixture!("bad_unknown_selection_label.toml"), &no_vars)
