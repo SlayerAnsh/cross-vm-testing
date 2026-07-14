@@ -59,6 +59,11 @@ impl From<Vec<u8>> for CwCodeSource {
 /// the live RPC backend, where the node reports `gas_used` in the tx result and the signed fee is
 /// known, and `None` on the in-process mock.
 ///
+/// The `estimate_*` methods ([`crate::CwChain`] and the RPC provider) report the same type as a
+/// *forecast*, so an estimate and the receipt it forecasts compare directly: `used` is the node's
+/// simulated figure and `fee` is what a broadcast under [`CwGasLimit::Estimated`] would declare
+/// and pay (the adjusted limit priced at the chain's `gas_price`).
+///
 /// `None` means *unmeasured*, not *free*. `cw-multi-test` has no gas meter at all (its response is
 /// `{events, data}`, and [`crate::CosmosChainInfo::gas_price`] is documented as metadata the mock
 /// does not charge), so the mock has no figure to report. Reporting `0` there would be

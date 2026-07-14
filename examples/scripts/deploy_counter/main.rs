@@ -35,8 +35,12 @@ define_wallet_roster! {
 /// `.env` lives at the workspace root; the crate manifest is `examples/scripts`.
 const ENV_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");
 
-/// Render what an operation cost. `Cost` renders itself in the unit its backend metered, so a
-/// chain-agnostic caller prints a figure without knowing which VM produced it.
+/// Render what an operation cost, or what it is forecast to cost. `Cost` renders itself in the unit
+/// its backend metered, so a chain-agnostic caller prints a figure without knowing which VM
+/// produced it.
+///
+/// A forecast and a receipt are the same type on every VM here, so one renderer covers both and the
+/// two print side by side without either being reshaped to meet the other.
 ///
 /// `None` means the backend does not meter, never that the operation was free. Both chains this
 /// script targets are live RPC, so both report a cost; the mock backends are the ones that do not.
@@ -44,19 +48,6 @@ pub(crate) fn describe(cost: Option<Cost>) -> String {
     cost.map_or_else(
         || "unmetered by this backend".to_string(),
         |cost| cost.to_string(),
-    )
-}
-
-/// Render a CosmWasm gas forecast, which is bare gas units rather than a full [`Cost`]: a
-/// simulation reports what the transaction would meter, not what it would be charged (the fee
-/// follows from the limit the forecast resolves into, and does not exist yet).
-///
-/// `None` carries the same meaning as in [`describe`]: the backend cannot simulate (the mock has
-/// no gas meter), not that the operation is free.
-pub(crate) fn describe_units(units: Option<u64>) -> String {
-    units.map_or_else(
-        || "unmetered by this backend".to_string(),
-        |units| format!("{units} gas"),
     )
 }
 

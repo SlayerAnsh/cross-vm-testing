@@ -21,7 +21,7 @@ use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
 use crate::provider::{
-    CwCodeSource, CwExecution, CwGasLimit, CwInstantiate, CwMockProvider, CwRpcProvider,
+    CwCodeSource, CwExecution, CwGas, CwGasLimit, CwInstantiate, CwMockProvider, CwRpcProvider,
     CwStoreCode,
 };
 use crate::wallet::CosmosSigner;
@@ -269,11 +269,15 @@ impl CwChain {
 
     // ----- Estimation: gas forecasts without broadcasting. -----
     //
-    // Every `estimate_*` mirrors its mutating sibling's shape. The RPC backend simulates the
-    // exact message it would broadcast (`/cosmos.tx.v1beta1.Service/Simulate`) and reports the
-    // node's raw `gas_used`; the mock reports `None` because `cw-multi-test` has no gas meter,
-    // so there is nothing to simulate against and no honest figure to fabricate (the same rule
-    // as the `gas` field on the op results; see `NO_GAS_METER` on the mock provider).
+    // Every `estimate_*` mirrors its mutating sibling's shape and reports the same type a
+    // receipt does, `Option<CwGas>`, so a forecast and the receipt it forecasts are directly
+    // comparable. The RPC backend simulates the exact message it would broadcast
+    // (`/cosmos.tx.v1beta1.Service/Simulate`): `used` is the node's raw simulated figure and
+    // `fee` is what a broadcast under `CwGasLimit::Estimated` would actually declare and pay
+    // (the adjusted limit priced at the chain's `gas_price`; see `estimated_gas` in the RPC
+    // provider). The mock reports `None` because `cw-multi-test` has no gas meter, so there is
+    // nothing to simulate against and no honest figure to fabricate (the same rule as the `gas`
+    // field on the op results; see `NO_GAS_METER` on the mock provider).
     //
     // The RPC arms hold the per-account broadcast lock: the simulated tx carries the account's
     // current on-chain sequence, so racing an in-flight broadcast from the same account could
@@ -285,13 +289,13 @@ impl CwChain {
     // provider, never these methods. Calling one of these from inside a write path would re-enter
     // a lock the same task already holds, which is a deadlock, not a wait.
 
-    /// Estimate the gas [`Self::store_code`] would consume, without broadcasting anything.
-    /// `Some(gas_units)` on the RPC backend, `None` on the mock (which cannot meter).
+    /// Estimate what [`Self::store_code`] would cost, without broadcasting anything.
+    /// `Some(CwGas)` on the RPC backend, `None` on the mock (which cannot meter).
     pub async fn estimate_store_code(
         &self,
         code: impl Into<CwCodeSource>,
         wallet: WalletLabel<'_>,
-    ) -> Result<Option<u64>, CwError> {
+    ) -> Result<Option<CwGas>, CwError> {
         match self {
             CwChain::Mock(_) => Ok(None),
             CwChain::Rpc(p) => {
@@ -309,8 +313,8 @@ impl CwChain {
         }
     }
 
-    /// Estimate the gas [`Self::instantiate`] would consume, without broadcasting anything.
-    /// `Some(gas_units)` on the RPC backend, `None` on the mock (which cannot meter).
+    /// Estimate what [`Self::instantiate`] would cost, without broadcasting anything.
+    /// `Some(CwGas)` on the RPC backend, `None` on the mock (which cannot meter).
     pub async fn estimate_instantiate<Init: CwSerde>(
         &self,
         code_id: u64,
@@ -318,7 +322,7 @@ impl CwChain {
         wallet: WalletLabel<'_>,
         funds: &[Coin],
         label: &str,
-    ) -> Result<Option<u64>, CwError> {
+    ) -> Result<Option<CwGas>, CwError> {
         match self {
             CwChain::Mock(_) => Ok(None),
             CwChain::Rpc(p) => {
@@ -332,15 +336,15 @@ impl CwChain {
         }
     }
 
-    /// Estimate the gas [`Self::execute_contract`] would consume, without broadcasting
-    /// anything. `Some(gas_units)` on the RPC backend, `None` on the mock (which cannot meter).
+    /// Estimate what [`Self::execute_contract`] would cost, without broadcasting anything.
+    /// `Some(CwGas)` on the RPC backend, `None` on the mock (which cannot meter).
     pub async fn estimate_execute_contract<Exec: CwSerde>(
         &self,
         addr: &Addr,
         msg: Exec,
         wallet: WalletLabel<'_>,
         funds: &[Coin],
-    ) -> Result<Option<u64>, CwError> {
+    ) -> Result<Option<CwGas>, CwError> {
         match self {
             CwChain::Mock(_) => Ok(None),
             CwChain::Rpc(p) => {
@@ -354,15 +358,15 @@ impl CwChain {
         }
     }
 
-    /// Estimate the gas [`Self::transfer_funds`] would consume, without broadcasting anything.
-    /// `Some(gas_units)` on the RPC backend, `None` on the mock (which cannot meter).
+    /// Estimate what [`Self::transfer_funds`] would cost, without broadcasting anything.
+    /// `Some(CwGas)` on the RPC backend, `None` on the mock (which cannot meter).
     pub async fn estimate_transfer_funds(
         &self,
         to: &Addr,
         denom: &str,
         amount: u128,
         wallet: WalletLabel<'_>,
-    ) -> Result<Option<u64>, CwError> {
+    ) -> Result<Option<CwGas>, CwError> {
         match self {
             CwChain::Mock(_) => Ok(None),
             CwChain::Rpc(p) => {

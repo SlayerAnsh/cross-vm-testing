@@ -3,7 +3,9 @@
 //! Both run on an `ExecuteMsg` / `QueryMsg` enum in the contract crate and generate a local
 //! `pub trait <Name>Fns` plus an `impl` of it for `::cross_vm_cosmwasm::CwContract<I>` where
 //! `I: CwInterface<ExecuteMsg = ThisEnum>` (or `QueryMsg = ThisEnum`), one method
-//! per variant. Generated code uses absolute paths (`::cross_vm_cosmwasm::*`,
+//! per variant. Each execute method also gets an `estimate_<fn>` sibling that forecasts the op
+//! (same args minus the gas limit, returning `Option<CwGas>`) instead of broadcasting it.
+//! Generated code uses absolute paths (`::cross_vm_cosmwasm::*`,
 //! `::cosmwasm_std::Coin`) so the contract crate needs no imports beyond the deps it gains under
 //! its `cross-vm` feature.
 //!
@@ -25,32 +27,49 @@ pub fn expand_execute_fns(input: DeriveInput) -> syn::Result<TokenStream> {
     let mut methods = Vec::new();
     for v in &enum_data(&input)?.variants {
         let method = snake_ident(&v.ident);
+        let estimator = format_ident!("estimate_{}", method);
         let (arg_decls, field_idents) = variant_fields(v)?;
         let ctor = variant_ctor(enum_ident, v, &field_idents);
 
         // Every generated method is a mutating op, so each takes a trailing, required
         // `CwGasLimit` (last, after `funds` on a `#[payable]` variant): the underlying
         // `CwContract::execute` / `execute_with_funds` have no default to fall back on.
+        //
+        // Each also gets an `estimate_<fn>` sibling: same args minus the gas limit (a forecast
+        // takes no limit; it is what you consult to pick one), returning the `Option<CwGas>` the
+        // handle's `estimate_execute` / `estimate_execute_with_funds` report.
         if is_payable(v) {
             sigs.push(quote! {
                 async fn #method(&self, wallet: &str #(, #arg_decls)*, funds: &[::cosmwasm_std::Coin], gas: ::cross_vm_cosmwasm::CwGasLimit)
                     -> Result<::cross_vm_cosmwasm::CwExecution, ::cross_vm_cosmwasm::CwError>;
+                async fn #estimator(&self, wallet: &str #(, #arg_decls)*, funds: &[::cosmwasm_std::Coin])
+                    -> Result<Option<::cross_vm_cosmwasm::CwGas>, ::cross_vm_cosmwasm::CwError>;
             });
             methods.push(quote! {
                 async fn #method(&self, wallet: &str #(, #arg_decls)*, funds: &[::cosmwasm_std::Coin], gas: ::cross_vm_cosmwasm::CwGasLimit)
                     -> Result<::cross_vm_cosmwasm::CwExecution, ::cross_vm_cosmwasm::CwError> {
                     self.execute_with_funds(#ctor, wallet, funds, gas).await
                 }
+                async fn #estimator(&self, wallet: &str #(, #arg_decls)*, funds: &[::cosmwasm_std::Coin])
+                    -> Result<Option<::cross_vm_cosmwasm::CwGas>, ::cross_vm_cosmwasm::CwError> {
+                    self.estimate_execute_with_funds(#ctor, wallet, funds).await
+                }
             });
         } else {
             sigs.push(quote! {
                 async fn #method(&self, wallet: &str #(, #arg_decls)*, gas: ::cross_vm_cosmwasm::CwGasLimit)
                     -> Result<::cross_vm_cosmwasm::CwExecution, ::cross_vm_cosmwasm::CwError>;
+                async fn #estimator(&self, wallet: &str #(, #arg_decls)*)
+                    -> Result<Option<::cross_vm_cosmwasm::CwGas>, ::cross_vm_cosmwasm::CwError>;
             });
             methods.push(quote! {
                 async fn #method(&self, wallet: &str #(, #arg_decls)*, gas: ::cross_vm_cosmwasm::CwGasLimit)
                     -> Result<::cross_vm_cosmwasm::CwExecution, ::cross_vm_cosmwasm::CwError> {
                     self.execute(#ctor, wallet, gas).await
+                }
+                async fn #estimator(&self, wallet: &str #(, #arg_decls)*)
+                    -> Result<Option<::cross_vm_cosmwasm::CwGas>, ::cross_vm_cosmwasm::CwError> {
+                    self.estimate_execute(#ctor, wallet).await
                 }
             });
         }
@@ -258,6 +277,34 @@ mod tests {
         // The gas limit trails `funds`, and both reach the funded execute path.
         assert!(out.contains(
             "self . execute_with_funds (ExecuteMsg :: Deposit { amount } , wallet , funds , gas)"
+        ));
+    }
+
+    #[test]
+    fn every_execute_fn_gets_an_estimator_without_a_gas_limit() {
+        let out = exec("enum ExecuteMsg { Increment {}, Deposit { amount: Uint128 } }").unwrap();
+        // Same args as the op it forecasts, minus the trailing gas limit, returning the
+        // receipt-shaped forecast.
+        assert!(out.contains(
+            "async fn estimate_increment (& self , wallet : & str) -> Result < Option < :: \
+             cross_vm_cosmwasm :: CwGas > , :: cross_vm_cosmwasm :: CwError >"
+        ));
+        assert!(out.contains("self . estimate_execute (ExecuteMsg :: Increment { } , wallet)"));
+        // Variant fields carry over unchanged.
+        assert!(out.contains("self . estimate_execute (ExecuteMsg :: Deposit { amount } , wallet)"));
+    }
+
+    #[test]
+    fn payable_estimator_takes_funds_but_no_gas_limit() {
+        let out = exec("enum ExecuteMsg { #[payable] Deposit { amount: Uint128 } }").unwrap();
+        assert!(out.contains(
+            "async fn estimate_deposit (& self , wallet : & str , amount : Uint128 , funds : & \
+             [:: cosmwasm_std :: Coin]) -> Result < Option < :: cross_vm_cosmwasm :: CwGas > , \
+             :: cross_vm_cosmwasm :: CwError >"
+        ));
+        assert!(out.contains(
+            "self . estimate_execute_with_funds (ExecuteMsg :: Deposit { amount } , wallet , \
+             funds)"
         ));
     }
 

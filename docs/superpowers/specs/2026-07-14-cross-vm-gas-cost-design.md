@@ -2,6 +2,8 @@
 
 Date: 2026-07-14
 Status: shipped, all three phases. Phase 1 landed in PR #37; phases 2 and 3 landed together.
+A follow-up on PR #38 (still open at time of writing) tightened CosmWasm's estimator return type;
+see the Phase 2 addendum below.
 
 This document has been reconciled with what was actually built. Phase 3's Tron design and its list of
 limit-taking ops were wrong as originally written and were rejected during implementation; the
@@ -95,10 +97,25 @@ forecast and a receipt are directly comparable in the VM's own terms:
 
 | Chain | Methods | Returns |
 | --- | --- | --- |
-| `CwChain` | `estimate_store_code`, `estimate_instantiate`, `estimate_execute_contract`, `estimate_transfer_funds` | `Option<u64>` gas |
+| `CwChain` | `estimate_store_code`, `estimate_instantiate`, `estimate_execute_contract`, `estimate_transfer_funds` | `Option<CwGas>` |
 | `EvmChain` | `estimate_deploy_create`, `estimate_call`, `estimate_call_value` | `EvmGas` |
 | `TronChain` | `estimate_deploy_create`, `estimate_call`, `estimate_call_value` | `TronResources` |
 | `SvmChain` | `estimate_transaction` | `TransactionMetadata` |
+
+**Addendum, post-shipment: CosmWasm's estimator return type.** This phase originally shipped with
+`CwChain`'s estimators returning `Option<u64>`, a bare gas figure with no `Cost` conversion, while
+`EvmGas` and `TronResources` already converted via `From<_> for Cost`. That was a genuine asymmetry
+between CosmWasm and the other two VMs, not a deliberate design choice, and it is now fixed as a
+follow-up on PR #38: the estimators return `Option<CwGas>`, the exact type an executed op's receipt
+already carries (`CwGas { used: u64, fee: u128 }`), so a CosmWasm forecast is directly comparable to
+a CosmWasm receipt and, through the existing `From<CwGas> for Cost`, convertible to the cross VM
+`Cost` on the same footing as `EvmGas` and `TronResources`. The estimate's `fee` is
+`ceil(ceil(simulated * gas_adjustment) * gas_price)`, what a broadcast under `CwGasLimit::Estimated`
+would actually declare and pay, not `simulated * gas_price`. Two more surfaces gained estimation in
+the same follow-up: the typed `CwContract` handle, which previously could not estimate at all (only
+`CwChain` could), gained `estimate_store_code` / `estimate_instantiate` / `estimate_execute` /
+`estimate_execute_with_funds`; and the `CwExecuteFns` derive now emits an `estimate_<fn>` sibling
+beside every generated execute method (same args minus the gas limit).
 
 Primitives per backend:
 

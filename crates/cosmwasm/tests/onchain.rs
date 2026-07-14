@@ -28,18 +28,33 @@ fn assert_metered(op: &str, gas: Option<CwGas>) {
 }
 
 /// A live node can simulate any op it can broadcast, so each RPC estimate must be present
-/// (unlike the mock's `None`) and within a sane band of the gas the op then actually meters.
-/// Simulation runs against the latest committed state, so the two figures are never far apart;
+/// (unlike the mock's `None`) and within a sane band of the receipt it forecasts: `used`
+/// against the gas the op then actually meters, `fee` against the fee it then actually pays.
+/// Simulation runs against the latest committed state, so the figures are never far apart;
 /// a divergence beyond 2x means the estimator is wired to the wrong quantity or the wrong op.
-fn assert_estimated(op: &str, estimated: Option<u64>, metered: u64) {
+fn assert_estimated(op: &str, estimated: Option<CwGas>, metered: CwGas) {
     let est =
         estimated.unwrap_or_else(|| panic!("rpc {op} estimate must report a figure, got None"));
-    assert!(est > 0, "rpc {op} estimated zero gas");
+    assert!(est.used > 0, "rpc {op} estimated zero gas");
     assert!(
-        (metered / 2..=metered.saturating_mul(2)).contains(&est),
-        "rpc {op} estimate {est} implausibly far from metered {metered}"
+        (metered.used / 2..=metered.used.saturating_mul(2)).contains(&est.used),
+        "rpc {op} estimate {} implausibly far from metered {}",
+        est.used,
+        metered.used
     );
-    println!("{op} estimate: {est} gas (metered {metered})");
+    // The estimated fee prices the *adjusted* limit, exactly what a broadcast under `Estimated`
+    // declares and pays, so it must sit in the same band as the fee the receipt reports.
+    assert!(est.fee > 0, "rpc {op} estimated a zero fee");
+    assert!(
+        (metered.fee / 2..=metered.fee.saturating_mul(2)).contains(&est.fee),
+        "rpc {op} estimated fee {} implausibly far from paid fee {}",
+        est.fee,
+        metered.fee
+    );
+    println!(
+        "{op} estimate: {} gas, fee {} (metered {} gas, fee {})",
+        est.used, est.fee, metered.used, metered.fee
+    );
 }
 
 define_wallet_roster! {
@@ -95,7 +110,7 @@ async fn live_counter_on_osmosis_testnet() {
         .expect("store_code");
     assert!(!stored.tx_hash.is_empty(), "tx hash should be non-empty");
     assert_metered("store_code", stored.gas);
-    assert_estimated("store_code", est_store, stored.gas.expect("metered").used);
+    assert_estimated("store_code", est_store, stored.gas.expect("metered"));
     println!(
         "stored code id:     {} (tx {})",
         stored.code_id, stored.tx_hash
@@ -127,11 +142,7 @@ async fn live_counter_on_osmosis_testnet() {
         "tx hash should be non-empty"
     );
     assert_metered("instantiate", instantiated.gas);
-    assert_estimated(
-        "instantiate",
-        est_init,
-        instantiated.gas.expect("metered").used,
-    );
+    assert_estimated("instantiate", est_init, instantiated.gas.expect("metered"));
     let addr = instantiated.address;
     println!("instantiated at:    {addr} (tx {})", instantiated.tx_hash);
     let resp: CountResponse = chain
@@ -155,11 +166,7 @@ async fn live_counter_on_osmosis_testnet() {
         .await
         .expect("increment");
     assert_metered("execute_contract", exec.gas);
-    assert_estimated(
-        "execute_contract",
-        est_exec,
-        exec.gas.expect("metered").used,
-    );
+    assert_estimated("execute_contract", est_exec, exec.gas.expect("metered"));
     let tx_hash = exec.tx_hash;
     assert!(!tx_hash.is_empty(), "tx hash should be non-empty");
     println!("increment tx hash: {tx_hash}");
@@ -240,12 +247,14 @@ async fn live_transfer_funds_on_osmosis_testnet() {
         .await
         .expect("estimate transfer")
         .expect("rpc transfer estimate must report a figure, got None");
-    assert!(est > 0, "rpc transfer estimated zero gas");
+    assert!(est.used > 0, "rpc transfer estimated zero gas");
+    assert!(est.fee > 0, "rpc transfer estimated a zero fee");
     assert!(
-        est <= TRANSFER_LIMIT,
-        "rpc transfer estimate {est} exceeds the {TRANSFER_LIMIT} gas limit this send declares"
+        est.used <= TRANSFER_LIMIT,
+        "rpc transfer estimate {} exceeds the {TRANSFER_LIMIT} gas limit this send declares",
+        est.used
     );
-    println!("transfer estimate: {est} gas");
+    println!("transfer estimate: {} gas, fee {}", est.used, est.fee);
 
     let before = chain.balance(&to).await.expect("read recipient balance");
     let tx_hash = chain

@@ -6,8 +6,8 @@
 //! wallet's secp256k1 key (account number + sequence + `SignDoc` + `broadcast_tx_commit`) and
 //! broadcast; only `set_balance` stays [`CwError::Unimplemented`] (a live chain cannot mint).
 //! Each write path has an `estimate_*` sibling that simulates the same message against the
-//! node's `/cosmos.tx.v1beta1.Service/Simulate` endpoint and reports the gas it would consume,
-//! without broadcasting anything.
+//! node's `/cosmos.tx.v1beta1.Service/Simulate` endpoint and reports what the op would cost
+//! ([`CwGas`]), without broadcasting anything.
 //!
 //! Every write path takes a required [`CwGasLimit`]: [`CwGasLimit::Exact`] is declared verbatim,
 //! [`CwGasLimit::Estimated`] simulates the very message about to be broadcast and scales the
@@ -314,20 +314,29 @@ impl CwRpcProvider {
         }
     }
 
-    /// Estimate the gas that uploading `wasm` would consume, by simulating the `MsgStoreCode`
-    /// against the node without broadcasting it. See [`Self::simulate`].
+    /// What a simulated op would cost, as a [`CwGas`] forecast comparable to a receipt.
+    ///
+    /// See [`estimated_gas`]; this just supplies the chain's `gas_adjustment` and `gas_price`.
+    fn forecast(&self, simulated: u64) -> CwGas {
+        estimated_gas(simulated, self.info.gas_adjustment, self.info.gas_price)
+    }
+
+    /// Estimate what uploading `wasm` would cost, by simulating the `MsgStoreCode` against the
+    /// node without broadcasting it. See [`Self::simulate`] and [`estimated_gas`].
     pub async fn estimate_store_code(
         &self,
         wasm: Vec<u8>,
         signer: &CosmosSigner,
-    ) -> Result<u64, CwError> {
-        self.simulate(vec![store_code_msg(wasm, signer)?], signer)
-            .await
+    ) -> Result<CwGas, CwError> {
+        let simulated = self
+            .simulate(vec![store_code_msg(wasm, signer)?], signer)
+            .await?;
+        Ok(self.forecast(simulated))
     }
 
-    /// Estimate the gas that instantiating `code_id` with `init` would consume, by simulating
-    /// the `MsgInstantiateContract` against the node without broadcasting it. See
-    /// [`Self::simulate`].
+    /// Estimate what instantiating `code_id` with `init` would cost, by simulating the
+    /// `MsgInstantiateContract` against the node without broadcasting it. See
+    /// [`Self::simulate`] and [`estimated_gas`].
     pub async fn estimate_instantiate<Init: CwSerde>(
         &self,
         code_id: u64,
@@ -335,39 +344,46 @@ impl CwRpcProvider {
         signer: &CosmosSigner,
         funds: &[Coin],
         label: &str,
-    ) -> Result<u64, CwError> {
-        self.simulate(
-            vec![instantiate_msg(code_id, &init, signer, funds, label)?],
-            signer,
-        )
-        .await
+    ) -> Result<CwGas, CwError> {
+        let simulated = self
+            .simulate(
+                vec![instantiate_msg(code_id, &init, signer, funds, label)?],
+                signer,
+            )
+            .await?;
+        Ok(self.forecast(simulated))
     }
 
-    /// Estimate the gas that executing `msg` against `addr` would consume, by simulating the
-    /// `MsgExecuteContract` against the node without broadcasting it. See [`Self::simulate`].
+    /// Estimate what executing `msg` against `addr` would cost, by simulating the
+    /// `MsgExecuteContract` against the node without broadcasting it. See [`Self::simulate`]
+    /// and [`estimated_gas`].
     pub async fn estimate_execute_contract<Exec: CwSerde>(
         &self,
         addr: &Addr,
         msg: Exec,
         signer: &CosmosSigner,
         funds: &[Coin],
-    ) -> Result<u64, CwError> {
-        self.simulate(vec![execute_msg(addr, &msg, signer, funds)?], signer)
-            .await
+    ) -> Result<CwGas, CwError> {
+        let simulated = self
+            .simulate(vec![execute_msg(addr, &msg, signer, funds)?], signer)
+            .await?;
+        Ok(self.forecast(simulated))
     }
 
-    /// Estimate the gas that a bank send of `amount` `denom` to `to` would consume, by
-    /// simulating the `MsgSend` against the node without broadcasting it. See
-    /// [`Self::simulate`].
+    /// Estimate what a bank send of `amount` `denom` to `to` would cost, by simulating the
+    /// `MsgSend` against the node without broadcasting it. See [`Self::simulate`] and
+    /// [`estimated_gas`].
     pub async fn estimate_transfer_funds(
         &self,
         to: &Addr,
         denom: &str,
         amount: u128,
         signer: &CosmosSigner,
-    ) -> Result<u64, CwError> {
-        self.simulate(vec![transfer_msg(to, denom, amount, signer)?], signer)
-            .await
+    ) -> Result<CwGas, CwError> {
+        let simulated = self
+            .simulate(vec![transfer_msg(to, denom, amount, signer)?], signer)
+            .await?;
+        Ok(self.forecast(simulated))
     }
 
     /// Upload raw wasm bytecode to the chain under `gas`, signed by `signer`, and return its code
@@ -721,6 +737,20 @@ fn fee_for(gas_limit: u64, gas_price: f64) -> u128 {
     (gas_limit as f64 * gas_price).ceil() as u128
 }
 
+/// The [`CwGas`] an estimate reports, shaped exactly like a receipt so the two compare directly.
+///
+/// `used` is the node's raw simulated figure, the forecast of the `gas_used` a receipt reports.
+/// `fee` is what a broadcast under [`CwGasLimit::Estimated`] would actually declare and pay:
+/// the fee for the *adjusted* limit ([`fee_for`] of [`adjust_gas`]), not for the raw figure,
+/// because the SDK deducts the declared fee in full and the declared limit carries the
+/// adjustment. A fee computed from the raw figure would systematically undershoot every receipt.
+fn estimated_gas(simulated: u64, adjustment: f64, gas_price: f64) -> CwGas {
+    CwGas {
+        used: simulated,
+        fee: fee_for(adjust_gas(simulated, adjustment), gas_price),
+    }
+}
+
 /// The signer's bech32 address as a cosmrs [`AccountId`].
 fn signer_account(signer: &CosmosSigner) -> Result<AccountId, CwError> {
     signer
@@ -893,6 +923,22 @@ mod tests {
         // And an `Exact` limit of the same size costs the same: the fee cannot tell where the
         // limit came from.
         assert_eq!(fee_for(130_000, GAS_PRICE), fee_for(limit, GAS_PRICE));
+    }
+
+    /// An estimate is a receipt-shaped forecast: `used` is the raw simulated figure (what the
+    /// receipt's `used` forecasts), while `fee` prices the *adjusted* limit, because that is
+    /// what a broadcast under `Estimated` declares and the SDK deducts in full. Pricing the raw
+    /// figure instead would undershoot every receipt by the adjustment factor.
+    #[test]
+    fn an_estimate_reports_raw_gas_but_prices_the_adjusted_limit() {
+        let est = estimated_gas(100_000, 1.3, 0.025);
+        assert_eq!(est.used, 100_000, "used is the node's raw simulated figure");
+        // fee_for(adjust_gas(100_000, 1.3)) = fee_for(130_000) = 3_250, not fee_for(100_000).
+        assert_eq!(est.fee, 3_250);
+        assert_ne!(est.fee, fee_for(100_000, 0.025));
+
+        // Exactly what a broadcast under `Estimated` would declare and pay for this simulation.
+        assert_eq!(est.fee, fee_for(adjust_gas(100_000, 1.3), 0.025));
     }
 
     #[test]

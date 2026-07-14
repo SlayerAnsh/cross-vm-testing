@@ -61,6 +61,14 @@ async fn payable_deposit_attaches_funds_then_borrow_and_query() {
         .expect("instantiate");
     let vault = chain.contract_as::<vault::VaultContract>(instantiated.address);
 
+    // Each typed execute fn has a generated `estimate_<fn>` sibling: same args minus the gas
+    // limit. On the mock (no gas meter) the forecast is absent, like the receipt's `gas` field.
+    let est = vault
+        .estimate_deposit("alice", Uint128::new(1000), &coins(100, denom))
+        .await
+        .expect("estimate deposit");
+    assert!(est.is_none(), "mock cannot meter, got {est:?}");
+
     let before = chain.balance(&alice).await.expect("balance before");
     vault
         .deposit(
@@ -73,6 +81,12 @@ async fn payable_deposit_attaches_funds_then_borrow_and_query() {
         .expect("deposit");
     let after = chain.balance(&alice).await.expect("balance after");
     assert!(after < before);
+
+    let est = vault
+        .estimate_borrow("alice", Uint128::new(500))
+        .await
+        .expect("estimate borrow");
+    assert!(est.is_none(), "mock cannot meter, got {est:?}");
 
     vault
         .borrow("alice", Uint128::new(500), CwGasLimit::Estimated)

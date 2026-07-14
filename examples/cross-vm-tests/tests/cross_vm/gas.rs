@@ -1,8 +1,9 @@
-//! Gas limits: what `Exact` and `Estimated` actually do at a call site.
+//! Gas limits: what `Exact` and `Estimated` actually do at a call site, and how a forecast relates
+//! to the receipt it forecasts.
 //!
-//! Both tests here run against a mock that genuinely meters and genuinely enforces, so a limit
-//! under the true cost really does fail. That is the whole point of the file, and it is why the
-//! other two VMs are absent rather than covered for symmetry:
+//! The two out-of-gas tests run against a mock that genuinely meters and genuinely enforces, so a
+//! limit under the true cost really does fail. That is why the other two VMs are absent from *those
+//! two tests* rather than covered for symmetry:
 //!
 //! - The CosmWasm mock has no gas meter (`cw-multi-test` does not bill), so a `CwGasLimit` is
 //!   inert there and a `CwGasLimit::Exact(1)` would *succeed*. A test asserting an out-of-gas
@@ -14,12 +15,17 @@
 //! The limit under test is derived from the estimator each time, never hardcoded: a hand-picked
 //! constant would silently stop being "one gas short of the true cost" the moment the contract or
 //! the EVM's pricing changed, and the test would keep passing for the wrong reason.
+//!
+//! What CosmWasm *can* be held to on the mock is the shape of its estimator, which is what the last
+//! test covers: a forecast is the same type as a receipt, so the two compare directly, and on a
+//! backend that cannot meter, both are absent rather than zero.
 
+use cross_vm_framework::cross_vm_cosmwasm::CwGas;
 use cross_vm_framework::prelude::*;
 use cross_vm_solidity::Bytes;
 
 use alloy::sol_types::SolCall;
-use cross_vm_common::mocks::counter::{evm as evm_counter, tron as tron_counter};
+use cross_vm_common::mocks::counter::{cw as cw_counter, evm as evm_counter, tron as tron_counter};
 
 use crate::support::{fund_alice, test_wallets};
 
@@ -212,4 +218,93 @@ async fn tron_exact_limit_below_the_true_cost_runs_out_of_gas() {
         .await
         .expect("read count");
     assert_eq!(decode_count(&out), 1);
+}
+
+/// The relation a CosmWasm forecast and the receipt it forecasts must satisfy on *any* backend.
+///
+/// Both sides are `Option<CwGas>`: an estimate reports the same type a receipt does. That identity
+/// is the whole point of this signature, which could not be written at all if a forecast were bare
+/// gas units and a receipt a gas-and-fee pair.
+fn assert_forecast_bounds_receipt(forecast: Option<CwGas>, receipt: Option<CwGas>) {
+    match (forecast, receipt) {
+        // A metering backend (live RPC) simulates the exact message it is about to broadcast,
+        // against the state that broadcast will run on, so the simulated figure lands at or below
+        // what the chain finally meters. That gap is precisely what `gas_adjustment` covers, and
+        // it is why a limit resolved from `Estimated` sits above both figures.
+        (Some(f), Some(r)) => assert!(
+            f.used <= r.used,
+            "a forecast must not exceed the receipt it forecasts: forecast {} gas, receipt {} gas",
+            f.used,
+            r.used
+        ),
+        // The mock: `cw-multi-test` has no gas meter, so there is nothing to simulate against and
+        // nothing to bill. Absence on both sides, never a fabricated zero.
+        (None, None) => {}
+        (f, r) => panic!(
+            "a CosmWasm backend meters both a forecast and its receipt, or neither: \
+             forecast {f:?}, receipt {r:?}"
+        ),
+    }
+}
+
+#[tokio::test]
+async fn cw_forecast_is_the_same_type_as_the_receipt_it_forecasts() {
+    let mut chain = AnyChain::from(OSMOSIS.mock(test_wallets()));
+    fund_alice(&mut chain).await;
+    let AnyChain::CosmWasm(cw) = &chain else {
+        unreachable!("built a CosmWasm mock")
+    };
+
+    let counter = CwContract::<cw_counter::CounterContract>::new(cw.clone())
+        .store_code(
+            cw_counter::contract(),
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("store code")
+        .instantiate(
+            cw_counter::InstantiateMsg {},
+            TEST_WALLETS.alice,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("instantiate");
+
+    // `estimate_increment` is the `CwExecuteFns` forecast sibling of `increment`: the same
+    // arguments minus the gas limit, because a forecast is what you consult to *pick* a limit.
+    // Neither call names a raw `ExecuteMsg`.
+    use cw_counter::ExecuteMsgFns;
+    let alice = TEST_WALLETS.alice.as_str();
+    let forecast = counter
+        .estimate_increment(alice)
+        .await
+        .expect("estimate increment");
+    let receipt = counter
+        .increment(alice, CwGasLimit::Estimated)
+        .await
+        .expect("increment")
+        .gas;
+
+    // Same type on both sides, so they compare with `==` directly: neither is reshaped to meet the
+    // other, and both convert to the cross-VM `Cost` through the one `From<CwGas>` impl.
+    assert_eq!(forecast, receipt);
+    assert_forecast_bounds_receipt(forecast, receipt);
+    assert_eq!(forecast.map(Cost::from), receipt.map(Cost::from));
+
+    // On this backend that shared value is absence, and it is asserted rather than skipped: the
+    // mock has no gas meter, so it has no figure for the simulation and none for the receipt. A
+    // `Some` on either side would mean a backend that cannot meter had begun inventing gas, which
+    // is the failure this pins down. The metered shape (`Some` on both, forecast <= receipt) is the
+    // other arm of `assert_forecast_bounds_receipt`, reachable only against live RPC.
+    assert_eq!(
+        forecast, None,
+        "the CosmWasm mock has no gas meter, so it cannot simulate a figure"
+    );
+    assert_eq!(
+        receipt, None,
+        "`cw-multi-test` does not bill, so a receipt carries no figure"
+    );
 }

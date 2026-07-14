@@ -175,6 +175,8 @@ pub enum QueryMsg {
 
 That emits `ExecuteMsgFns` / `QueryMsgFns` traits implemented for `CwContract<I>` where `I: CwInterface<ExecuteMsg = ...>` / `QueryMsg = ...`, one typed `async fn` per variant: `chain.contract_as::<CounterContract>(addr).increment(wallet, CwGasLimit::Estimated)` and `.get_count()`. Named or tuple variant fields become method args (tuple fields as positional `arg0`, `arg1`, ...); query variants need `#[returns(T)]`; a variant marked `#[payable]` gains a `funds: &[Coin]` arg. Every generated execute method is a mutating op, so each ends with a required `gas: CwGasLimit` (last, after `funds` on a `#[payable]` variant); queries take none. Add `#[cross_vm(trait_name = "...")]` on the enum to rename the generated trait, e.g. to run alongside cw-orch's `ExecuteFns` / `QueryFns` without a name clash. For dynamic message construction (no typed `*Fns`), use the untyped `chain.contract(addr)` handle (`CwContract<()>`) and call `execute` / `query` directly. EVM gets typed calls from `alloy::sol!`; Solana has no schema, so its hooks stay hand written.
 
+Every generated execute method also gets an `estimate_<fn>` sibling: the same args minus the trailing `gas: CwGasLimit`, returning `Option<CwGas>` instead of broadcasting, so `counter.estimate_increment(wallet)` sits beside `counter.increment(wallet, gas)`. The typed `CwContract` handle carries the matching lifecycle estimators too, `estimate_store_code` / `estimate_instantiate` / `estimate_execute` / `estimate_execute_with_funds`, gated by the same handle state as their mutating siblings (a `CwError`, not `None`, if a prerequisite step has not run yet).
+
 **Transaction hooks.** A wrapper can run side logic (an indexer, a bridge relay, an event listener) before and after each transaction. Register with `on_before` / `on_after`; the dispatcher fires them around the per VM execution. An after hook receives the uniform `AppResponse`, so it reacts to the result independent of the VM:
 
 ```rust
@@ -220,10 +222,12 @@ Ask what an op will cost before running it with the `estimate_*` methods on the 
 let gas = evm.estimate_call(&addr, calldata, wallet).await?;         // EvmGas, via eth_estimateGas
 let res = tron.estimate_call(&addr, calldata, wallet).await?;        // TronResources
 let sim = svm.estimate_transaction(&ixs, wallet).await?;             // TransactionMetadata
-let gas = cw.estimate_execute_contract(&addr, msg, wallet, &[]).await?;  // Option<u64>
+let gas = cw.estimate_execute_contract(&addr, msg, wallet, &[]).await?;  // Option<CwGas>
 ```
 
 They live on the concrete chains rather than on `AnyChain`, reached through the same downcast (`self.base.cosmwasm()?` / `evm()?`) every contract op already uses. `AnyChain::transfer_funds` therefore takes no limit and always resolves `Estimated`: `Exact(n)` cannot cross the VM erasure with its meaning intact.
+
+`CwGas { used: u64, fee: u128 }` is the same type an executed CosmWasm op's receipt carries, so a forecast and a receipt compare directly, and `From<CwGas> for Cost` converts it to the cross VM `Cost` exactly like `EvmGas` and `TronResources` already do.
 
 Backends differ in what they can honestly do here, and the API does not paper over it:
 
@@ -415,7 +419,7 @@ Two honest v1 limits remain in the mock. The mock's `CREATE` / `CREATE2` use rev
 | --- | --- | --- |
 | `#[cross_vm_contract(Name)]` | attribute | Turn a spec trait into a contract wrapper that dispatches each method to the matching `cw_*` / `evm_*` / `svm_*` / `tron_*` hook |
 | `cross_vm_cw_interface!` | function-like | Declare a zero-sized `CwInterface` marker for one contract (scopes typed `*Fns` to `CwContract<I>`) |
-| `#[derive(CwExecuteFns)]` | derive | Typed per variant `async fn` execute methods from a CosmWasm `ExecuteMsg` enum (named or tuple fields become args; `#[payable]` adds a `funds` arg; every method ends with a required `gas: CwGasLimit`) |
+| `#[derive(CwExecuteFns)]` | derive | Typed per variant `async fn` execute methods from a CosmWasm `ExecuteMsg` enum (named or tuple fields become args; `#[payable]` adds a `funds` arg; every method ends with a required `gas: CwGasLimit`); each also gets an `estimate_<fn>` sibling (same args minus `gas`, returning `Option<CwGas>`) that forecasts the op instead of broadcasting it |
 | `#[derive(CwQueryFns)]` | derive | Typed per variant `async fn` query methods from a `QueryMsg` enum (each variant needs `#[returns(T)]`) |
 | `define_wallet_roster!` | function-like | Compile time wallet roster with typed `WalletLabel` fields |
 | `#[fuzz_runner]` | attribute | Fan a fuzz test into one `#[tokio::test]` per case with a seeded `FuzzRunner` |
@@ -494,7 +498,7 @@ cargo test -p cross-vm-tests --test harness --features "fuzz invariant endurance
 | Cross VM contract wrapper (`#[cross_vm_contract]`) | Supported | Supported | Supported | Supported | typed CosmWasm/EVM calls; Solana and Tron hooks hand written |
 | Cost reporting (`AppResponse::cost()`) | Supported (RPC only) | Supported | Supported (mock only) | Supported | The CosmWasm mock has no gas meter and reports `None`, never a fabricated zero; the Tron mock reports `Gas`, the unit its `revm` core actually meters, not `Energy`; Solana RPC writes are `Unimplemented`, so nothing runs there to cost |
 | Per op gas / compute limits (required, per VM) | Supported | Supported | Supported | Supported | `CwGasLimit` / `EvmGasLimit` / `SvmComputeBudget` / `TronLimit`, each `Exact` or `Estimated`. Accepted and ignored on the CosmWasm mock, which cannot run out of gas. `TronEnergyPolicy` rides alongside on `deploy_create` |
-| Estimation ahead of an op (`estimate_*`) | Supported (RPC only) | Supported | Supported (mock only) | Supported | CosmWasm simulates via `/cosmos.tx.v1beta1.Service/Simulate` (the mock returns `None`); EVM via `eth_estimateGas` or an uncommitted `revm` transact; Solana via `LiteSVM::simulate_transaction`; Tron via `triggerconstantcontract` |
+| Estimation ahead of an op (`estimate_*`) | Supported (RPC only) | Supported | Supported (mock only) | Supported | CosmWasm simulates via `/cosmos.tx.v1beta1.Service/Simulate`, returning `Option<CwGas>` (the mock returns `None`), convertible to `Cost` via `From<CwGas>` like the other VMs; EVM via `eth_estimateGas` or an uncommitted `revm` transact; Solana via `LiteSVM::simulate_transaction`; Tron via `triggerconstantcontract`. `CwContract` and the `CwExecuteFns` derive carry the same typed estimators |
 | Property `Harness` (fuzz / invariant / endurance / matrix) | Supported (VM agnostic, runs over any injected chain) |||||
 | Broader cross VM orchestration layer | Planned |||||
 

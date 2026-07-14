@@ -247,6 +247,68 @@ impl<I> CwContract<I> {
             .await
     }
 
+    // ----- Estimation: gas forecasts without broadcasting, one per lifecycle step. -----
+    //
+    // Each estimator mirrors its mutating sibling's signature minus the `CwGasLimit` (a forecast
+    // takes no limit; it is what you consult to pick one) and returns what the receipt would
+    // report: `Some(CwGas)` on the RPC backend, `None` on the mock, which cannot meter (see
+    // [`CwChain::estimate_store_code`] and friends). Handle state gates them exactly like the
+    // ops they forecast: estimating an instantiate needs the stored `code_id`, estimating an
+    // execute needs the bound address, and a missing prerequisite is the same `CwError` the
+    // mutating sibling raises, not a panic.
+
+    /// Estimate what [`store_code`](Self::store_code) would cost, without broadcasting anything.
+    /// Needs no handle state: it works on a fresh handle from [`new`](Self::new).
+    pub async fn estimate_store_code(
+        &self,
+        code: impl Into<CwCodeSource>,
+        wallet: WalletLabel<'_>,
+    ) -> Result<Option<CwGas>, CwError> {
+        self.chain.estimate_store_code(code, wallet).await
+    }
+
+    /// Estimate what [`instantiate`](Self::instantiate) would cost, without broadcasting
+    /// anything. Requires [`store_code`](Self::store_code) to have run first, exactly like the
+    /// instantiate it forecasts.
+    pub async fn estimate_instantiate<Init: CwSerde>(
+        &self,
+        init: Init,
+        wallet: WalletLabel<'_>,
+        funds: &[Coin],
+        label: &str,
+    ) -> Result<Option<CwGas>, CwError> {
+        let code_id = self.code_id.ok_or_else(|| {
+            CwError::Deploy("store_code() must be called before estimate_instantiate()".into())
+        })?;
+        self.chain
+            .estimate_instantiate(code_id, init, wallet, funds, label)
+            .await
+    }
+
+    /// Estimate what [`execute`](Self::execute) would cost, without broadcasting anything.
+    /// Requires the handle to be bound to an address, exactly like the execute it forecasts.
+    pub async fn estimate_execute<E: CwSerde>(
+        &self,
+        msg: E,
+        wallet: &str,
+    ) -> Result<Option<CwGas>, CwError> {
+        self.estimate_execute_with_funds(msg, wallet, &[]).await
+    }
+
+    /// Estimate what [`execute_with_funds`](Self::execute_with_funds) would cost, without
+    /// broadcasting anything. The forecast sibling of the `CwExecuteFns` derive's `#[payable]`
+    /// estimators.
+    pub async fn estimate_execute_with_funds<E: CwSerde>(
+        &self,
+        msg: E,
+        wallet: &str,
+        funds: &[Coin],
+    ) -> Result<Option<CwGas>, CwError> {
+        self.chain
+            .estimate_execute_contract(self.require_addr()?, msg, WalletLabel::wrap(wallet), funds)
+            .await
+    }
+
     /// Run a read-only smart query against the bound contract.
     pub async fn query<Q: CwSerde, R: CwSerde>(&self, msg: Q) -> Result<R, CwError> {
         let addr = self.addr.as_ref().ok_or_else(|| {
