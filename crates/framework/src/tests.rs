@@ -203,7 +203,7 @@ mod hooks {
     use std::rc::Rc;
 
     use crate::prelude::*;
-    use cross_vm_solidity::Bytes;
+    use cross_vm_solidity::{Bytes, EvmGas, B256};
 
     fn empty_wallets() -> Rc<WalletFactory> {
         Rc::new(WalletFactory::from_roster(EmptyWallets::SPECS).expect("empty roster"))
@@ -212,6 +212,15 @@ mod hooks {
     fn base() -> ContractBase {
         let wallets = empty_wallets();
         ContractBase::new(AnyChain::from(ETHEREUM.mock(wallets)))
+    }
+
+    /// An empty EVM response costed the way the mock backend costs one: metered gas, no fee.
+    fn evm_resp() -> AppResponse<()> {
+        let gas = EvmGas {
+            used: 21_000,
+            fee: None,
+        };
+        AppResponse::evm((), Bytes::new(), vec![], B256::ZERO, gas)
     }
 
     #[test]
@@ -225,16 +234,33 @@ mod hooks {
             Ok(())
         });
 
-        let resp = base
-            .run_after(
-                "increment",
-                AppResponse::evm((), Bytes::new(), vec![], None),
-            )
-            .expect("after ok");
+        let resp = base.run_after("increment", evm_resp()).expect("after ok");
         assert_eq!(resp.kind(), ChainKind::Evm);
         assert_eq!(
             *seen.borrow(),
             vec![("increment".to_string(), ChainKind::Evm)]
+        );
+    }
+
+    #[test]
+    fn after_hook_reads_cost() {
+        let base = base();
+        let seen: Rc<RefCell<Option<Cost>>> = Rc::new(RefCell::new(None));
+        let sink = Rc::clone(&seen);
+        base.on_after(move |ctx| {
+            *sink.borrow_mut() = ctx.cost();
+            Ok(())
+        });
+
+        base.run_after("increment", evm_resp()).expect("after ok");
+        assert_eq!(
+            *seen.borrow(),
+            Some(Cost {
+                units: 21_000,
+                unit: CostUnit::Gas,
+                bandwidth: None,
+                fee: None,
+            })
         );
     }
 
@@ -260,10 +286,7 @@ mod hooks {
                 reason: "indexer down".into(),
             })
         });
-        let res = base.run_after(
-            "increment",
-            AppResponse::evm((), Bytes::new(), vec![], None),
-        );
+        let res = base.run_after("increment", evm_resp());
         assert!(matches!(res, Err(CrossVmError::Other { .. })));
     }
 
@@ -278,11 +301,7 @@ mod hooks {
                 Ok(())
             });
         }
-        base.run_after(
-            "increment",
-            AppResponse::evm((), Bytes::new(), vec![], None),
-        )
-        .expect("after ok");
+        base.run_after("increment", evm_resp()).expect("after ok");
         assert_eq!(*order.borrow(), vec![1, 2, 3]);
     }
 
@@ -290,11 +309,6 @@ mod hooks {
     fn no_hooks_is_a_noop() {
         let base = base();
         assert!(base.run_before("increment").is_ok());
-        assert!(base
-            .run_after(
-                "increment",
-                AppResponse::evm((), Bytes::new(), vec![], None)
-            )
-            .is_ok());
+        assert!(base.run_after("increment", evm_resp()).is_ok());
     }
 }

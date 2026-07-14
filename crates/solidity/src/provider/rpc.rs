@@ -28,7 +28,17 @@ use crate::asset::EvmAsset;
 use crate::chains::EvmChainInfo;
 use crate::error::EvmError;
 use crate::provider::address::address_from_label;
-use crate::provider::EvmExecution;
+use crate::provider::{EvmDeploy, EvmExecution, EvmGas};
+
+/// The gas a mined receipt reports: the billed gas, plus the fee it implies. The effective price
+/// already folds in the EIP-1559 base fee and priority tip, so `used * price` is the whole fee.
+fn receipt_gas<R: ReceiptResponse>(receipt: &R) -> EvmGas {
+    let used = receipt.gas_used();
+    EvmGas {
+        used,
+        fee: Some(u128::from(used) * receipt.effective_gas_price()),
+    }
+}
 
 /// A live-RPC EVM provider. Chain-level reads and static calls hit a real node; the write paths
 /// ([`deploy_create`](Self::deploy_create), [`call`](Self::call)) sign with the wallet's
@@ -134,13 +144,13 @@ impl EvmRpcProvider {
     // ----- Write paths: sign with the wallet signer and broadcast to the live chain. -----
 
     /// Deploy bytecode via a create transaction signed by `signer`, returning the new contract
-    /// address from the mined receipt.
+    /// address and the broadcast transaction hash from the mined receipt.
     pub async fn deploy_create(
         &self,
         bytecode: Bytes,
         constructor_args: impl AsRef<[u8]>,
         signer: &PrivateKeySigner,
-    ) -> Result<Address, EvmError> {
+    ) -> Result<EvmDeploy, EvmError> {
         let mut initcode = bytecode.to_vec();
         initcode.extend_from_slice(constructor_args.as_ref());
         let provider = self.signing_provider(signer)?;
@@ -154,9 +164,14 @@ impl EvmRpcProvider {
             .get_receipt()
             .await
             .map_err(|e| EvmError::Deploy(e.to_string()))?;
-        receipt
+        let address = receipt
             .contract_address()
-            .ok_or_else(|| EvmError::Deploy("receipt carried no contract address".into()))
+            .ok_or_else(|| EvmError::Deploy("receipt carried no contract address".into()))?;
+        Ok(EvmDeploy {
+            address,
+            tx_hash: receipt.transaction_hash(),
+            gas: receipt_gas(&receipt),
+        })
     }
 
     /// Execute a state-mutating call against `to`, signed by `signer`.
@@ -202,7 +217,8 @@ impl EvmRpcProvider {
         Ok(EvmExecution {
             output: Bytes::new(),
             logs,
-            tx_hash: Some(receipt.transaction_hash()),
+            tx_hash: receipt.transaction_hash(),
+            gas: receipt_gas(&receipt),
         })
     }
 

@@ -13,7 +13,7 @@ use alloy::sol_types::SolCall;
 use cross_vm_core::{ChainProvider, WalletFactory};
 use cross_vm_macros::define_wallet_roster;
 use cross_vm_solidity::chains::BASE_SEPOLIA;
-use cross_vm_solidity::{Bytes, EvmChain, U256};
+use cross_vm_solidity::{Bytes, EvmChain, B256, U256};
 
 define_wallet_roster! {
     pub const ONCHAIN_WALLETS: OnchainWallets = {
@@ -61,7 +61,7 @@ async fn live_counter_on_base_sepolia() {
         "wallet {who} has no Base Sepolia ETH; fund it (index 0 of MNEMONIC_TEST) and retry"
     );
 
-    let contract = chain
+    let deploy = chain
         .deploy_create(
             Counter::BYTECODE.clone(),
             Bytes::new(),
@@ -69,7 +69,14 @@ async fn live_counter_on_base_sepolia() {
         )
         .await
         .expect("deploy_create");
+    let contract = deploy.address;
     println!("deployed Counter at: {contract}");
+    println!("deploy tx hash: {}", deploy.tx_hash);
+    assert_ne!(
+        deploy.tx_hash,
+        B256::ZERO,
+        "a live deploy carries its broadcast tx hash"
+    );
     assert_eq!(
         read_count(&chain, &contract).await,
         0,
@@ -84,9 +91,12 @@ async fn live_counter_on_base_sepolia() {
         )
         .await
         .expect("increment");
-    let tx_hash = exec
-        .tx_hash
-        .expect("live RPC call returns a broadcast tx hash");
+    let tx_hash = exec.tx_hash;
+    assert_ne!(
+        tx_hash,
+        B256::ZERO,
+        "a live call carries its broadcast tx hash"
+    );
     println!("increment tx hash: {tx_hash}");
     let count = read_count(&chain, &contract).await;
     println!("count after increment: {count}");

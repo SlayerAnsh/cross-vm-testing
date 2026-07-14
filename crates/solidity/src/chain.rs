@@ -19,7 +19,7 @@ use cross_vm_core::{
 use crate::asset::EvmAsset;
 use crate::chains::EvmChainInfo;
 use crate::error::EvmError;
-use crate::provider::{EvmExecution, EvmMockProvider, EvmRpcProvider};
+use crate::provider::{EvmDeploy, EvmExecution, EvmMockProvider, EvmRpcProvider};
 
 /// `balanceOf(address)` selector.
 const BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
@@ -106,13 +106,14 @@ impl EvmChain {
         Ok(addr)
     }
 
-    /// Deploy bytecode via a create transaction signed by wallet `wallet`.
+    /// Deploy bytecode via a create transaction signed by wallet `wallet`, returning the new
+    /// contract address plus the transaction hash.
     pub async fn deploy_create(
         &self,
         bytecode: Bytes,
         constructor_args: impl AsRef<[u8]>,
         wallet: WalletLabel<'_>,
-    ) -> Result<Address, EvmError> {
+    ) -> Result<EvmDeploy, EvmError> {
         let signer = self.acquire(wallet).await?;
         let addr = self.signer_address(&signer);
         match self {
@@ -183,9 +184,7 @@ impl EvmChain {
                 p.call_value(to, [], &signer, amount).await?
             }
         };
-        exec.tx_hash
-            .map(|h| h.to_string())
-            .ok_or_else(|| EvmError::Execute("transfer carried no transaction hash".into()))
+        Ok(exec.tx_hash.to_string())
     }
 
     /// Run a read-only static call against `to`.

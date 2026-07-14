@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use alloy_primitives::{Address, Bytes, Log, B256, U256};
+use alloy_primitives::{Address, Bytes, U256};
 use alloy_signer_local::PrivateKeySigner;
 use cross_vm_core::{BlockTime, ChainProvider, WalletFactory};
 use cross_vm_revm_common::{ExecFailure, RevmCore};
@@ -16,6 +16,7 @@ use cross_vm_revm_common::{ExecFailure, RevmCore};
 use crate::chains::EvmChainInfo;
 use crate::error::EvmError;
 use crate::provider::address::address_from_label;
+use crate::provider::{EvmDeploy, EvmExecution};
 
 /// Default funding handed to accounts created via [`ChainProvider::new_account`]:
 /// 100 ETH in wei.
@@ -58,15 +59,17 @@ impl EvmMockProvider {
         }
     }
 
-    /// Deploy bytecode via a create transaction, appending constructor args to the initcode.
+    /// Deploy bytecode via a create transaction, appending constructor args to the initcode,
+    /// returning the new contract address plus the transaction hash.
     pub async fn deploy_create(
         &self,
         bytecode: Bytes,
         constructor_args: impl AsRef<[u8]>,
         from: &Address,
-    ) -> Result<Address, EvmError> {
+    ) -> Result<EvmDeploy, EvmError> {
         self.core
             .deploy_create(bytecode, constructor_args.as_ref(), *from)
+            .map(EvmDeploy::from)
             .map_err(|f| EvmError::Deploy(f.deploy_message()))
     }
 
@@ -138,33 +141,6 @@ impl EvmMockProvider {
         self.core
             .storage(*addr, slot)
             .map_err(|f| EvmError::Query(f.call_message("get_storage_at")))
-    }
-}
-
-/// The result of a state-mutating EVM [`call`](EvmMockProvider::call): the return data, the
-/// logs (events) emitted during execution, and (on the live RPC backend) the broadcast
-/// transaction hash.
-#[derive(Clone, Debug, Default)]
-pub struct EvmExecution {
-    /// ABI-encoded return data.
-    pub output: Bytes,
-    /// Logs (events) emitted during execution, in order.
-    pub logs: Vec<Log>,
-    /// The transaction hash. The real broadcast hash on the live RPC backend; a synthetic,
-    /// deterministic hash on the mock (in-process, no real tx) so callers need not branch on
-    /// backend. `None` only appears if a backend explicitly omits it.
-    pub tx_hash: Option<B256>,
-}
-
-impl From<cross_vm_revm_common::Execution> for EvmExecution {
-    fn from(e: cross_vm_revm_common::Execution) -> Self {
-        Self {
-            output: e.output,
-            logs: e.logs,
-            // The mock has no real broadcast hash; the core mints a synthetic, deterministic one
-            // so the same test script reads a hash on both the mock and the live RPC backend.
-            tx_hash: Some(e.tx_hash),
-        }
     }
 }
 

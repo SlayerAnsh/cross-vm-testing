@@ -30,7 +30,7 @@ use revm::precompile::Precompiles;
 use crate::chains::TronChainInfo;
 use crate::error::TronError;
 use crate::provider::address::{address_from_label, TronAddress};
-use crate::provider::execution::TronExecution;
+use crate::provider::execution::{TronCompute, TronDeploy, TronExecution, TronResources};
 use crate::tvm::opcodes;
 use crate::tvm::precompiles::tron_precompiles;
 use crate::tvm::resources::{ResourceTracker, SUN_PER_TRX};
@@ -136,10 +136,12 @@ impl TronMockProvider {
         bytecode: Bytes,
         constructor_args: impl AsRef<[u8]>,
         from: &TronAddress,
-    ) -> Result<TronAddress, TronError> {
+    ) -> Result<TronDeploy, TronError> {
+        let args = constructor_args.as_ref();
+        let bandwidth = self.charge_bandwidth(from, bytecode.len() + args.len());
         self.core
-            .deploy_create(bytecode, constructor_args.as_ref(), from.as_evm())
-            .map(TronAddress::from_evm)
+            .deploy_create(bytecode, args, from.as_evm())
+            .map(|d| mock_deploy(d, bandwidth))
             .map_err(|f| TronError::Deploy(f.deploy_message()))
     }
 
@@ -164,15 +166,12 @@ impl TronMockProvider {
         from: &TronAddress,
         value: U256,
     ) -> Result<TronExecution, TronError> {
-        // Coarse bandwidth accounting: charge the caller by encoded calldata length. The mock
-        // does not gate execution on the result (it models the burn-for-fee fallback as free).
-        // Source: <https://developers.tron.network/docs/resource-model>
-        self.resources
-            .borrow_mut()
-            .consume_bandwidth(from, calldata.as_ref().len());
+        // Coarse bandwidth accounting: charge the caller by encoded calldata length. The mock does
+        // not gate execution on the outcome, it only reports what was deducted.
+        let bandwidth = self.charge_bandwidth(from, calldata.as_ref().len());
         self.core
             .call(to.as_evm(), calldata.as_ref(), from.as_evm(), value)
-            .map(TronExecution::from)
+            .map(|e| mock_execution(e, bandwidth))
             .map_err(|f| TronError::Execute(f.call_message("call")))
     }
 
@@ -240,17 +239,61 @@ impl TronMockProvider {
     pub fn bandwidth(&self, who: &TronAddress) -> u64 {
         self.resources.borrow().bandwidth(who)
     }
+
+    /// Charge `payload_bytes` of bandwidth to `from` through the [resource shim], returning the
+    /// points it actually deducted (what the operation then reports as consumed).
+    ///
+    /// Over the free allowance the shim deducts nothing (it models the burn-for-fee fallback as
+    /// free), which is also the shape a live receipt takes: a transaction that burns TRX for its
+    /// bytes carries `net_usage: 0` and a `net_fee` instead.
+    ///
+    /// [resource shim]: crate::tvm::resources
+    /// Source: <https://developers.tron.network/docs/resource-model>
+    fn charge_bandwidth(&self, from: &TronAddress, payload_bytes: usize) -> u64 {
+        let deducted = self
+            .resources
+            .borrow_mut()
+            .consume_bandwidth(from, payload_bytes);
+        if deducted {
+            payload_bytes as u64
+        } else {
+            0
+        }
+    }
 }
 
-impl From<cross_vm_revm_common::Execution> for TronExecution {
-    fn from(e: cross_vm_revm_common::Execution) -> Self {
-        Self {
-            output: e.output,
-            logs: e.logs,
-            // The mock has no real broadcast hash; the core mints a synthetic, deterministic one
-            // so the same test script reads a hash on both the mock and the live RPC backend.
-            tx_hash: Some(e.tx_hash),
-        }
+/// The mock's compute figure is `revm`'s EVM gas, reported as [`TronCompute::Gas`], never as
+/// energy: the mock is `revm`, so gas is the quantity it genuinely meters, while the energy shim
+/// sits outside `revm`'s gas loop and is never touched by execution. `fee` is `None` for the same
+/// reason: a Tron fee is priced off energy, which nothing here metered.
+///
+/// This is also the one place a `revm` `B256` becomes a Tron transaction hash: the mock has no real
+/// broadcast hash, so the core mints a synthetic, deterministic one, and it is rendered here into
+/// the unprefixed hex a java-tron `txID` is spoken in. Every other Tron surface already holds the
+/// hash as that `String`, so nothing round-trips.
+fn mock_execution(e: cross_vm_revm_common::Execution, bandwidth: u64) -> TronExecution {
+    TronExecution {
+        output: e.output,
+        logs: e.logs,
+        tx_hash: hex::encode(e.tx_hash),
+        resources: TronResources {
+            compute: TronCompute::Gas(e.gas_used),
+            bandwidth,
+            fee: None,
+        },
+    }
+}
+
+/// The create-transaction counterpart of [`mock_execution`]; the same reporting rules apply.
+fn mock_deploy(d: cross_vm_revm_common::Deployment, bandwidth: u64) -> TronDeploy {
+    TronDeploy {
+        address: TronAddress::from_evm(d.address),
+        tx_hash: hex::encode(d.tx_hash),
+        resources: TronResources {
+            compute: TronCompute::Gas(d.gas_used),
+            bandwidth,
+            fee: None,
+        },
     }
 }
 
@@ -310,6 +353,7 @@ impl ChainProvider for TronMockProvider {
 mod tests {
     use super::*;
     use crate::chains::LOCAL;
+    use crate::tvm::resources::FREE_BANDWIDTH_PER_DAY;
     use cross_vm_core::{ChainProvider, WalletFactory};
     use std::rc::Rc;
 
@@ -354,19 +398,131 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deploy_create_returns_tron_address() {
+    async fn deploy_create_returns_tron_address_and_tx_hash() {
         // Minimal initcode that deploys an empty runtime: PUSH1 0x00, PUSH1 0x00, RETURN.
         // It returns a zero-length runtime, so the deploy succeeds and yields a contract address.
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+        let d = c
+            .deploy_create(initcode.clone(), [], &deployer)
+            .await
+            .expect("empty-runtime deploy succeeds");
+        assert!(d.address.to_base58().starts_with('T'));
+        // The core's synthetic hash in the RPC arm's shape: a 32-byte hash as unprefixed hex.
+        assert_eq!(d.tx_hash.len(), 64);
+        assert!(d.tx_hash.chars().all(|c| c.is_ascii_hexdigit()));
+        // The deployed (empty) account has no balance.
+        assert_eq!(c.balance(&d.address).await.unwrap(), 0);
+
+        // A repeat of the identical deploy is a distinct transaction, so it carries a distinct hash.
+        let again = c
+            .deploy_create(initcode, [], &deployer)
+            .await
+            .expect("empty-runtime deploy succeeds");
+        assert_ne!(d.tx_hash, again.tx_hash);
+    }
+
+    #[tokio::test]
+    async fn call_reports_a_tx_hash() {
         let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
         let mut c = provider();
         let deployer = c.new_account("deployer").await;
         let addr = c
             .deploy_create(initcode, [], &deployer)
             .await
+            .expect("empty-runtime deploy succeeds")
+            .address;
+
+        let first = c.call(&addr, [], &deployer).await.expect("call succeeds");
+        let second = c.call(&addr, [], &deployer).await.expect("call succeeds");
+        // A 32-byte hash as unprefixed hex, the shape java-tron renders a `txID` in.
+        assert_eq!(first.tx_hash.len(), 64);
+        assert!(first.tx_hash.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(
+            first.tx_hash, second.tx_hash,
+            "repeated identical calls are distinct transactions"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_reports_revm_gas_and_never_energy() {
+        // The crux of the mock's honesty: it IS revm, so it meters EVM gas, and Tron energy is not
+        // EVM gas. Freezing TRX grants energy that contract execution never touches (the shim sits
+        // outside revm's gas loop), so the mock has no energy figure and must not relabel gas as
+        // one.
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+        c.freeze_for_energy(&deployer, SUN_PER_TRX);
+        let energy_before = c.energy(&deployer);
+
+        let d = c
+            .deploy_create(initcode, [], &deployer)
+            .await
             .expect("empty-runtime deploy succeeds");
-        assert!(addr.to_base58().starts_with('T'));
-        // The deployed (empty) account has no balance.
-        assert_eq!(c.balance(&addr).await.unwrap(), 0);
+        let e = c
+            .call(&d.address, [], &deployer)
+            .await
+            .expect("call succeeds");
+
+        for compute in [d.resources.compute, e.resources.compute] {
+            let TronCompute::Gas(gas) = compute else {
+                panic!("the mock meters EVM gas, not Tron energy: got {compute:?}");
+            };
+            assert!(
+                gas > 0,
+                "revm bills every transaction at least the tx floor"
+            );
+        }
+        // A create costs strictly more than a bare call to an empty runtime.
+        let (TronCompute::Gas(deploy_gas), TronCompute::Gas(call_gas)) =
+            (d.resources.compute, e.resources.compute)
+        else {
+            unreachable!("asserted above")
+        };
+        assert!(deploy_gas > call_gas, "{deploy_gas} !> {call_gas}");
+
+        // The shim's energy is untouched by execution, which is exactly why the gas figure above
+        // cannot be reported as energy.
+        assert_eq!(c.energy(&deployer), energy_before);
+        // No fee: a Tron fee is priced off energy, and nothing here metered energy.
+        assert_eq!(d.resources.fee, None);
+        assert_eq!(e.resources.fee, None);
+    }
+
+    #[tokio::test]
+    async fn mock_reports_the_bandwidth_the_shim_charged() {
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+
+        // The deploy is charged for its payload (initcode + constructor args).
+        let d = c
+            .deploy_create(initcode, [0xaa, 0xbb], &deployer)
+            .await
+            .expect("empty-runtime deploy succeeds");
+        assert_eq!(d.resources.bandwidth, 7);
+        assert_eq!(c.bandwidth(&deployer), FREE_BANDWIDTH_PER_DAY - 7);
+
+        // A call is charged by calldata length, and the reported figure is the deduction.
+        let e = c
+            .call(&d.address, [0x01, 0x02, 0x03], &deployer)
+            .await
+            .expect("call succeeds");
+        assert_eq!(e.resources.bandwidth, 3);
+        assert_eq!(c.bandwidth(&deployer), FREE_BANDWIDTH_PER_DAY - 10);
+
+        // Beyond the free allowance the shim deducts nothing (it models the burn-for-fee fallback
+        // as free), so nothing is reported as consumed: a live receipt that burns TRX for its bytes
+        // likewise carries `net_usage: 0`.
+        let big = vec![0u8; FREE_BANDWIDTH_PER_DAY as usize];
+        let e = c
+            .call(&d.address, big, &deployer)
+            .await
+            .expect("call succeeds");
+        assert_eq!(e.resources.bandwidth, 0);
+        assert_eq!(c.bandwidth(&deployer), FREE_BANDWIDTH_PER_DAY - 10);
     }
 
     #[tokio::test]
@@ -379,11 +535,11 @@ mod tests {
         let initcode = Bytes::from(vec![0xd3, 0xd2, 0xd1, 0xd4, 0x60, 0x00, 0xf3]);
         let mut c = provider();
         let deployer = c.new_account("deployer").await;
-        let addr = c
+        let d = c
             .deploy_create(initcode, [], &deployer)
             .await
             .expect("tronc token-guard opcodes decode and deploy succeeds");
-        assert!(addr.to_base58().starts_with('T'));
+        assert!(d.address.to_base58().starts_with('T'));
     }
 
     #[tokio::test]
@@ -397,7 +553,8 @@ mod tests {
         let addr = c
             .deploy_create(initcode, [], &deployer)
             .await
-            .expect("empty-runtime deploy succeeds");
+            .expect("empty-runtime deploy succeeds")
+            .address;
         assert_eq!(c.balance(&addr).await.unwrap(), 0);
 
         let value = 3 * SUN_PER_TRX;
@@ -416,7 +573,8 @@ mod tests {
         let addr = c
             .deploy_create(initcode, [], &deployer)
             .await
-            .expect("empty-runtime deploy succeeds");
+            .expect("empty-runtime deploy succeeds")
+            .address;
 
         c.call(&addr, [], &deployer)
             .await
@@ -436,7 +594,8 @@ mod tests {
         let addr = c
             .deploy_create(initcode, [], &deployer)
             .await
-            .expect("storage-writing deploy succeeds");
+            .expect("storage-writing deploy succeeds")
+            .address;
         // The constructor wrote 42 at slot 0; an untouched slot reads as zero.
         assert_eq!(
             c.get_storage_at(&addr, U256::ZERO).await.unwrap(),

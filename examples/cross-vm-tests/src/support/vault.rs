@@ -56,43 +56,44 @@ impl Vault {
         match self.base.kind() {
             ChainKind::CosmWasm => {
                 let chain = self.base.cosmwasm()?;
-                let code_id = chain
+                let stored = chain
                     .store_code(cw_vault::contract(), WalletLabel::wrap(wallet))
                     .await?;
-                let addr = chain
+                let instantiated = chain
                     .instantiate(
-                        code_id,
+                        stored.code_id,
                         cw_vault::InstantiateMsg {},
                         WalletLabel::wrap(wallet),
                         &[],
                         "vault",
                     )
                     .await?;
-                self.base.set_address(Account::CosmWasm(addr));
+                self.base
+                    .set_address(Account::CosmWasm(instantiated.address));
                 Ok(())
             }
             ChainKind::Evm => {
                 let chain = self.base.evm()?;
-                let addr = chain
+                let deployed = chain
                     .deploy_create(
                         evm_vault::Vault::BYTECODE.clone(),
                         Bytes::new(),
                         WalletLabel::wrap(wallet),
                     )
                     .await?;
-                self.base.set_address(Account::Evm(addr));
+                self.base.set_address(Account::Evm(deployed.address));
                 Ok(())
             }
             ChainKind::Tron => {
                 let chain = self.base.tron()?;
-                let addr = chain
+                let deployed = chain
                     .deploy_create(
                         tron_vault::Vault::BYTECODE.clone(),
                         Bytes::new(),
                         WalletLabel::wrap(wallet),
                     )
                     .await?;
-                self.base.set_address(Account::Tron(addr));
+                self.base.set_address(Account::Tron(deployed.address));
                 Ok(())
             }
             ChainKind::Svm => {
@@ -224,7 +225,12 @@ impl Vault {
         let exec = chain
             .execute_contract(&addr, msg, WalletLabel::wrap(wallet), &[])
             .await?;
-        Ok(AppResponse::cosmwasm((), exec.response, exec.tx_hash))
+        Ok(AppResponse::cosmwasm(
+            (),
+            exec.response,
+            exec.tx_hash,
+            exec.gas,
+        ))
     }
 
     async fn cw_query_amount(&self, wallet: &str, collateral: bool) -> Result<u128, CrossVmError> {
@@ -254,7 +260,13 @@ impl Vault {
         let exec = chain
             .call(&addr, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::evm((), exec.output, exec.logs, exec.tx_hash))
+        Ok(AppResponse::evm(
+            (),
+            exec.output,
+            exec.logs,
+            exec.tx_hash,
+            exec.gas,
+        ))
     }
 
     async fn evm_view_user(&self, wallet: &str, collateral: bool) -> Result<u128, CrossVmError> {
@@ -288,7 +300,13 @@ impl Vault {
         let exec = chain
             .call(&addr, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::tron((), exec.output, exec.logs, exec.tx_hash))
+        Ok(AppResponse::tron(
+            (),
+            exec.output,
+            exec.logs,
+            exec.tx_hash,
+            exec.resources,
+        ))
     }
 
     async fn tron_view_user(&self, wallet: &str, collateral: bool) -> Result<u128, CrossVmError> {

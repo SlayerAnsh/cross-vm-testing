@@ -17,4 +17,4 @@ mod response;
 pub use account::Account;
 pub use base::ContractBase;
 pub use hooks::{BeforeContext, HookContext, Hooks};
-pub use response::{AppResponse, RawResponse};
+pub use response::{AppResponse, Cost, CostUnit, RawResponse};

@@ -2819,6 +2819,7 @@ dependencies = [
  "cw-multi-test",
  "ping-pong",
  "serde",
+ "serde_json",
  "tracing-subscriber 0.3.23",
  "vault",
 ]
@@ -2827,10 +2828,9 @@ dependencies = [
 name = "cross-vm-config"
 version = "0.1.0"
 dependencies = [
- "humantime",
+ "harness-config",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "toml",
 ]
 
@@ -2857,6 +2857,7 @@ dependencies = [
  "prost 0.13.5",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -2873,10 +2874,10 @@ dependencies = [
  "cross-vm-solana",
  "cross-vm-solidity",
  "cross-vm-tron",
- "dotenvy",
- "humantime",
+ "harness-cli",
+ "harness-core",
+ "harness-core-macros",
  "rand 0.8.6",
- "rand_chacha 0.3.1",
  "revm",
  "serde",
  "serde_json",
@@ -2884,7 +2885,6 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
@@ -2925,6 +2925,8 @@ dependencies = [
  "solana-keypair",
  "solana-message 4.0.0",
  "solana-native-token",
+ "solana-sha256-hasher",
+ "solana-signature",
  "solana-signer",
  "solana-system-interface 2.0.0",
  "solana-transaction",
@@ -3875,6 +3877,57 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "harness-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dotenvy",
+ "harness-config",
+ "harness-core",
+ "humantime",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
+name = "harness-config"
+version = "0.1.0"
+dependencies = [
+ "humantime",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml",
+]
+
+[[package]]
+name = "harness-core"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.6",
+ "rand_chacha 0.3.1",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "harness-core-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]

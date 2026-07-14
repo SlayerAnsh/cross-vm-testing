@@ -80,19 +80,20 @@ impl PingPong {
     async fn cw_setup(&self, wallet: &str, _chain_id: &str) -> Result<(), CrossVmError> {
         // CosmWasm derives its port from the runtime block chain_id, not a constructor arg.
         let chain = self.base.cosmwasm()?;
-        let code_id = chain
+        let stored = chain
             .store_code(cosmos_pp::contract(), WalletLabel::wrap(wallet))
             .await?;
-        let addr = chain
+        let instantiated = chain
             .instantiate(
-                code_id,
+                stored.code_id,
                 cosmos_pp::InstantiateMsg {},
                 WalletLabel::wrap(wallet),
                 &[],
                 "ping-pong",
             )
             .await?;
-        self.base.set_address(Account::CosmWasm(addr));
+        self.base
+            .set_address(Account::CosmWasm(instantiated.address));
         Ok(())
     }
 
@@ -107,7 +108,12 @@ impl PingPong {
             .contract(self.base.cw_addr()?)
             .execute(cosmos_pp::ExecuteMsg::Ping { destination_port }, wallet)
             .await?;
-        Ok(AppResponse::cosmwasm((), raw.response, raw.tx_hash))
+        Ok(AppResponse::cosmwasm(
+            (),
+            raw.response,
+            raw.tx_hash,
+            raw.gas,
+        ))
     }
 
     async fn cw_receive_packet(
@@ -132,7 +138,12 @@ impl PingPong {
                 wallet,
             )
             .await?;
-        Ok(AppResponse::cosmwasm((), raw.response, raw.tx_hash))
+        Ok(AppResponse::cosmwasm(
+            (),
+            raw.response,
+            raw.tx_hash,
+            raw.gas,
+        ))
     }
 
     async fn cw_acknowledge_packet(
@@ -155,7 +166,12 @@ impl PingPong {
                 wallet,
             )
             .await?;
-        Ok(AppResponse::cosmwasm((), raw.response, raw.tx_hash))
+        Ok(AppResponse::cosmwasm(
+            (),
+            raw.response,
+            raw.tx_hash,
+            raw.gas,
+        ))
     }
 
     async fn cw_stats(&self) -> Result<StatsView, CrossVmError> {
@@ -197,14 +213,14 @@ impl PingPong {
             _chainId: chain_id.to_string(),
         }
         .abi_encode();
-        let addr = chain
+        let deployed = chain
             .deploy_create(
                 evm_pp::PingPong::BYTECODE.clone(),
                 args,
                 WalletLabel::wrap(wallet),
             )
             .await?;
-        self.base.set_address(Account::Evm(addr));
+        self.base.set_address(Account::Evm(deployed.address));
         Ok(())
     }
 
@@ -224,7 +240,13 @@ impl PingPong {
         let exec = chain
             .call(&self.base.evm_addr()?, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::evm((), exec.output, exec.logs, exec.tx_hash))
+        Ok(AppResponse::evm(
+            (),
+            exec.output,
+            exec.logs,
+            exec.tx_hash,
+            exec.gas,
+        ))
     }
 
     async fn evm_receive_packet(
@@ -249,7 +271,13 @@ impl PingPong {
         let exec = chain
             .call(&self.base.evm_addr()?, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::evm((), exec.output, exec.logs, exec.tx_hash))
+        Ok(AppResponse::evm(
+            (),
+            exec.output,
+            exec.logs,
+            exec.tx_hash,
+            exec.gas,
+        ))
     }
 
     async fn evm_acknowledge_packet(
@@ -272,7 +300,13 @@ impl PingPong {
         let exec = chain
             .call(&self.base.evm_addr()?, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::evm((), exec.output, exec.logs, exec.tx_hash))
+        Ok(AppResponse::evm(
+            (),
+            exec.output,
+            exec.logs,
+            exec.tx_hash,
+            exec.gas,
+        ))
     }
 
     async fn evm_stats(&self) -> Result<StatsView, CrossVmError> {
@@ -336,14 +370,14 @@ impl PingPong {
             _chainId: chain_id.to_string(),
         }
         .abi_encode();
-        let addr = chain
+        let deployed = chain
             .deploy_create(
                 tron_pp::PingPong::BYTECODE.clone(),
                 args,
                 WalletLabel::wrap(wallet),
             )
             .await?;
-        self.base.set_address(Account::Tron(addr));
+        self.base.set_address(Account::Tron(deployed.address));
         Ok(())
     }
 
@@ -363,7 +397,13 @@ impl PingPong {
         let exec = chain
             .call(&self.base.tron_addr()?, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::tron((), exec.output, exec.logs, exec.tx_hash))
+        Ok(AppResponse::tron(
+            (),
+            exec.output,
+            exec.logs,
+            exec.tx_hash,
+            exec.resources,
+        ))
     }
 
     async fn tron_receive_packet(
@@ -388,7 +428,13 @@ impl PingPong {
         let exec = chain
             .call(&self.base.tron_addr()?, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::tron((), exec.output, exec.logs, exec.tx_hash))
+        Ok(AppResponse::tron(
+            (),
+            exec.output,
+            exec.logs,
+            exec.tx_hash,
+            exec.resources,
+        ))
     }
 
     async fn tron_acknowledge_packet(
@@ -411,7 +457,13 @@ impl PingPong {
         let exec = chain
             .call(&self.base.tron_addr()?, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::tron((), exec.output, exec.logs, exec.tx_hash))
+        Ok(AppResponse::tron(
+            (),
+            exec.output,
+            exec.logs,
+            exec.tx_hash,
+            exec.resources,
+        ))
     }
 
     async fn tron_stats(&self) -> Result<StatsView, CrossVmError> {

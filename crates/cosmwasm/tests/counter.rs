@@ -29,11 +29,15 @@ async fn deploy_increment_query() {
     let mut chain: CwMockProvider = OSMOSIS.mock(empty_wallets());
     let deployer = chain.new_account("deployer").await;
 
-    let code_id = chain.store_code(&deployer, counter_contract()).await;
+    let code_id = chain
+        .store_code(&deployer, counter_contract())
+        .await
+        .code_id;
     let contract = chain
         .instantiate(code_id, InstantiateMsg {}, &deployer, &[], "counter")
         .await
-        .expect("instantiate");
+        .expect("instantiate")
+        .address;
 
     let res: CountResponse = chain
         .query_wasm_smart(&contract, QueryMsg::GetCount {})
@@ -51,12 +55,7 @@ async fn deploy_increment_query() {
         .expect("execute 2");
     // The mock mints a synthetic, deterministic tx hash (uppercase sha256 hex, Tendermint shape),
     // distinct per execute, so a test can read a hash on the mock exactly as on live RPC.
-    let h1 = exec1
-        .tx_hash
-        .expect("mock execute carries a synthetic tx hash");
-    let h2 = exec2
-        .tx_hash
-        .expect("mock execute carries a synthetic tx hash");
+    let (h1, h2) = (exec1.tx_hash, exec2.tx_hash);
     assert_eq!(h1.len(), 64, "tendermint tx hash is 32-byte sha256 hex");
     assert!(h1
         .chars()
