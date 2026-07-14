@@ -4,7 +4,8 @@
 //! client). Read paths need no signer: [`block_height`] (`getSlot`), [`balance`]
 //! (`getBalance`), and [`get_account`] (`getAccountInfo`). Write paths (`add_program`,
 //! `send_transaction`, `transfer_funds`, `set_balance`) still return
-//! [`SvmError::Unimplemented`] until signing and broadcast land.
+//! [`SvmError::Unimplemented`] until signing and broadcast land, and so does
+//! `estimate_transaction`, which needs the same transaction assembly they do.
 //!
 //! [`block_height`]: SvmRpcProvider::block_height
 //! [`balance`]: SvmRpcProvider::balance
@@ -29,7 +30,7 @@ use solana_signer::Signer;
 use crate::asset::SvmAsset;
 use crate::chains::{Commitment, SolanaChainInfo};
 use crate::error::SvmError;
-use crate::provider::SvmDeploy;
+use crate::provider::{SvmComputeBudget, SvmDeploy};
 use crate::wallet::SvmSigner;
 
 /// A live-RPC Solana provider. Read-only: chain-level reads and account reads hit a real
@@ -154,7 +155,8 @@ impl SvmRpcProvider {
         Err(SvmError::Unimplemented("rpc add_program_at".into()))
     }
 
-    /// Sign and send a transaction built from `instructions`, signed by `signer`.
+    /// Sign and send a transaction built from `instructions`, capped at `budget` compute units,
+    /// signed by `signer`.
     ///
     /// The wallet signer is plumbed through, but live broadcast is not yet implemented: the
     /// return type is litesvm's [`TransactionMetadata`], which a bare `sendTransaction` (which
@@ -164,18 +166,35 @@ impl SvmRpcProvider {
         &self,
         _instructions: impl AsRef<[Instruction]>,
         _signer: &SvmSigner,
+        _budget: SvmComputeBudget,
     ) -> Result<TransactionMetadata, SvmError> {
         Err(SvmError::Unimplemented("rpc send_transaction".into()))
     }
 
-    /// Transfer `amount` base units (lamports) of `denom` from `signer` to `to`, returning the
-    /// base58 transaction signature.
+    /// Report what the transaction built from `instructions` would consume and pay if `signer`
+    /// sent it, without sending it.
+    ///
+    /// Unimplemented, like every other write path here. `simulateTransaction` exists on the
+    /// JSON-RPC API, but it needs the same signing and message assembly the write paths do, and
+    /// its response cannot fill a [`TransactionMetadata`] (it reports no fee). Returning a zero
+    /// would claim a live cluster executes for free.
+    pub async fn estimate_transaction(
+        &self,
+        _instructions: impl AsRef<[Instruction]>,
+        _signer: &SvmSigner,
+    ) -> Result<TransactionMetadata, SvmError> {
+        Err(SvmError::Unimplemented("rpc estimate_transaction".into()))
+    }
+
+    /// Transfer `amount` base units (lamports) of `denom` from `signer` to `to`, capped at `budget`
+    /// compute units, returning the base58 transaction signature.
     pub async fn transfer_funds(
         &self,
         _to: &Address,
         _denom: &str,
         _amount: u64,
         _signer: &SvmSigner,
+        _budget: SvmComputeBudget,
     ) -> Result<String, SvmError> {
         Err(SvmError::Unimplemented("solana rpc transfer_funds".into()))
     }

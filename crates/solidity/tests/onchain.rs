@@ -13,7 +13,7 @@ use alloy::sol_types::SolCall;
 use cross_vm_core::{ChainProvider, WalletFactory};
 use cross_vm_macros::define_wallet_roster;
 use cross_vm_solidity::chains::BASE_SEPOLIA;
-use cross_vm_solidity::{Bytes, EvmChain, B256, U256};
+use cross_vm_solidity::{Bytes, EvmChain, EvmGasLimit, B256, U256};
 
 define_wallet_roster! {
     pub const ONCHAIN_WALLETS: OnchainWallets = {
@@ -61,15 +61,46 @@ async fn live_counter_on_base_sepolia() {
         "wallet {who} has no Base Sepolia ETH; fund it (index 0 of MNEMONIC_TEST) and retry"
     );
 
-    let deploy = chain
-        .deploy_create(
+    // Forecast the deploy before running it, then check the receipt against the forecast. The band
+    // is wide on purpose: `eth_estimateGas` binary-searches on the node's pending state, which is
+    // not bit-for-bit the state the transaction lands in, so the two numbers are close but need not
+    // be equal. Anything outside this band means the estimator is wired to the wrong quantity.
+    let quote = chain
+        .estimate_deploy_create(
             Counter::BYTECODE.clone(),
             Bytes::new(),
             ONCHAIN_WALLETS.test,
         )
         .await
+        .expect("estimate_deploy_create");
+    println!(
+        "deploy estimate: {} gas, fee {:?} wei",
+        quote.used, quote.fee
+    );
+    assert!(quote.used > 0, "a live deploy estimate cannot be zero gas");
+    assert!(
+        matches!(quote.fee, Some(f) if f > 0),
+        "the RPC backend has a gas price, so it must price the estimate: {:?}",
+        quote.fee
+    );
+
+    let deploy = chain
+        .deploy_create(
+            Counter::BYTECODE.clone(),
+            Bytes::new(),
+            ONCHAIN_WALLETS.test,
+            EvmGasLimit::Estimated,
+        )
+        .await
         .expect("deploy_create");
     let contract = deploy.address;
+    println!("deploy actually cost: {} gas", deploy.gas.used);
+    assert!(
+        quote.used * 2 >= deploy.gas.used && quote.used <= deploy.gas.used * 2,
+        "deploy estimate ({}) is not in the same band as the gas the deploy was billed ({})",
+        quote.used,
+        deploy.gas.used
+    );
     println!("deployed Counter at: {contract}");
     println!("deploy tx hash: {}", deploy.tx_hash);
     assert_ne!(
@@ -83,14 +114,37 @@ async fn live_counter_on_base_sepolia() {
         "fresh counter starts at 0"
     );
 
-    let exec = chain
-        .call(
+    let quote = chain
+        .estimate_call(
             &contract,
             Bytes::from(Counter::incrementCall {}.abi_encode()),
             ONCHAIN_WALLETS.test,
         )
         .await
+        .expect("estimate_call");
+    println!(
+        "increment estimate: {} gas, fee {:?} wei",
+        quote.used, quote.fee
+    );
+    assert!(quote.used > 0, "a live call estimate cannot be zero gas");
+    assert!(matches!(quote.fee, Some(f) if f > 0), "unpriced estimate");
+
+    let exec = chain
+        .call(
+            &contract,
+            Bytes::from(Counter::incrementCall {}.abi_encode()),
+            ONCHAIN_WALLETS.test,
+            EvmGasLimit::Estimated,
+        )
+        .await
         .expect("increment");
+    println!("increment actually cost: {} gas", exec.gas.used);
+    assert!(
+        quote.used * 2 >= exec.gas.used && quote.used <= exec.gas.used * 2,
+        "call estimate ({}) is not in the same band as the gas the call was billed ({})",
+        quote.used,
+        exec.gas.used
+    );
     let tx_hash = exec.tx_hash;
     assert_ne!(
         tx_hash,
@@ -130,7 +184,15 @@ async fn live_transfer_funds_on_base_sepolia() {
     let amount = U256::from(1_000u64);
     let start = chain.balance(&who).await.expect("read balance");
     let tx_hash = chain
-        .transfer_funds(&who, "ETH", amount, ONCHAIN_WALLETS.test)
+        .transfer_funds(
+            &who,
+            "ETH",
+            amount,
+            ONCHAIN_WALLETS.test,
+            // A plain value transfer costs the intrinsic 21_000 exactly; `Exact` skips the extra
+            // `eth_estimateGas` round trip the live path would otherwise make.
+            EvmGasLimit::Exact(21_000),
+        )
         .await
         .expect("transfer_funds");
     println!("transfer tx hash: {tx_hash}");

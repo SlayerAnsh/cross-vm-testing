@@ -2,11 +2,11 @@
 
 use cross_vm_core::{BlockTime, ChainKind, ChainProvider, ChainSpec, CrossVmError, WalletLabel};
 #[cfg(feature = "cw")]
-use cross_vm_cosmwasm::{CwChain, CwMockProvider, CwRpcProvider};
+use cross_vm_cosmwasm::{CwChain, CwGasLimit, CwMockProvider, CwRpcProvider};
 #[cfg(feature = "solana")]
-use cross_vm_solana::{SvmChain, SvmMockProvider, SvmRpcProvider};
+use cross_vm_solana::{SvmChain, SvmComputeBudget, SvmMockProvider, SvmRpcProvider};
 #[cfg(feature = "evm")]
-use cross_vm_solidity::{EvmChain, EvmMockProvider, EvmRpcProvider, U256};
+use cross_vm_solidity::{EvmChain, EvmGasLimit, EvmMockProvider, EvmRpcProvider, U256};
 #[cfg(feature = "tron")]
 use cross_vm_tron::{TronChain, TronMockProvider, TronRpcProvider};
 
@@ -132,6 +132,14 @@ impl AnyChain {
     /// `denom` is passed through verbatim; each VM validates it below this layer. On Solana
     /// only the mock backend transfers, the RPC backend returns
     /// [`CrossVmError::Unimplemented`].
+    ///
+    /// There is no limit parameter, deliberately: the VM limits it would forward to are not the
+    /// same quantity (`Exact(n)` is gas on EVM, sun on Tron, compute units on Solana), which is
+    /// exactly why the limit types are per-VM. `Estimated` is the only limit that means the same
+    /// thing on all four, so this layer always resolves it (Tron's `transfer_funds` takes no
+    /// limit at all: a `TransferContract` runs no code and burns only bandwidth). A caller
+    /// needing an exact limit downcasts to the concrete chain, the same escape hatch contract
+    /// ops already use.
     pub async fn transfer_funds(
         &self,
         to: &Account,
@@ -141,15 +149,30 @@ impl AnyChain {
     ) -> Result<String, CrossVmError> {
         match self {
             #[cfg(feature = "cw")]
-            AnyChain::CosmWasm(c) => Ok(c.transfer_funds(to.cw()?, denom, amount, wallet).await?),
+            AnyChain::CosmWasm(c) => Ok(c
+                .transfer_funds(to.cw()?, denom, amount, wallet, CwGasLimit::Estimated)
+                .await?),
             #[cfg(feature = "evm")]
             AnyChain::Evm(c) => Ok(c
-                .transfer_funds(to.evm()?, denom, U256::from(amount), wallet)
+                .transfer_funds(
+                    to.evm()?,
+                    denom,
+                    U256::from(amount),
+                    wallet,
+                    EvmGasLimit::Estimated,
+                )
                 .await?),
             #[cfg(feature = "solana")]
             AnyChain::Svm(c) => {
                 let lamports = base_units_u64(amount, ChainKind::Svm, "lamports")?;
-                Ok(c.transfer_funds(to.svm()?, denom, lamports, wallet).await?)
+                Ok(c.transfer_funds(
+                    to.svm()?,
+                    denom,
+                    lamports,
+                    wallet,
+                    SvmComputeBudget::Estimated,
+                )
+                .await?)
             }
             #[cfg(feature = "tron")]
             AnyChain::Tron(c) => {

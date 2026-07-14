@@ -47,6 +47,69 @@ pub struct TronResources {
     pub fee: Option<u64>,
 }
 
+/// The ceiling a mutating Tron operation runs under, tagged with the quantity it caps.
+///
+/// Like [`TronCompute`], the two exact variants are not the same quantity and are not
+/// interchangeable, and for the same reason. java-tron's only caller-settable knob is `fee_limit`,
+/// a number of *sun*: the node divides it by the current energy price to get the energy the
+/// transaction may burn, so it is an energy ceiling denominated in TRX. The mock is `revm`, which
+/// budgets a transaction in *EVM gas* and has no energy and no price to buy energy with. Handing
+/// a backend the other's unit is an error, not a silently ignored cap and not a fabricated
+/// conversion.
+/// Source: <https://developers.tron.network/docs/set-feelimit>
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TronLimit {
+    /// java-tron's `fee_limit`, in sun: the most TRX the transaction may spend on energy, passed
+    /// to the node verbatim. The live RPC backend only.
+    ///
+    /// It binds even a sender whose staked energy would cover the whole transaction and who
+    /// therefore burns nothing, because the node caps the transaction's energy at
+    /// `min(available energy, fee_limit / energy price)`. It does NOT bound the bandwidth fee,
+    /// which java-tron charges outside it.
+    Fee(u64),
+    /// An EVM gas budget, the only limit `revm` understands. The mock backend only.
+    Gas(u64),
+    /// Derive the limit from what the operation is forecast to consume, scaled by the chain's
+    /// [`gas_adjustment`](crate::TronChainInfo::gas_adjustment).
+    ///
+    /// Each backend resolves it in the unit it can actually meter: EVM gas on the mock, and on
+    /// the live RPC the node's forecast energy priced into a sun `fee_limit` at the chain's
+    /// current energy price. Costs the extra round trips the forecast needs.
+    Estimated,
+}
+
+/// The energy-payment policy a create writes into the contract it deploys: who pays the energy
+/// when someone later calls that contract.
+///
+/// This is NOT a cap on the create transaction (that is [`TronLimit`], which a deploy takes
+/// separately). These are two fields of java-tron's `DeployContract` that persist as properties of
+/// the deployed contract and bill every FUTURE call to it, which is why they are not part of the
+/// per-transaction limit. They come as a pair because either alone is meaningless:
+/// `origin_energy_limit` caps what the contract's owner pays, so at
+/// `consume_user_resource_percent: 100` the owner pays none of it and the limit never binds.
+///
+/// The mock ignores this: `revm` bills one payer and has no energy to apportion.
+/// Source: <https://developers.tron.network/docs/energy-consumption-mechanism>
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TronEnergyPolicy {
+    /// Percentage of a call's energy the CALLER pays, `0..=100`; the contract's owner pays the
+    /// rest. java-tron rejects a deploy outside that range.
+    pub consume_user_resource_percent: u8,
+    /// Ceiling on the energy the contract's OWNER will pay for one call to it. Never binds when
+    /// `consume_user_resource_percent` is 100.
+    pub origin_energy_limit: u64,
+}
+
+/// Scale a forecast by the chain's `gas_adjustment`, rounding up.
+///
+/// The estimate is the floor of what the operation costs, measured against the state the estimate
+/// saw; the adjustment is the headroom for the state having moved by the time the operation runs.
+/// Rounding up matters at the bottom of the range, where truncation would hand back a limit under
+/// the estimate itself. Saturates rather than wrapping (an f64 -> u64 cast in Rust is saturating).
+pub(crate) fn with_headroom(units: u64, gas_adjustment: f64) -> u64 {
+    (units as f64 * gas_adjustment).ceil() as u64
+}
+
 /// The result of a state-mutating call: return data, emitted logs (events), the transaction hash,
 /// and the resources the operation consumed.
 ///
@@ -77,4 +140,26 @@ pub struct TronDeploy {
     pub tx_hash: String,
     /// What the deploy consumed, in the unit the backend actually metered.
     pub resources: TronResources,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn headroom_rounds_up_and_never_lands_under_the_estimate() {
+        // The adjustment is headroom, so a fractional result rounds up: truncation would put the
+        // limit under the very estimate it was derived from.
+        assert_eq!(with_headroom(10_000, 1.3), 13_000);
+        assert_eq!(with_headroom(1, 1.3), 2);
+        assert_eq!(with_headroom(3, 1.1), 4);
+        // An adjustment of exactly 1.0 is the estimate itself (config permits it).
+        assert_eq!(with_headroom(21_000, 1.0), 21_000);
+        assert_eq!(with_headroom(0, 1.3), 0);
+    }
+
+    #[test]
+    fn headroom_saturates_instead_of_wrapping() {
+        assert_eq!(with_headroom(u64::MAX, 2.0), u64::MAX);
+    }
 }

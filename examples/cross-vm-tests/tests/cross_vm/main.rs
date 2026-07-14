@@ -7,6 +7,7 @@
 mod support;
 
 mod counter;
+mod gas;
 mod ping_pong;
 mod setup;
 mod wallet;

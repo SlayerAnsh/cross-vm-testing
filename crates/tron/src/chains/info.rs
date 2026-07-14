@@ -19,6 +19,11 @@ pub struct TronChainInfo {
     pub native_symbol: &'static str,
     /// Default public RPC endpoint, if known.
     pub rpc_url: Option<&'static str>,
+    /// Headroom applied to a forecast when an operation asks for a
+    /// [`TronLimit::Estimated`](crate::TronLimit::Estimated) limit, as a multiplier of at least
+    /// `1.0`: the estimate is measured against the state the node (or the mock) saw, and the
+    /// operation runs against the state it finds.
+    pub gas_adjustment: f64,
 }
 
 impl TronChainInfo {

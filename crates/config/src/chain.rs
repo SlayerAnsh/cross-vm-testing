@@ -25,6 +25,12 @@ pub struct ChainDecl {
     pub rpc_url: Option<String>,
     /// Per-chain `"mock"` | `"rpc"` override of the top level `[env].target`.
     pub target: Option<String>,
+    /// All kinds: multiplier applied to a gas/compute estimate to get the limit an op actually
+    /// submits. Unlike `gas_price` (CosmWasm only), this is meaningful on every VM, since every
+    /// VM has some notion of an estimate and a limit derived from it. Must be finite and `>= 1.0`
+    /// (enforced by this crate's validation stage); the framework applies the `1.3` default when
+    /// absent.
+    pub gas_adjustment: Option<f64>,
     /// Free form metadata table passed through to `ChainSpecData`.
     pub params: Option<toml::Table>,
     /// CosmWasm only: address prefix (e.g. `"osmo"`).
@@ -78,6 +84,7 @@ mod tests {
             native_symbol: None,
             rpc_url: None,
             target: None,
+            gas_adjustment: None,
             params: None,
             bech32_prefix: None,
             native_denom: None,

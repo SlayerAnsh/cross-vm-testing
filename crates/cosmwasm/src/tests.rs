@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use crate::chains::{LOCAL, OSMOSIS};
-use crate::{CwAsset, CwChain, CwError};
+use crate::{CwAsset, CwChain, CwError, CwGasLimit};
 use cross_vm_core::{BlockTime, ChainProvider, ChainSpec, WalletFactory};
 use cross_vm_macros::define_wallet_roster;
 
@@ -26,6 +26,22 @@ fn wallets() -> Rc<WalletFactory> {
 fn predefined_chain_metadata() {
     assert_eq!(OSMOSIS.chain_id(), "osmosis-1");
     assert_eq!(OSMOSIS.native_denom, "uosmo");
+}
+
+/// Every preset's `gas_adjustment` must be at least 1.0, the same floor the config layer
+/// validates. Below 1.0 it would scale a simulated figure *down*, producing a gas limit the node
+/// already knows the transaction cannot fit in: `Estimated` would then reliably run out of gas.
+#[test]
+fn every_preset_carries_a_usable_gas_adjustment() {
+    use crate::chains::{COSMOS_HUB, JUNO, NEUTRON, OSMOSIS_TESTNET};
+    for chain in [OSMOSIS, OSMOSIS_TESTNET, JUNO, NEUTRON, COSMOS_HUB, LOCAL] {
+        assert!(
+            chain.gas_adjustment >= 1.0 && chain.gas_adjustment.is_finite(),
+            "{} has an unusable gas_adjustment: {}",
+            chain.chain_id,
+            chain.gas_adjustment
+        );
+    }
 }
 
 #[tokio::test]
@@ -165,7 +181,7 @@ async fn transfer_funds_moves_the_native_denom() {
     chain.set_balance(&alice, denom, 1_000).await.unwrap();
 
     let hash = chain
-        .transfer_funds(&bob, denom, 400, TEST_WALLETS.alice)
+        .transfer_funds(&bob, denom, 400, TEST_WALLETS.alice, CwGasLimit::Estimated)
         .await
         .expect("transfer");
 
@@ -192,7 +208,13 @@ async fn transfer_funds_moves_a_non_native_denom() {
     chain.set_balance(&alice, IBC_DENOM, 900).await.unwrap();
 
     chain
-        .transfer_funds(&bob, IBC_DENOM, 250, TEST_WALLETS.alice)
+        .transfer_funds(
+            &bob,
+            IBC_DENOM,
+            250,
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
         .await
         .expect("transfer");
 
@@ -215,7 +237,13 @@ async fn transfer_funds_rejects_an_underfunded_sender() {
     chain.set_balance(&alice, denom, 100).await.unwrap();
 
     let err = chain
-        .transfer_funds(&bob, denom, 1_000, TEST_WALLETS.alice)
+        .transfer_funds(
+            &bob,
+            denom,
+            1_000,
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
         .await
         .expect_err("sender holds only 100");
     assert!(
@@ -242,7 +270,7 @@ async fn every_mutating_step_carries_a_distinct_tx_hash() {
     ));
 
     let stored = chain
-        .store_code(code, TEST_WALLETS.alice)
+        .store_code(code, TEST_WALLETS.alice, CwGasLimit::Estimated)
         .await
         .expect("store_code");
     let instantiated = chain
@@ -252,6 +280,7 @@ async fn every_mutating_step_carries_a_distinct_tx_hash() {
             TEST_WALLETS.alice,
             &[],
             "counter",
+            CwGasLimit::Estimated,
         )
         .await
         .expect("instantiate");
@@ -261,6 +290,7 @@ async fn every_mutating_step_carries_a_distinct_tx_hash() {
             ExecuteMsg::Increment {},
             TEST_WALLETS.alice,
             &[],
+            CwGasLimit::Estimated,
         )
         .await
         .expect("increment");
@@ -292,7 +322,7 @@ async fn mock_reports_no_gas_figure_rather_than_a_zero_one() {
     ));
 
     let stored = chain
-        .store_code(code, TEST_WALLETS.alice)
+        .store_code(code, TEST_WALLETS.alice, CwGasLimit::Estimated)
         .await
         .expect("store_code");
     let instantiated = chain
@@ -302,6 +332,7 @@ async fn mock_reports_no_gas_figure_rather_than_a_zero_one() {
             TEST_WALLETS.alice,
             &[],
             "counter",
+            CwGasLimit::Estimated,
         )
         .await
         .expect("instantiate");
@@ -311,6 +342,7 @@ async fn mock_reports_no_gas_figure_rather_than_a_zero_one() {
             ExecuteMsg::Increment {},
             TEST_WALLETS.alice,
             &[],
+            CwGasLimit::Estimated,
         )
         .await
         .expect("increment");
@@ -329,6 +361,169 @@ async fn mock_reports_no_gas_figure_rather_than_a_zero_one() {
             "mock {op} must report no gas figure (it cannot meter), got {gas:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn mock_estimates_report_absence_rather_than_a_fabricated_figure() {
+    use cosmwasm_std::Empty;
+    use counter::{ExecuteMsg, InstantiateMsg};
+    use cw_multi_test::{Contract, ContractWrapper};
+
+    let chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let contract_wrapper = || -> Box<dyn Contract<Empty, Empty>> {
+        Box::new(ContractWrapper::new(
+            counter::execute,
+            counter::instantiate,
+            counter::query,
+        ))
+    };
+
+    // Deploy for real so every estimate targets state that exists; the estimates themselves
+    // must still come back absent.
+    let stored = chain
+        .store_code(
+            contract_wrapper(),
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("store_code");
+    let instantiated = chain
+        .instantiate(
+            stored.code_id,
+            InstantiateMsg {},
+            TEST_WALLETS.alice,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("instantiate");
+    let bob = chain
+        .wallet_address(TEST_WALLETS.bob)
+        .await
+        .expect("bob addr");
+
+    // cw-multi-test has no gas meter, so there is nothing to simulate against: every estimate
+    // reports absence, mirroring the ops' `gas` field. If a future change starts fabricating a
+    // figure on the mock, this fails.
+    for (op, est) in [
+        (
+            "estimate_store_code",
+            chain
+                .estimate_store_code(contract_wrapper(), TEST_WALLETS.alice)
+                .await
+                .expect("estimate_store_code"),
+        ),
+        (
+            "estimate_instantiate",
+            chain
+                .estimate_instantiate(
+                    stored.code_id,
+                    InstantiateMsg {},
+                    TEST_WALLETS.alice,
+                    &[],
+                    "counter",
+                )
+                .await
+                .expect("estimate_instantiate"),
+        ),
+        (
+            "estimate_execute_contract",
+            chain
+                .estimate_execute_contract(
+                    &instantiated.address,
+                    ExecuteMsg::Increment {},
+                    TEST_WALLETS.alice,
+                    &[],
+                )
+                .await
+                .expect("estimate_execute_contract"),
+        ),
+        (
+            "estimate_transfer_funds",
+            chain
+                .estimate_transfer_funds(&bob, "uosmo", 1, TEST_WALLETS.alice)
+                .await
+                .expect("estimate_transfer_funds"),
+        ),
+    ] {
+        assert!(
+            est.is_none(),
+            "mock {op} must report no estimate (nothing meters), got {est:?}"
+        );
+    }
+}
+
+/// A gas limit is inert on the mock, and this is the test that says so out loud.
+///
+/// `cw-multi-test` has no gas meter, so nothing counts toward a limit and nothing can trip one:
+/// every mutating op runs to completion under `Exact(0)`, the smallest limit expressible, which no
+/// real chain would accept for any of these transactions. The corollary is that an out-of-gas
+/// failure is not reproducible here (`tests/onchain.rs` covers it against a live node, which has a
+/// meter to trip). The ops still take the limit so one script runs on either backend.
+#[tokio::test]
+async fn a_mock_cannot_run_out_of_gas() {
+    use cosmwasm_std::Empty;
+    use counter::{CountResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
+    use cw_multi_test::{Contract, ContractWrapper};
+
+    let mut chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let code: Box<dyn Contract<Empty, Empty>> = Box::new(ContractWrapper::new(
+        counter::execute,
+        counter::instantiate,
+        counter::query,
+    ));
+    let alice = chain
+        .wallet_address(TEST_WALLETS.alice)
+        .await
+        .expect("alice");
+    let bob = chain.wallet_address(TEST_WALLETS.bob).await.expect("bob");
+    chain
+        .set_balance(&alice, "uosmo", 1_000)
+        .await
+        .expect("fund");
+
+    let stored = chain
+        .store_code(code, TEST_WALLETS.alice, CwGasLimit::Exact(0))
+        .await
+        .expect("store_code runs on a zero gas limit: nothing meters it");
+    let instantiated = chain
+        .instantiate(
+            stored.code_id,
+            InstantiateMsg {},
+            TEST_WALLETS.alice,
+            &[],
+            "counter",
+            CwGasLimit::Exact(0),
+        )
+        .await
+        .expect("instantiate runs on a zero gas limit");
+    chain
+        .execute_contract(
+            &instantiated.address,
+            ExecuteMsg::Increment {},
+            TEST_WALLETS.alice,
+            &[],
+            CwGasLimit::Exact(0),
+        )
+        .await
+        .expect("execute runs on a zero gas limit");
+    chain
+        .transfer_funds(&bob, "uosmo", 1, TEST_WALLETS.alice, CwGasLimit::Exact(0))
+        .await
+        .expect("transfer runs on a zero gas limit");
+
+    // The increment landed: the limit was ignored, not enforced by silently dropping the work.
+    let count: CountResponse = chain
+        .query_wasm_smart(&instantiated.address, QueryMsg::GetCount {})
+        .await
+        .expect("query");
+    assert_eq!(count.count, 1);
+
+    // And no fee was charged for any of it, so no limit could have been "paid for" either.
+    assert_eq!(stored.gas, None);
+    assert_eq!(instantiated.gas, None);
 }
 
 #[tokio::test]
@@ -352,9 +547,19 @@ async fn query_wasm_raw_reads_item_storage() {
         counter::instantiate,
         counter::query,
     ));
-    let code_id = chain.store_code(&deployer, code).await.code_id;
+    let code_id = chain
+        .store_code(&deployer, code, CwGasLimit::Estimated)
+        .await
+        .code_id;
     let contract = chain
-        .instantiate(code_id, InstantiateMsg {}, &deployer, &[], "counter")
+        .instantiate(
+            code_id,
+            InstantiateMsg {},
+            &deployer,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
         .await
         .expect("instantiate")
         .address;
@@ -374,7 +579,13 @@ async fn query_wasm_raw_reads_item_storage() {
     // Two increments later, the same raw key reflects the new value.
     for _ in 0..2 {
         chain
-            .execute_contract(&contract, ExecuteMsg::Increment {}, &deployer, &[])
+            .execute_contract(
+                &contract,
+                ExecuteMsg::Increment {},
+                &deployer,
+                &[],
+                CwGasLimit::Estimated,
+            )
             .await
             .expect("increment");
     }
@@ -410,9 +621,19 @@ async fn get_contract_states_dumps_all_storage() {
         counter::instantiate,
         counter::query,
     ));
-    let code_id = chain.store_code(&deployer, code).await.code_id;
+    let code_id = chain
+        .store_code(&deployer, code, CwGasLimit::Estimated)
+        .await
+        .code_id;
     let contract = chain
-        .instantiate(code_id, InstantiateMsg {}, &deployer, &[], "counter")
+        .instantiate(
+            code_id,
+            InstantiateMsg {},
+            &deployer,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
         .await
         .expect("instantiate")
         .address;
@@ -436,7 +657,13 @@ async fn get_contract_states_dumps_all_storage() {
     // Two increments later, the dump reflects the new value under the same key.
     for _ in 0..2 {
         chain
-            .execute_contract(&contract, ExecuteMsg::Increment {}, &deployer, &[])
+            .execute_contract(
+                &contract,
+                ExecuteMsg::Increment {},
+                &deployer,
+                &[],
+                CwGasLimit::Estimated,
+            )
             .await
             .expect("increment");
     }

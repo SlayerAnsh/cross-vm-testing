@@ -12,6 +12,7 @@ pub const ETHEREUM: EvmChainInfo = EvmChainInfo {
     name: "Ethereum",
     spec_id: SpecId::CANCUN,
     native_symbol: "ETH",
+    gas_adjustment: 1.3,
     rpc_url: Some("https://eth.llamarpc.com"),
 };
 
@@ -21,6 +22,7 @@ pub const SEPOLIA: EvmChainInfo = EvmChainInfo {
     name: "Sepolia",
     spec_id: SpecId::CANCUN,
     native_symbol: "ETH",
+    gas_adjustment: 1.3,
     rpc_url: Some("https://ethereum-sepolia-rpc.publicnode.com"),
 };
 
@@ -30,6 +32,7 @@ pub const BASE_SEPOLIA: EvmChainInfo = EvmChainInfo {
     name: "Base Sepolia",
     spec_id: SpecId::CANCUN,
     native_symbol: "ETH",
+    gas_adjustment: 1.3,
     rpc_url: Some("https://sepolia.base.org"),
 };
 
@@ -39,6 +42,7 @@ pub const ARBITRUM: EvmChainInfo = EvmChainInfo {
     name: "Arbitrum One",
     spec_id: SpecId::CANCUN,
     native_symbol: "ETH",
+    gas_adjustment: 1.3,
     rpc_url: Some("https://arb1.arbitrum.io/rpc"),
 };
 
@@ -48,6 +52,7 @@ pub const OPTIMISM: EvmChainInfo = EvmChainInfo {
     name: "OP Mainnet",
     spec_id: SpecId::CANCUN,
     native_symbol: "ETH",
+    gas_adjustment: 1.3,
     rpc_url: Some("https://mainnet.optimism.io"),
 };
 
@@ -57,6 +62,7 @@ pub const BASE: EvmChainInfo = EvmChainInfo {
     name: "Base",
     spec_id: SpecId::CANCUN,
     native_symbol: "ETH",
+    gas_adjustment: 1.3,
     rpc_url: Some("https://mainnet.base.org"),
 };
 
@@ -66,6 +72,7 @@ pub const POLYGON: EvmChainInfo = EvmChainInfo {
     name: "Polygon",
     spec_id: SpecId::CANCUN,
     native_symbol: "POL",
+    gas_adjustment: 1.3,
     rpc_url: Some("https://polygon-rpc.com"),
 };
 
@@ -75,5 +82,6 @@ pub const LOCAL: EvmChainInfo = EvmChainInfo {
     name: "Local",
     spec_id: SpecId::CANCUN,
     native_symbol: "ETH",
+    gas_adjustment: 1.3,
     rpc_url: None,
 };

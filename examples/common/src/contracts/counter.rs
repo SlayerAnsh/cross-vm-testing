@@ -42,6 +42,15 @@ use solana_instruction::{AccountMeta, Instruction};
 /// The wallet that signs deploys and increments in the single-VM harness.
 const SIGNER: &str = "alice";
 
+/// The energy-payment policy the Tron deploy writes into the counter: the caller of a later
+/// `increment` pays all of its energy, so the deployer's ceiling never binds. The mock ignores it
+/// (`revm` bills one payer), but a deploy must state it, so the example states the honest thing.
+#[cfg(feature = "tron")]
+const CALLER_PAYS: TronEnergyPolicy = TronEnergyPolicy {
+    consume_user_resource_percent: 100,
+    origin_energy_limit: 0,
+};
+
 /// The cross-VM counter's logical methods. `#[cross_vm_contract(Counter)]` turns this into the
 /// `Counter` wrapper: struct, constructors, hook forwarders, and the VM dispatchers.
 ///
@@ -63,7 +72,11 @@ impl Counter {
     async fn cw_setup(&self, wallet: &str) -> Result<(), CrossVmError> {
         let chain = self.base.cosmwasm()?;
         let stored = chain
-            .store_code(cosmos_counter::contract(), WalletLabel::wrap(wallet))
+            .store_code(
+                cosmos_counter::contract(),
+                WalletLabel::wrap(wallet),
+                CwGasLimit::Estimated,
+            )
             .await?;
         let instantiated = chain
             .instantiate(
@@ -72,6 +85,7 @@ impl Counter {
                 WalletLabel::wrap(wallet),
                 &[],
                 "counter",
+                CwGasLimit::Estimated,
             )
             .await?;
         self.base
@@ -87,7 +101,7 @@ impl Counter {
             .base
             .cosmwasm()?
             .contract_as::<cosmos_counter::CounterContract>(self.base.cw_addr()?)
-            .increment(wallet)
+            .increment(wallet, CwGasLimit::Estimated)
             .await?;
         Ok(AppResponse::cosmwasm(
             (),
@@ -121,6 +135,7 @@ impl Counter {
                 evm_counter::Counter::BYTECODE.clone(),
                 Bytes::new(),
                 WalletLabel::wrap(wallet),
+                EvmGasLimit::Estimated,
             )
             .await?;
         self.base.set_address(Account::Evm(deployed.address));
@@ -134,7 +149,12 @@ impl Counter {
         let addr = self.base.evm_addr()?;
         let calldata = Bytes::from(evm_counter::Counter::incrementCall {}.abi_encode());
         let exec = chain
-            .call(&addr, calldata, WalletLabel::wrap(wallet))
+            .call(
+                &addr,
+                calldata,
+                WalletLabel::wrap(wallet),
+                EvmGasLimit::Estimated,
+            )
             .await?;
         Ok(AppResponse::evm(
             (),
@@ -177,6 +197,8 @@ impl Counter {
                 tron_counter::Counter::BYTECODE.clone(),
                 Bytes::new(),
                 WalletLabel::wrap(wallet),
+                TronLimit::Estimated,
+                CALLER_PAYS,
             )
             .await?;
         self.base.set_address(Account::Tron(deployed.address));
@@ -190,7 +212,12 @@ impl Counter {
         let addr = self.base.tron_addr()?;
         let calldata = Bytes::from(tron_counter::Counter::incrementCall {}.abi_encode());
         let exec = chain
-            .call(&addr, calldata, WalletLabel::wrap(wallet))
+            .call(
+                &addr,
+                calldata,
+                WalletLabel::wrap(wallet),
+                TronLimit::Estimated,
+            )
             .await?;
         Ok(AppResponse::tron(
             (),
@@ -244,7 +271,11 @@ impl Counter {
             ],
         );
         chain
-            .send_transaction(vec![ix], WalletLabel::wrap(wallet))
+            .send_transaction(
+                vec![ix],
+                WalletLabel::wrap(wallet),
+                SvmComputeBudget::Estimated,
+            )
             .await?;
         self.base.set_address(Account::Svm(pda));
         Ok(())
@@ -264,7 +295,11 @@ impl Counter {
             ],
         );
         let meta = chain
-            .send_transaction(vec![ix], WalletLabel::wrap(wallet))
+            .send_transaction(
+                vec![ix],
+                WalletLabel::wrap(wallet),
+                SvmComputeBudget::Estimated,
+            )
             .await?;
         Ok(AppResponse::solana((), meta))
     }

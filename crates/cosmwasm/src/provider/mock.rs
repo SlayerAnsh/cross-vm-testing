@@ -21,7 +21,7 @@ use cw_multi_test::{
 use crate::chains::CosmosChainInfo;
 use crate::error::{any_chain, CwError};
 use crate::msg::CwSerde;
-use crate::provider::{CwExecution, CwGas, CwInstantiate, CwStoreCode};
+use crate::provider::{CwExecution, CwGas, CwGasLimit, CwInstantiate, CwStoreCode};
 
 /// Default funding handed to accounts created via [`ChainProvider::new_account`].
 pub const DEFAULT_FUNDING: u128 = 1_000_000_000_000;
@@ -34,8 +34,24 @@ pub const DEFAULT_FUNDING: u128 = 1_000_000_000_000;
 /// measured the transaction and found it free, which is a different (and false) statement from
 /// "this backend cannot measure". A caller that needs a real figure must run against live RPC.
 ///
+/// The same reasoning makes [`crate::CwChain`]'s `estimate_*` methods report `None` on this
+/// backend: with no meter there is nothing to simulate against, so there is no forecast either.
+///
 /// Named so that a future change fabricating a number has to delete this constant to do it.
 const NO_GAS_METER: Option<CwGas> = None;
+
+// What a `CwGasLimit` means on this backend: nothing. Every mutating op takes one and ignores it.
+//
+// A gas limit is the point at which a chain stops executing and fails the transaction. This
+// backend has no gas meter (see `NO_GAS_METER`), so nothing ever counts toward a limit and the
+// mock *cannot run out of gas*: `Exact(1)` executes exactly as `Exact(15_000_000)` does, and
+// neither pays a fee. `Estimated` has nothing to simulate against, so it stays absent rather than
+// resolving to a fabricated figure (the same rule `CwChain`'s `estimate_*` methods follow).
+//
+// The ops still take the limit rather than have `CwChain` drop it one layer up: that is what lets
+// one test script run unchanged on either backend, and it keeps the honest statement at the
+// backend that cannot honor it. The consequence, stated plainly: an out-of-gas failure is not
+// reproducible on the mock. A test that needs one must run against live RPC.
 
 /// Deployable contract code for [`CwMockProvider::store_code`].
 pub type CwCode = Box<dyn Contract<Empty, Empty>>;
@@ -133,8 +149,9 @@ impl CwMockProvider {
     /// [`Self::next_tx_hash`]), recording `creator` as the uploading account (mirroring the
     /// sender a live chain's `MsgStoreCode` records).
     ///
-    /// `gas` is `NO_GAS_METER`: `cw-multi-test` cannot meter this upload.
-    pub async fn store_code(&self, creator: &Addr, code: CwCode) -> CwStoreCode {
+    /// The reported `gas` is `NO_GAS_METER` and the declared `_gas` limit is inert: `cw-multi-test`
+    /// can neither meter this upload nor run out of gas on it.
+    pub async fn store_code(&self, creator: &Addr, code: CwCode, _gas: CwGasLimit) -> CwStoreCode {
         let code_id = self
             .app
             .borrow_mut()
@@ -149,7 +166,8 @@ impl CwMockProvider {
     /// Instantiate a contract from an uploaded code id, returning its address plus the synthetic
     /// tx hash (see [`Self::next_tx_hash`]).
     ///
-    /// `gas` is `NO_GAS_METER`: `cw-multi-test` cannot meter this instantiation.
+    /// The reported `gas` is `NO_GAS_METER` and the declared `_gas` limit is inert: `cw-multi-test`
+    /// can neither meter this instantiation nor run out of gas on it.
     pub async fn instantiate<Init: CwSerde>(
         &self,
         code_id: u64,
@@ -157,6 +175,7 @@ impl CwMockProvider {
         sender: &Addr,
         funds: &[Coin],
         label: &str,
+        _gas: CwGasLimit,
     ) -> Result<CwInstantiate, CwError> {
         let address = self
             .app
@@ -179,13 +198,15 @@ impl CwMockProvider {
     /// The in-process backend does not broadcast a real transaction, so the returned
     /// [`CwExecution`] carries a synthetic, deterministic `tx_hash` (see [`Self::next_tx_hash`]),
     /// so the same test script reads a hash on both the mock and live RPC. Its `gas` is
-    /// `NO_GAS_METER`: unlike the hash, a gas figure has no honest stand-in.
+    /// `NO_GAS_METER`: unlike the hash, a gas figure has no honest stand-in. The declared `_gas`
+    /// limit is inert: nothing here can run out of gas.
     pub async fn execute_contract<Exec: CwSerde>(
         &self,
         addr: &Addr,
         msg: Exec,
         sender: &Addr,
         funds: &[Coin],
+        _gas: CwGasLimit,
     ) -> Result<CwExecution, CwError> {
         let response = self
             .app
@@ -203,13 +224,15 @@ impl CwMockProvider {
     /// tx hash (see [`Self::next_tx_hash`]).
     ///
     /// Any bank denom moves verbatim (`uosmo`, `ibc/...`), not just the chain's native denom. An
-    /// underfunded sender surfaces as [`CwError::Execute`].
+    /// underfunded sender surfaces as [`CwError::Execute`]. The declared `_gas` limit is inert:
+    /// nothing here can run out of gas, and the send is not charged a fee.
     pub async fn transfer_funds(
         &self,
         to: &Addr,
         denom: &str,
         amount: u128,
         sender: &Addr,
+        _gas: CwGasLimit,
     ) -> Result<String, CwError> {
         let msg = BankMsg::Send {
             to_address: to.to_string(),

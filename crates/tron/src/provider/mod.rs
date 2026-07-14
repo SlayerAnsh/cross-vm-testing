@@ -6,6 +6,8 @@ pub mod mock;
 pub mod rpc;
 
 pub use address::{address_from_pubkey, TronAddress};
-pub use execution::{TronCompute, TronDeploy, TronExecution, TronResources};
+pub use execution::{
+    TronCompute, TronDeploy, TronEnergyPolicy, TronExecution, TronLimit, TronResources,
+};
 pub use mock::{TronInner, TronMockProvider, DEFAULT_FUNDING_SUN};
 pub use rpc::TronRpcProvider;
