@@ -129,6 +129,17 @@ async fn ensure_asset_native_preserves_other_denoms() {
     );
 }
 
+/// Assert `hash` carries the textual shape of a Tendermint tx hash: 32 bytes of sha256 rendered
+/// as uppercase hex. Both the live RPC hash and the mock's synthetic stand-in match it.
+fn assert_tendermint_hash(hash: &str) {
+    assert_eq!(hash.len(), 64, "tendermint tx hash is 32-byte sha256 hex");
+    assert!(
+        hash.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()),
+        "hash `{hash}` is not uppercase hex"
+    );
+}
+
 /// Read an arbitrary bank denom's balance off a mock chain (the trait's `balance` is native-only).
 fn denom_balance(chain: &CwChain, who: &cosmwasm_std::Addr, denom: &str) -> u128 {
     let p = match chain {
@@ -161,10 +172,7 @@ async fn transfer_funds_moves_the_native_denom() {
     assert_eq!(chain.balance(&alice).await.unwrap(), 600);
     assert_eq!(chain.balance(&bob).await.unwrap(), 400);
     // The mock's synthetic hash carries the same shape as a live Tendermint one.
-    assert_eq!(hash.len(), 64, "tendermint tx hash is 32-byte sha256 hex");
-    assert!(hash
-        .chars()
-        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()));
+    assert_tendermint_hash(&hash);
 }
 
 #[tokio::test]
@@ -221,6 +229,109 @@ async fn transfer_funds_rejects_an_underfunded_sender() {
 }
 
 #[tokio::test]
+async fn every_mutating_step_carries_a_distinct_tx_hash() {
+    use cosmwasm_std::Empty;
+    use counter::{ExecuteMsg, InstantiateMsg};
+    use cw_multi_test::{Contract, ContractWrapper};
+
+    let chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let code: Box<dyn Contract<Empty, Empty>> = Box::new(ContractWrapper::new(
+        counter::execute,
+        counter::instantiate,
+        counter::query,
+    ));
+
+    let stored = chain
+        .store_code(code, TEST_WALLETS.alice)
+        .await
+        .expect("store_code");
+    let instantiated = chain
+        .instantiate(
+            stored.code_id,
+            InstantiateMsg {},
+            TEST_WALLETS.alice,
+            &[],
+            "counter",
+        )
+        .await
+        .expect("instantiate");
+    let exec = chain
+        .execute_contract(
+            &instantiated.address,
+            ExecuteMsg::Increment {},
+            TEST_WALLETS.alice,
+            &[],
+        )
+        .await
+        .expect("increment");
+
+    let hashes = [
+        stored.tx_hash.as_str(),
+        instantiated.tx_hash.as_str(),
+        exec.tx_hash.as_str(),
+    ];
+    for hash in hashes {
+        assert_tendermint_hash(hash);
+    }
+    // Each step is its own transaction on a live chain, so the mock's stand-ins never collide.
+    let unique: std::collections::HashSet<&str> = hashes.iter().copied().collect();
+    assert_eq!(unique.len(), hashes.len(), "hashes collide: {hashes:?}");
+}
+
+#[tokio::test]
+async fn mock_reports_no_gas_figure_rather_than_a_zero_one() {
+    use cosmwasm_std::Empty;
+    use counter::{ExecuteMsg, InstantiateMsg};
+    use cw_multi_test::{Contract, ContractWrapper};
+
+    let chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let code: Box<dyn Contract<Empty, Empty>> = Box::new(ContractWrapper::new(
+        counter::execute,
+        counter::instantiate,
+        counter::query,
+    ));
+
+    let stored = chain
+        .store_code(code, TEST_WALLETS.alice)
+        .await
+        .expect("store_code");
+    let instantiated = chain
+        .instantiate(
+            stored.code_id,
+            InstantiateMsg {},
+            TEST_WALLETS.alice,
+            &[],
+            "counter",
+        )
+        .await
+        .expect("instantiate");
+    let exec = chain
+        .execute_contract(
+            &instantiated.address,
+            ExecuteMsg::Increment {},
+            TEST_WALLETS.alice,
+            &[],
+        )
+        .await
+        .expect("increment");
+
+    // cw-multi-test has no gas meter, so every mock op reports the absence of a figure. A
+    // `Some(CwGas { used: 0, fee: 0 })` would assert the mock measured these transactions and
+    // found them free, which a caller could not tell apart from a genuinely free tx. If a future
+    // change starts fabricating a zero, this fails.
+    for (op, gas) in [
+        ("store_code", stored.gas),
+        ("instantiate", instantiated.gas),
+        ("execute_contract", exec.gas),
+    ] {
+        assert!(
+            gas.is_none(),
+            "mock {op} must report no gas figure (it cannot meter), got {gas:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn rpc_write_paths_unimplemented() {
     let mut chain = OSMOSIS.rpc(empty_wallets());
     let addr = cosmwasm_std::Addr::unchecked("osmo1xyz");
@@ -241,11 +352,12 @@ async fn query_wasm_raw_reads_item_storage() {
         counter::instantiate,
         counter::query,
     ));
-    let code_id = chain.store_code(&deployer, code).await;
+    let code_id = chain.store_code(&deployer, code).await.code_id;
     let contract = chain
         .instantiate(code_id, InstantiateMsg {}, &deployer, &[], "counter")
         .await
-        .expect("instantiate");
+        .expect("instantiate")
+        .address;
 
     // The counter contract keeps its count in a cw-storage-plus `Item::new("counter")`, which
     // lands under the raw storage key `b"counter"`, JSON-encoded (`0u64` -> b"0").
@@ -298,11 +410,12 @@ async fn get_contract_states_dumps_all_storage() {
         counter::instantiate,
         counter::query,
     ));
-    let code_id = chain.store_code(&deployer, code).await;
+    let code_id = chain.store_code(&deployer, code).await.code_id;
     let contract = chain
         .instantiate(code_id, InstantiateMsg {}, &deployer, &[], "counter")
         .await
-        .expect("instantiate");
+        .expect("instantiate")
+        .address;
 
     // The full dump carries the counter's `Item::new("counter")` entry under raw key `b"counter"`,
     // JSON-encoded (`0u64` -> b"0"). Contract-info-only keys are harmless: we only assert the

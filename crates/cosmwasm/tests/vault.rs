@@ -44,13 +44,13 @@ async fn payable_deposit_attaches_funds_then_borrow_and_query() {
         .await
         .expect("fund alice");
 
-    let code_id = chain
+    let stored = chain
         .store_code(vault_contract(), TEST_WALLETS.alice)
         .await
         .expect("store");
-    let addr = chain
+    let instantiated = chain
         .instantiate(
-            code_id,
+            stored.code_id,
             vault::InstantiateMsg {},
             TEST_WALLETS.alice,
             &[],
@@ -58,7 +58,7 @@ async fn payable_deposit_attaches_funds_then_borrow_and_query() {
         )
         .await
         .expect("instantiate");
-    let vault = chain.contract_as::<vault::VaultContract>(addr);
+    let vault = chain.contract_as::<vault::VaultContract>(instantiated.address);
 
     let before = chain.balance(&alice).await.expect("balance before");
     vault

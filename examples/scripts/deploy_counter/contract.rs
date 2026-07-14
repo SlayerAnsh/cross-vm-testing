@@ -11,6 +11,8 @@ use cross_vm_solidity::Bytes;
 use cross_vm_common::mocks::counter::cw::{self, COUNTER_WASM};
 use cross_vm_common::mocks::counter::evm as evm_counter;
 
+use crate::describe;
+
 /// The cross-VM counter's logical methods.
 #[cross_vm_contract(Counter)]
 pub trait CounterSpec {
@@ -26,7 +28,11 @@ impl Counter {
     // ----- CosmWasm hooks (live RPC: upload raw wasm, then instantiate) -----
     async fn cw_setup(&self, wallet: &str) -> Result<(), CrossVmError> {
         // One stateful handle threads `code_id` then address through the lifecycle: `store_code`
-        // records the code id internally, `instantiate` records the resulting address.
+        // records the code id, its tx hash and its gas internally, `instantiate` records the
+        // resulting address, tx hash and gas. The outer `Option`s below say which lifecycle steps
+        // this handle ran; both ran here, so both are `Some`. The gas figure keeps the backend's
+        // own `Option` nested inside: `Some(None)` would mean the step ran on a backend that
+        // cannot meter, which is why `describe` renders it as unmetered rather than as zero.
         let contract = CwContract::<cw::CounterContract>::new(self.base.cosmwasm()?.clone())
             .store_code(COUNTER_WASM.to_vec(), WalletLabel::wrap(wallet))
             .await?
@@ -39,8 +45,20 @@ impl Counter {
             .await?;
         let addr = contract.address().expect("instantiated").clone();
         println!(
-            "[cosmwasm] stored code id {}, instantiated at {addr}",
-            contract.code_id().expect("stored")
+            "[cosmwasm] stored code id {} in tx {} ({})",
+            contract.code_id().expect("stored"),
+            contract.store_code_tx_hash().expect("stored"),
+            describe(contract.store_code_gas().expect("stored").map(Cost::from)),
+        );
+        println!(
+            "[cosmwasm] instantiated at {addr} in tx {} ({})",
+            contract.instantiate_tx_hash().expect("instantiated"),
+            describe(
+                contract
+                    .instantiate_gas()
+                    .expect("instantiated")
+                    .map(Cost::from)
+            ),
         );
         self.base.set_address(Account::CosmWasm(addr));
         Ok(())
@@ -55,7 +73,12 @@ impl Counter {
             .contract_as::<cw::CounterContract>(self.base.cw_addr()?)
             .increment(wallet)
             .await?;
-        Ok(AppResponse::cosmwasm((), raw.response, raw.tx_hash))
+        Ok(AppResponse::cosmwasm(
+            (),
+            raw.response,
+            raw.tx_hash,
+            raw.gas,
+        ))
     }
 
     async fn cw_count(&self) -> Result<u64, CrossVmError> {
@@ -72,15 +95,22 @@ impl Counter {
     // ----- EVM hooks (live RPC: deploy creation bytecode) -----
     async fn evm_setup(&self, wallet: &str) -> Result<(), CrossVmError> {
         let chain = self.base.evm()?;
-        let addr = chain
+        let deployed = chain
             .deploy_create(
                 evm_counter::Counter::BYTECODE.clone(),
                 Bytes::new(),
                 WalletLabel::wrap(wallet),
             )
             .await?;
-        println!("[evm] deployed Counter at {addr}");
-        self.base.set_address(Account::Evm(addr));
+        // Both EVM backends meter, so a figure is always there to print; only the fee can be
+        // missing (the mock has no gas price to derive one from), and `Cost` renders that absence.
+        println!(
+            "[evm] deployed Counter at {} in tx {:#x} ({})",
+            deployed.address,
+            deployed.tx_hash,
+            Cost::from(deployed.gas),
+        );
+        self.base.set_address(Account::Evm(deployed.address));
         Ok(())
     }
 
@@ -89,8 +119,16 @@ impl Counter {
         let chain = self.base.evm()?;
         let addr = self.base.evm_addr()?;
         let calldata = Bytes::from(evm_counter::Counter::incrementCall {}.abi_encode());
-        let exec = chain.call(&addr, calldata, WalletLabel::wrap(wallet)).await?;
-        Ok(AppResponse::evm((), exec.output, exec.logs, exec.tx_hash))
+        let exec = chain
+            .call(&addr, calldata, WalletLabel::wrap(wallet))
+            .await?;
+        Ok(AppResponse::evm(
+            (),
+            exec.output,
+            exec.logs,
+            exec.tx_hash,
+            exec.gas,
+        ))
     }
 
     async fn evm_count(&self) -> Result<u64, CrossVmError> {

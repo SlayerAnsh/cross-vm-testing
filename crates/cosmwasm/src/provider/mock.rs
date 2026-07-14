@@ -21,10 +21,21 @@ use cw_multi_test::{
 use crate::chains::CosmosChainInfo;
 use crate::error::{any_chain, CwError};
 use crate::msg::CwSerde;
-use crate::provider::CwExecution;
+use crate::provider::{CwExecution, CwGas, CwInstantiate, CwStoreCode};
 
 /// Default funding handed to accounts created via [`ChainProvider::new_account`].
 pub const DEFAULT_FUNDING: u128 = 1_000_000_000_000;
+
+/// The gas figure every mock op reports: none, because there is none.
+///
+/// `cw-multi-test` has no gas meter. It does not charge gas, it does not count it, and its
+/// execution response is `{events, data}` with nowhere for a figure to come from. So the mock
+/// reports [`None`] rather than `Some(CwGas { used: 0, .. })`: a zero would claim the mock
+/// measured the transaction and found it free, which is a different (and false) statement from
+/// "this backend cannot measure". A caller that needs a real figure must run against live RPC.
+///
+/// Named so that a future change fabricating a number has to delete this constant to do it.
+const NO_GAS_METER: Option<CwGas> = None;
 
 /// Deployable contract code for [`CwMockProvider::store_code`].
 pub type CwCode = Box<dyn Contract<Empty, Empty>>;
@@ -118,15 +129,27 @@ impl CwMockProvider {
         self.app.borrow_mut()
     }
 
-    /// Upload a contract to the chain and return its code id, recording `creator` as the
-    /// uploading account (mirroring the sender a live chain's `MsgStoreCode` records).
-    pub async fn store_code(&self, creator: &Addr, code: CwCode) -> u64 {
-        self.app
+    /// Upload a contract to the chain and return its code id plus the synthetic tx hash (see
+    /// [`Self::next_tx_hash`]), recording `creator` as the uploading account (mirroring the
+    /// sender a live chain's `MsgStoreCode` records).
+    ///
+    /// `gas` is `NO_GAS_METER`: `cw-multi-test` cannot meter this upload.
+    pub async fn store_code(&self, creator: &Addr, code: CwCode) -> CwStoreCode {
+        let code_id = self
+            .app
             .borrow_mut()
-            .store_code_with_creator(creator.clone(), code)
+            .store_code_with_creator(creator.clone(), code);
+        CwStoreCode {
+            code_id,
+            tx_hash: self.next_tx_hash(&[creator.as_bytes(), &code_id.to_be_bytes()]),
+            gas: NO_GAS_METER,
+        }
     }
 
-    /// Instantiate a contract from an uploaded code id.
+    /// Instantiate a contract from an uploaded code id, returning its address plus the synthetic
+    /// tx hash (see [`Self::next_tx_hash`]).
+    ///
+    /// `gas` is `NO_GAS_METER`: `cw-multi-test` cannot meter this instantiation.
     pub async fn instantiate<Init: CwSerde>(
         &self,
         code_id: u64,
@@ -134,18 +157,29 @@ impl CwMockProvider {
         sender: &Addr,
         funds: &[Coin],
         label: &str,
-    ) -> Result<Addr, CwError> {
-        self.app
+    ) -> Result<CwInstantiate, CwError> {
+        let address = self
+            .app
             .borrow_mut()
             .instantiate_contract(code_id, sender.clone(), &init, funds, label, None)
-            .map_err(|e| CwError::Deploy(any_chain(&e)))
+            .map_err(|e| CwError::Deploy(any_chain(&e)))?;
+        Ok(CwInstantiate {
+            tx_hash: self.next_tx_hash(&[
+                sender.as_bytes(),
+                &code_id.to_be_bytes(),
+                address.as_bytes(),
+            ]),
+            address,
+            gas: NO_GAS_METER,
+        })
     }
 
     /// Execute a state-mutating message against a contract instance.
     ///
     /// The in-process backend does not broadcast a real transaction, so the returned
-    /// [`CwExecution`] carries a synthetic, deterministic `tx_hash` (see [`Self::next_tx_hash`])
-    /// rather than `None`, so the same test script reads a hash on both the mock and live RPC.
+    /// [`CwExecution`] carries a synthetic, deterministic `tx_hash` (see [`Self::next_tx_hash`]),
+    /// so the same test script reads a hash on both the mock and live RPC. Its `gas` is
+    /// `NO_GAS_METER`: unlike the hash, a gas figure has no honest stand-in.
     pub async fn execute_contract<Exec: CwSerde>(
         &self,
         addr: &Addr,
@@ -159,7 +193,8 @@ impl CwMockProvider {
             .execute_contract(sender.clone(), addr.clone(), &msg, funds)
             .map_err(|e| CwError::Execute(any_chain(&e)))?;
         Ok(CwExecution {
-            tx_hash: Some(self.next_tx_hash(&[sender.as_bytes(), addr.as_bytes()])),
+            tx_hash: self.next_tx_hash(&[sender.as_bytes(), addr.as_bytes()]),
+            gas: NO_GAS_METER,
             response,
         })
     }

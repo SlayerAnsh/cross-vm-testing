@@ -35,12 +35,29 @@ define_wallet_roster! {
 /// `.env` lives at the workspace root; the crate manifest is `examples/scripts`.
 const ENV_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env");
 
+/// Render what an operation cost. `Cost` renders itself in the unit its backend metered, so a
+/// chain-agnostic caller prints a figure without knowing which VM produced it.
+///
+/// `None` means the backend does not meter, never that the operation was free. Both chains this
+/// script targets are live RPC, so both report a cost; the mock backends are the ones that do not.
+pub(crate) fn describe(cost: Option<Cost>) -> String {
+    cost.map_or_else(
+        || "unmetered by this backend".to_string(),
+        |cost| cost.to_string(),
+    )
+}
+
 /// Run the identical chain-agnostic flow against one chain.
 async fn run(chain: AnyChain) -> Result<u64, CrossVmError> {
     let wallet = ONCHAIN_WALLETS.test.as_str();
     let counter = Counter::new(chain);
     counter.setup(wallet).await?;
-    counter.increment(wallet).await?;
+    let incremented = counter.increment(wallet).await?;
+    println!(
+        "[increment] tx {} ({})",
+        incremented.transaction_hash(),
+        describe(incremented.cost()),
+    );
     counter.count().await
 }
 

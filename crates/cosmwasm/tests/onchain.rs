@@ -14,8 +14,18 @@ use std::rc::Rc;
 use counter::{CountResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
 use cross_vm_core::{ChainProvider, WalletFactory};
 use cross_vm_cosmwasm::chains::OSMOSIS_TESTNET;
-use cross_vm_cosmwasm::CwChain;
+use cross_vm_cosmwasm::{CwChain, CwGas};
 use cross_vm_macros::define_wallet_roster;
+
+/// A live node meters every transaction, so each RPC op must come back with a real gas figure:
+/// present (unlike the mock, which cannot meter and reports `None`) and nonzero (no Cosmos tx
+/// executes on zero gas, and no chain with a nonzero `gas_price` charges a zero fee).
+fn assert_metered(op: &str, gas: Option<CwGas>) {
+    let gas = gas.unwrap_or_else(|| panic!("rpc {op} must report a gas figure, got None"));
+    assert!(gas.used > 0, "rpc {op} reported zero gas used");
+    assert!(gas.fee > 0, "rpc {op} reported a zero fee");
+    println!("{op} cost: {} gas, fee {}", gas.used, gas.fee);
+}
 
 define_wallet_roster! {
     pub const ONCHAIN_WALLETS: OnchainWallets = {
@@ -56,15 +66,20 @@ async fn live_counter_on_osmosis_testnet() {
          from the EVM address) and retry"
     );
 
-    let code_id = chain
+    let stored = chain
         .store_code(COUNTER_WASM.to_vec(), ONCHAIN_WALLETS.test)
         .await
         .expect("store_code");
-    println!("stored code id:     {code_id}");
+    assert!(!stored.tx_hash.is_empty(), "tx hash should be non-empty");
+    assert_metered("store_code", stored.gas);
+    println!(
+        "stored code id:     {} (tx {})",
+        stored.code_id, stored.tx_hash
+    );
 
-    let addr = chain
+    let instantiated = chain
         .instantiate(
-            code_id,
+            stored.code_id,
             InstantiateMsg {},
             ONCHAIN_WALLETS.test,
             &[],
@@ -72,7 +87,13 @@ async fn live_counter_on_osmosis_testnet() {
         )
         .await
         .expect("instantiate");
-    println!("instantiated at:    {addr}");
+    assert!(
+        !instantiated.tx_hash.is_empty(),
+        "tx hash should be non-empty"
+    );
+    assert_metered("instantiate", instantiated.gas);
+    let addr = instantiated.address;
+    println!("instantiated at:    {addr} (tx {})", instantiated.tx_hash);
     let resp: CountResponse = chain
         .query_wasm_smart(&addr, QueryMsg::GetCount {})
         .await
@@ -83,8 +104,8 @@ async fn live_counter_on_osmosis_testnet() {
         .execute_contract(&addr, ExecuteMsg::Increment {}, ONCHAIN_WALLETS.test, &[])
         .await
         .expect("increment");
-    // The live RPC path surfaces the broadcast tx hash (the mock leaves it `None`).
-    let tx_hash = exec.tx_hash.expect("live execute carries a tx hash");
+    assert_metered("execute_contract", exec.gas);
+    let tx_hash = exec.tx_hash;
     assert!(!tx_hash.is_empty(), "tx hash should be non-empty");
     println!("increment tx hash: {tx_hash}");
     let resp: CountResponse = chain

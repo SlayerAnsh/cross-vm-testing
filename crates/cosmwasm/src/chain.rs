@@ -20,7 +20,9 @@ use crate::asset::CwAsset;
 use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
-use crate::provider::{CwCodeSource, CwExecution, CwMockProvider, CwRpcProvider};
+use crate::provider::{
+    CwCodeSource, CwExecution, CwInstantiate, CwMockProvider, CwRpcProvider, CwStoreCode,
+};
 use crate::wallet::CosmosSigner;
 
 /// CW20 balance query message for [`CwChain::ensure_asset`].
@@ -127,7 +129,8 @@ impl CwChain {
         Ok(addr)
     }
 
-    /// Upload contract code to the chain, uploaded by wallet `wallet`, and return its code id.
+    /// Upload contract code to the chain, uploaded by wallet `wallet`, and return its code id
+    /// plus the transaction hash.
     ///
     /// One backend-agnostic entry point: pass anything convertible into a [`CwCodeSource`]. A
     /// native `cw-multi-test` contract object ([`crate::CwCode`]) runs on the mock backend,
@@ -136,13 +139,14 @@ impl CwChain {
     /// either backend without branching. A source missing the representation the active backend
     /// needs surfaces as [`CwError::Unimplemented`].
     ///
-    /// The mock records the wallet's address as the code creator; the RPC path signs and
-    /// broadcasts a `MsgStoreCode` under the process-wide broadcast lock.
+    /// The mock records the wallet's address as the code creator and mints a synthetic tx hash;
+    /// the RPC path signs and broadcasts a `MsgStoreCode` under the process-wide broadcast lock
+    /// and reports the real one.
     pub async fn store_code(
         &self,
         code: impl Into<CwCodeSource>,
         wallet: WalletLabel<'_>,
-    ) -> Result<u64, CwError> {
+    ) -> Result<CwStoreCode, CwError> {
         let signer = self.acquire(wallet).await?;
         match self {
             CwChain::Mock(p) => {
@@ -195,7 +199,8 @@ impl CwChain {
         }
     }
 
-    /// Instantiate a contract from an uploaded code id, signed by wallet `wallet`.
+    /// Instantiate a contract from an uploaded code id, signed by wallet `wallet`, and return the
+    /// new instance's address plus the transaction hash.
     pub async fn instantiate<Init: CwSerde>(
         &self,
         code_id: u64,
@@ -203,7 +208,7 @@ impl CwChain {
         wallet: WalletLabel<'_>,
         funds: &[Coin],
         label: &str,
-    ) -> Result<Addr, CwError> {
+    ) -> Result<CwInstantiate, CwError> {
         let signer = self.acquire(wallet).await?;
         match self {
             CwChain::Mock(p) => {
@@ -219,8 +224,8 @@ impl CwChain {
 
     /// Execute a state-mutating message against a contract instance, signed by wallet `wallet`.
     ///
-    /// The returned [`CwExecution`] carries the broadcast transaction hash on the live RPC
-    /// backend (`None` on the in-process mock) alongside the raw execution response.
+    /// The returned [`CwExecution`] carries the transaction hash (the broadcast one on the live
+    /// RPC backend, a synthetic one on the in-process mock) alongside the raw execution response.
     pub async fn execute_contract<Exec: CwSerde>(
         &self,
         addr: &Addr,

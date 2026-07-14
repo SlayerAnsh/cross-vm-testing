@@ -127,6 +127,54 @@ async fn get_program_state_none_when_pda_unfunded() {
 }
 
 #[tokio::test]
+async fn add_program_rejects_invalid_bytecode() {
+    let chain: crate::SvmChain = SOLANA_LOCALNET.mock(empty_wallets()).into();
+
+    let err = chain
+        .add_program(b"not an sbf elf".to_vec())
+        .await
+        .expect_err("bytecode is not a loadable program");
+    assert!(matches!(err, crate::SvmError::Deploy(_)), "got: {err}");
+}
+
+#[test]
+fn deploy_hash_is_a_signature_and_pins_the_load() {
+    use std::str::FromStr;
+
+    use crate::provider::SvmDeploy;
+
+    let blockhash = [7u8; 32];
+    let program_id = solana_address::Address::new_unique();
+    let bytecode = b"program".as_slice();
+
+    let deploy = SvmDeploy::minted(&blockhash, program_id, bytecode);
+    assert_eq!(deploy.program_id, program_id);
+    // The synthetic hash must still be a real base58 signature, so callers can parse it back.
+    solana_signature::Signature::from_str(&deploy.tx_hash).expect("base58 signature");
+
+    // Same load, same hash: a mock run is reproducible.
+    assert_eq!(
+        deploy.tx_hash,
+        SvmDeploy::minted(&blockhash, program_id, bytecode).tx_hash
+    );
+
+    // Each of the three inputs the hash commits to changes it.
+    let other_id = solana_address::Address::new_unique();
+    assert_ne!(
+        deploy.tx_hash,
+        SvmDeploy::minted(&blockhash, other_id, bytecode).tx_hash
+    );
+    assert_ne!(
+        deploy.tx_hash,
+        SvmDeploy::minted(&[8u8; 32], program_id, bytecode).tx_hash
+    );
+    assert_ne!(
+        deploy.tx_hash,
+        SvmDeploy::minted(&blockhash, program_id, b"other program").tx_hash
+    );
+}
+
+#[tokio::test]
 async fn blocks_advance() {
     let mut chain = SOLANA_LOCALNET.mock(empty_wallets());
     assert_eq!(chain.block_height().await, 0);
@@ -139,4 +187,21 @@ async fn rpc_write_paths_unimplemented() {
     let mut chain = SOLANA_DEVNET.rpc(empty_wallets());
     let addr = solana_address::Address::new_unique();
     assert!(chain.set_balance(&addr, "SOL", 1).await.is_err());
+
+    let err = chain
+        .add_program(b"program".to_vec())
+        .await
+        .expect_err("rpc program load is a deliberate gap");
+    assert!(
+        matches!(&err, crate::SvmError::Unimplemented(what) if what == "rpc add_program"),
+        "got: {err}"
+    );
+    let err = chain
+        .add_program_at(addr, b"program".to_vec())
+        .await
+        .expect_err("rpc program load is a deliberate gap");
+    assert!(
+        matches!(&err, crate::SvmError::Unimplemented(what) if what == "rpc add_program_at"),
+        "got: {err}"
+    );
 }

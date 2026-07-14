@@ -48,6 +48,7 @@ pub fn classify<T>(
 mod tests {
     use super::*;
     use cross_vm_core::ChainKind;
+    use cross_vm_solidity::{EvmGas, B256};
 
     fn revert() -> CrossVmError {
         CrossVmError::Execute {
@@ -61,7 +62,13 @@ mod tests {
         let mut applied = false;
         let v = classify::<()>(
             true,
-            Ok(AppResponse::evm((), Default::default(), vec![], None)),
+            Ok(AppResponse::evm(
+                (),
+                Default::default(),
+                vec![],
+                B256::ZERO,
+                EvmGas::default(),
+            )),
             || applied = true,
             "a",
             "b",
@@ -81,7 +88,13 @@ mod tests {
     fn unexpected_accept_is_bug() {
         let e = classify::<()>(
             false,
-            Ok(AppResponse::evm((), Default::default(), vec![], None)),
+            Ok(AppResponse::evm(
+                (),
+                Default::default(),
+                vec![],
+                B256::ZERO,
+                EvmGas::default(),
+            )),
             || {},
             "over-accept",
             "b",

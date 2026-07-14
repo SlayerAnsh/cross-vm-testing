@@ -42,7 +42,7 @@ use crate::asset::CwAsset;
 use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
-use crate::provider::CwExecution;
+use crate::provider::{CwExecution, CwGas, CwInstantiate, CwStoreCode};
 use crate::wallet::CosmosSigner;
 
 /// A live-RPC CosmWasm provider. Chain-level reads and contract queries hit a real node via
@@ -174,13 +174,14 @@ impl CwRpcProvider {
     }
 
     /// Build, sign, and broadcast a transaction carrying `msgs`, waiting for it to commit.
-    /// Returns the tx hash and the delivered events. Fails on a nonzero check/deliver code.
+    /// Returns the tx hash, the delivered events, and what the transaction cost ([`CwGas`]).
+    /// Fails on a nonzero check/deliver code.
     async fn sign_and_broadcast(
         &self,
         msgs: Vec<cosmrs::Any>,
         signer: &CosmosSigner,
         gas_limit: u64,
-    ) -> Result<(String, Vec<TmEvent>), CwError> {
+    ) -> Result<(String, Vec<TmEvent>, CwGas), CwError> {
         let client = self.client()?;
         let (account_number, sequence) = self.account_info(signer.address.as_str()).await?;
 
@@ -233,14 +234,33 @@ impl CwRpcProvider {
                 resp.tx_result.code, resp.tx_result.log
             )));
         }
-        Ok((resp.hash.to_string(), resp.tx_result.events))
+
+        // Tendermint types `gas_used` as `i64` (protobuf has no unsigned varint in this schema),
+        // but a gas meter only counts up: a negative figure is a node protocol violation, not a
+        // value to clamp to zero. Surface it instead of silently reporting a plausible number.
+        let used = u64::try_from(resp.tx_result.gas_used).map_err(|_| {
+            CwError::Rpc(format!(
+                "node reported a negative gas_used ({}) for tx {}",
+                resp.tx_result.gas_used, resp.hash
+            ))
+        })?;
+        let gas = CwGas {
+            used,
+            fee: fee_amount,
+        };
+        Ok((resp.hash.to_string(), resp.tx_result.events, gas))
     }
 
-    /// Upload raw wasm bytecode to the chain, signed by `signer`, and return its code id.
+    /// Upload raw wasm bytecode to the chain, signed by `signer`, and return its code id, the
+    /// broadcast transaction hash, and what the upload cost ([`CwGas`]).
     ///
     /// This is the RPC arm of [`crate::CwChain::store_code`]: a live chain takes compiled wasm
     /// bytes, while the mock's `store_code` takes a native `cw-multi-test` `Contract` object.
-    pub async fn store_code(&self, wasm: Vec<u8>, signer: &CosmosSigner) -> Result<u64, CwError> {
+    pub async fn store_code(
+        &self,
+        wasm: Vec<u8>,
+        signer: &CosmosSigner,
+    ) -> Result<CwStoreCode, CwError> {
         let msg = MsgStoreCode {
             sender: signer_account(signer)?,
             wasm_byte_code: wasm,
@@ -250,12 +270,17 @@ impl CwRpcProvider {
             .to_any()
             .map_err(|e| CwError::Execute(format!("encode store_code: {e}")))?;
         // Storing a contract is gas-heavy (scales with wasm size); a ~260 KB contract uses ~8M.
-        let (_, events) = self
+        let (tx_hash, events, gas) = self
             .sign_and_broadcast(vec![any], signer, 15_000_000)
             .await?;
-        find_attr(&events, "store_code", "code_id")?
+        let code_id = find_attr(&events, "store_code", "code_id")?
             .parse::<u64>()
-            .map_err(|e| CwError::Execute(format!("parse code_id: {e}")))
+            .map_err(|e| CwError::Execute(format!("parse code_id: {e}")))?;
+        Ok(CwStoreCode {
+            code_id,
+            tx_hash,
+            gas: Some(gas),
+        })
     }
 
     /// Send `amount` base units of bank `denom` from `signer` to `to`, and return the broadcast
@@ -285,11 +310,13 @@ impl CwRpcProvider {
         let any = msg
             .to_any()
             .map_err(|e| CwError::Execute(format!("encode transfer: {e}")))?;
-        let (tx_hash, _) = self.sign_and_broadcast(vec![any], signer, 200_000).await?;
+        let (tx_hash, _, _) = self.sign_and_broadcast(vec![any], signer, 200_000).await?;
         Ok(tx_hash)
     }
 
-    /// Instantiate a contract from an uploaded code id, signed by `signer`.
+    /// Instantiate a contract from an uploaded code id, signed by `signer`, and return the new
+    /// instance's address, the broadcast transaction hash, and what the instantiation cost
+    /// ([`CwGas`]).
     pub async fn instantiate<Init: CwSerde>(
         &self,
         code_id: u64,
@@ -297,7 +324,7 @@ impl CwRpcProvider {
         signer: &CosmosSigner,
         funds: &[Coin],
         label: &str,
-    ) -> Result<Addr, CwError> {
+    ) -> Result<CwInstantiate, CwError> {
         let msg = MsgInstantiateContract {
             sender: signer_account(signer)?,
             admin: None,
@@ -309,14 +336,19 @@ impl CwRpcProvider {
         let any = msg
             .to_any()
             .map_err(|e| CwError::Deploy(format!("encode instantiate: {e}")))?;
-        let (_, events) = self.sign_and_broadcast(vec![any], signer, 400_000).await?;
+        let (tx_hash, events, gas) = self.sign_and_broadcast(vec![any], signer, 400_000).await?;
         let addr = find_attr(&events, "instantiate", "_contract_address")?;
-        Ok(Addr::unchecked(addr))
+        Ok(CwInstantiate {
+            address: Addr::unchecked(addr),
+            tx_hash,
+            gas: Some(gas),
+        })
     }
 
     /// Execute a state-mutating message against a contract instance, signed by `signer`.
     ///
-    /// The returned [`CwExecution`] carries the broadcast transaction hash (`tx_hash`) plus a
+    /// The returned [`CwExecution`] carries the broadcast transaction hash (`tx_hash`), what the
+    /// execution cost (`gas`, always `Some` here: the node meters it), plus a
     /// [`cw_multi_test::AppResponse`] holding the chain's emitted events (mapped to
     /// `cosmwasm_std::Event`); `data` is left `None` (the raw tx data is proto-wrapped, not the
     /// contract's response payload).
@@ -339,9 +371,10 @@ impl CwRpcProvider {
         let any = m
             .to_any()
             .map_err(|e| CwError::Execute(format!("encode execute: {e}")))?;
-        let (tx_hash, events) = self.sign_and_broadcast(vec![any], signer, 300_000).await?;
+        let (tx_hash, events, gas) = self.sign_and_broadcast(vec![any], signer, 300_000).await?;
         Ok(CwExecution {
-            tx_hash: Some(tx_hash),
+            tx_hash,
+            gas: Some(gas),
             response: cw_multi_test::AppResponse {
                 events: events.iter().map(to_cw_event).collect(),
                 data: None,

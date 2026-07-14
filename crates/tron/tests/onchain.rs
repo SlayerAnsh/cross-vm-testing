@@ -14,7 +14,7 @@ use alloy_primitives::keccak256;
 use cross_vm_core::{ChainProvider, WalletFactory};
 use cross_vm_macros::define_wallet_roster;
 use cross_vm_tron::chains::NILE;
-use cross_vm_tron::{Bytes, TronChain};
+use cross_vm_tron::{Bytes, TronChain, TronCompute};
 
 define_wallet_roster! {
     pub const ONCHAIN_WALLETS: OnchainWallets = {
@@ -80,11 +80,24 @@ async fn live_deploy_increment_count_on_nile() {
     assert!(balance > 0, "fund {who} on Nile first (balance is zero)");
 
     // Deploy Counter (EVM bytecode runs on the TVM), then increment and read back.
-    let counter = chain
+    let deploy = chain
         .deploy_create(counter_bytecode(), Bytes::new(), ONCHAIN_WALLETS.test)
         .await
         .expect("deploy counter");
-    println!("counter deployed at: {counter}");
+    let counter = deploy.address;
+    println!("counter deployed at: {counter} (txID {})", deploy.tx_hash);
+    println!("deploy resources:    {:?}", deploy.resources);
+    assert_eq!(deploy.tx_hash.len(), 64, "expected a 32-byte txID in hex");
+    // A live chain meters energy (the mock, being revm, meters gas: a different quantity).
+    assert!(
+        matches!(deploy.resources.compute, TronCompute::Energy(e) if e > 0),
+        "expected the node's energy_usage_total, got {:?}",
+        deploy.resources.compute
+    );
+    assert!(
+        deploy.resources.fee.is_some_and(|f| f > 0),
+        "a deploy burns TRX"
+    );
     settle().await;
 
     // `call` polls for the receipt internally, so the incremented state is committed on return.
@@ -93,6 +106,18 @@ async fn live_deploy_increment_count_on_nile() {
         .await
         .expect("increment");
     println!("increment logs: {}", exec.logs.len());
+    println!("increment txID: {}", exec.tx_hash);
+    println!("increment resources: {:?}", exec.resources);
+    assert_eq!(
+        exec.tx_hash.len(),
+        64,
+        "a broadcast call reports the node's 32-byte txID in hex"
+    );
+    assert!(
+        matches!(exec.resources.compute, TronCompute::Energy(e) if e > 0),
+        "expected the node's energy_usage_total, got {:?}",
+        exec.resources.compute
+    );
 
     let out = chain
         .static_call(&counter, selector("count()"))
@@ -130,7 +155,8 @@ async fn live_get_storage_at_on_nile() {
     let counter = chain
         .deploy_create(counter_bytecode(), Bytes::new(), ONCHAIN_WALLETS.test)
         .await
-        .expect("deploy counter");
+        .expect("deploy counter")
+        .address;
     println!("counter deployed at: {counter}");
     settle().await;
 

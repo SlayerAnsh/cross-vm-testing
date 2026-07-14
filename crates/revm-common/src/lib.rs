@@ -97,6 +97,22 @@ pub struct Execution {
     /// Synthetic, deterministic transaction hash (see the type-level note). Zero on the
     /// read-only `static_call` path, which is not a transaction.
     pub tx_hash: B256,
+    /// Gas the transaction is billed for, as `revm` metered it: `ResultGas::tx_gas_used`, the
+    /// figure a receipt would carry, already net of the EIP-3529 refund and floored per EIP-7623.
+    pub gas_used: u64,
+}
+
+/// The result of a create transaction on the core: the deployed contract address and the same
+/// synthetic transaction hash [`Execution`] documents, drawn from the one per-core sequence, so
+/// deploys and calls never collide.
+#[derive(Clone, Debug, Default)]
+pub struct Deployment {
+    /// Address of the freshly deployed contract.
+    pub address: Address,
+    /// Synthetic, deterministic transaction hash (see [`Execution`]).
+    pub tx_hash: B256,
+    /// Gas the create transaction is billed for (see [`Execution::gas_used`]).
+    pub gas_used: u64,
 }
 
 /// The shared in-process `revm` core.
@@ -131,8 +147,9 @@ impl RevmCore {
         }
     }
 
-    /// Mint the next synthetic tx hash: keccak256 over the call fields plus the monotonic
-    /// sequence. Deterministic for a given call order, unique per call. See [`Execution`].
+    /// Mint the next synthetic tx hash: keccak256 over the transaction fields plus the monotonic
+    /// sequence. Deterministic for a given transaction order, unique per transaction; deploys and
+    /// calls share the one sequence. See [`Execution`].
     fn next_tx_hash(&self, to: Address, calldata: &[u8], from: Address, value: U256) -> B256 {
         let seq = self.tx_seq.get();
         self.tx_seq.set(seq + 1);
@@ -145,20 +162,22 @@ impl RevmCore {
         keccak256(&buf)
     }
 
-    /// Deploy bytecode via a create transaction, appending constructor args to the initcode.
+    /// Deploy bytecode via a create transaction, appending constructor args to the initcode,
+    /// returning the deployed address plus a synthetic transaction hash.
     pub fn deploy_create(
         &self,
         bytecode: Bytes,
         constructor_args: &[u8],
         from: Address,
-    ) -> Result<Address, ExecFailure> {
+    ) -> Result<Deployment, ExecFailure> {
         let mut initcode = bytecode.to_vec();
         initcode.extend_from_slice(constructor_args);
+        let initcode = Bytes::from(initcode);
         let tx = TxEnv::builder()
             .caller(from)
             .chain_id(None)
             .create()
-            .data(Bytes::from(initcode))
+            .data(initcode.clone())
             .gas_limit(TX_GAS_LIMIT)
             .build_fill();
         let result = self
@@ -169,8 +188,14 @@ impl RevmCore {
         match result {
             ExecutionResult::Success {
                 output: Output::Create(_, Some(addr)),
+                gas,
                 ..
-            } => Ok(addr),
+            } => Ok(Deployment {
+                address: addr,
+                // A create has no callee; the zero address stands in as the hash's `to` field.
+                tx_hash: self.next_tx_hash(Address::ZERO, &initcode, from, U256::ZERO),
+                gas_used: gas.tx_gas_used(),
+            }),
             ExecutionResult::Success { .. } => Err(ExecFailure::NoCreateAddress),
             ExecutionResult::Revert { output, .. } => Err(ExecFailure::Revert(hex_encode(&output))),
             ExecutionResult::Halt { reason, .. } => Err(ExecFailure::Halt(format!("{reason:?}"))),
@@ -287,14 +312,18 @@ impl RevmCore {
     }
 }
 
-/// Decode an [`ExecutionResult`] into output data plus logs, or the matching [`ExecFailure`].
+/// Decode an [`ExecutionResult`] into output data, logs and metered gas, or the matching
+/// [`ExecFailure`].
 fn exec_or_err(result: ExecutionResult) -> Result<Execution, ExecFailure> {
     match result {
-        ExecutionResult::Success { output, logs, .. } => Ok(Execution {
+        ExecutionResult::Success {
+            output, logs, gas, ..
+        } => Ok(Execution {
             output: output.into_data(),
             logs,
             // Filled by `call`; the read-only `static_call` path leaves it zero (not a tx).
             tx_hash: B256::ZERO,
+            gas_used: gas.tx_gas_used(),
         }),
         ExecutionResult::Revert { output, .. } => Err(ExecFailure::Revert(hex_encode(&output))),
         ExecutionResult::Halt { reason, .. } => Err(ExecFailure::Halt(format!("{reason:?}"))),
@@ -328,14 +357,45 @@ mod tests {
     }
 
     #[test]
-    fn deploy_empty_runtime_yields_address() {
+    fn deploy_empty_runtime_yields_address_and_tx_hash() {
         let c = core();
+        let from = Address::repeat_byte(0x22);
         // PUSH1 0x00, PUSH1 0x00, RETURN: deploys a zero-length runtime.
         let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
-        let addr = c
-            .deploy_create(initcode, &[], Address::repeat_byte(0x22))
+
+        let first = c
+            .deploy_create(initcode.clone(), &[], from)
             .expect("empty-runtime deploy succeeds");
-        assert_ne!(addr, Address::ZERO);
+        assert_ne!(first.address, Address::ZERO);
+        assert_ne!(first.tx_hash, B256::ZERO);
+
+        // The monotonic seq makes a repeat of the identical deploy carry a distinct hash.
+        let second = c
+            .deploy_create(initcode, &[], from)
+            .expect("empty-runtime deploy succeeds");
+        assert_ne!(second.tx_hash, B256::ZERO);
+        assert_ne!(
+            first.tx_hash, second.tx_hash,
+            "repeated identical deploys must get distinct hashes"
+        );
+    }
+
+    #[test]
+    fn deploys_and_calls_share_one_hash_sequence() {
+        let from = Address::repeat_byte(0x66);
+        let to = Address::repeat_byte(0x77);
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+
+        // A deploy consumes a seq slot, so an otherwise identical call order hashes differently
+        // once a deploy precedes it: the two paths draw from the one counter.
+        let c = core();
+        c.deploy_create(initcode, &[], from).unwrap();
+        let after_deploy = c.call(to, &[], from, U256::ZERO).unwrap().tx_hash;
+
+        let c2 = core();
+        let without_deploy = c2.call(to, &[], from, U256::ZERO).unwrap().tx_hash;
+
+        assert_ne!(after_deploy, without_deploy);
     }
 
     #[test]
@@ -369,9 +429,53 @@ mod tests {
     }
 
     #[test]
-    fn static_call_leaves_tx_hash_zero() {
+    fn gas_used_is_real_and_a_deploy_costs_more_than_a_trivial_call() {
         let c = core();
-        // Calling an empty account statically returns empty output and, being a non-tx, no hash.
+        let from = Address::repeat_byte(0x88);
+        let to = Address::repeat_byte(0x99);
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+
+        let deploy = c.deploy_create(initcode, &[], from).unwrap();
+        let call = c.call(to, &[], from, U256::ZERO).unwrap();
+
+        // A value-free, calldata-free call to an empty account executes nothing, so it is billed
+        // exactly the EVM intrinsic transaction cost. Anything else means the figure is synthetic.
+        assert_eq!(call.gas_used, 21_000);
+        // A create pays the intrinsic cost plus CREATE (32_000) plus the initcode it runs.
+        assert!(
+            deploy.gas_used > call.gas_used,
+            "deploy ({}) must cost more than a trivial call ({})",
+            deploy.gas_used,
+            call.gas_used
+        );
+        assert!(
+            deploy.gas_used >= 53_000 && deploy.gas_used < TX_GAS_LIMIT,
+            "deploy gas ({}) outside the plausible band",
+            deploy.gas_used
+        );
+    }
+
+    #[test]
+    fn gas_used_is_deterministic_across_runs() {
+        let from = Address::repeat_byte(0x88);
+        let to = Address::repeat_byte(0x99);
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+
+        let run = || {
+            let c = core();
+            let deploy = c.deploy_create(initcode.clone(), &[], from).unwrap();
+            let call = c.call(to, &[], from, U256::ZERO).unwrap();
+            (deploy.gas_used, call.gas_used)
+        };
+
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn static_call_on_empty_account_returns_empty_output() {
+        let c = core();
+        // A static call is a read, not a transaction, so `static_call` returns a bare
+        // `Vec<u8>` with no `tx_hash` field at all; here we just check the output.
         let out = c.static_call(Address::repeat_byte(0x55), &[]).unwrap();
         assert!(out.is_empty());
     }

@@ -288,8 +288,8 @@ Guidelines:
 * Recover native types inside a hook: `self.base.cosmwasm()? / evm()? / solana()?` for the chain, `signer.cw()? / evm()? / svm()?` for the account, `self.base.cw_addr()? / evm_addr()? / svm_addr()?` for the deployed address.
 * Provider errors convert into `CrossVmError` through `?` (each VM error implements `From` for it).
 * A VM you do not support: return `CrossVmError::unimplemented(kind, "...")` from that arm.
-* Wrap a return value as `AppResponse<T>`; the caller reads `.value()` and reaches the raw result via `raw_cosmwasm` / `raw_evm` / `raw_solana` (or `transaction_hash` / `gas_used`), and the emitted events via `raw_cosmwasm_events` / `raw_evm_logs` / `raw_solana_logs`.
-* The EVM `call` returns an `EvmExecution { output, logs }` (it no longer discards the logs revm produces); build the response with `AppResponse::evm((), exec.output, exec.logs)`.
+* Wrap a return value as `AppResponse<T>`; the caller reads `.value()` and reaches the raw result via `raw_cosmwasm` / `raw_evm` / `raw_solana` (or `transaction_hash` / `cost`), and the emitted events via `raw_cosmwasm_events` / `raw_evm_logs` / `raw_solana_logs`.
+* The EVM `call` returns an `EvmExecution { output, logs, tx_hash, gas }` (it no longer discards the logs revm produces); build the response with `AppResponse::evm((), exec.output, exec.logs, exec.tx_hash, exec.gas)`.
 * CosmWasm hooks can skip the hand-built `ExecuteMsg` / `query_wasm_smart`: declare a marker with `cross_vm_cw_interface!`, derive `CwExecuteFns` / `CwQueryFns` (from `cross-vm-macros`) on the contract's `ExecuteMsg` / `QueryMsg` (under a `cross-vm` feature so the wasm build stays clean), then call `self.base.cosmwasm()?.contract_as::<CounterContract>(addr).increment(wallet)` / `.get_count()`. Named fields become method args; tuple fields become positional `arg0`, `arg1`, ... args (cw-orch style). Query variants need `#[returns(T)]`; a variant marked `#[payable]` adds a trailing `funds: &[Coin]` arg. The generated trait is `<EnumName>Fns` by default; add `#[cross_vm(trait_name = "...")]` on the enum to rename it (e.g. to derive cw-orch's `ExecuteFns` / `QueryFns` on the same enum without colliding on the `ExecuteMsgFns` / `QueryMsgFns` name). For dynamic messages, use the untyped `chain.contract(addr)` handle. EVM already gets typed calls from `alloy::sol!`; Solana has no schema so its hooks stay hand-written.
 
 ## Transaction hooks
@@ -318,7 +318,7 @@ Properties:
 
 * Synchronous `FnMut`. The mock backends are synchronous and the runtime is current-thread (futures are not `Send`), so async side-effects flow through a channel or an `Rc<RefCell<_>>` buffer the closure captures and drains later.
 * Both kinds return `Result<(), CrossVmError>`. The first `Err` aborts: a before-`Err` stops the transaction from running; an after-`Err` becomes the method's error.
-* Registered per contract, fired in registration order. A before-hook reads `label` / `kind`; an after-hook also reads `transaction_hash` / `gas_used` off the response, plus per-VM event data.
+* Registered per contract, fired in registration order. A before-hook reads `label` / `kind`; an after-hook also reads `transaction_hash` / `cost` off the response, plus per-VM event data.
 * Events are exposed per VM because the shapes do not unify: `cosmwasm_events()` returns typed `Event` attributes, `evm_logs()` returns ABI `Log`s (address, topics, data), `solana_logs()` returns the program log lines (`msg!` / `sol_log`; Anchor `emit!` events are base64 inside them), and `tron_logs()` returns Tron's EVM-shaped logs. The matching accessor succeeds; the others return `WrongVm`. An after-hook that watches every VM matches on `ctx.kind()`.
 * Re-entrancy is unsupported: a hook that re-enters the same contract's `run_before` / `run_after` panics on the `RefCell` (the registry is borrowed while firing).
 * The two dispatcher lines are the shape the deferred scaffolding macro will generate.

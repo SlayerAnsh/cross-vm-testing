@@ -62,19 +62,20 @@ pub trait CounterSpec {
 impl Counter {
     async fn cw_setup(&self, wallet: &str) -> Result<(), CrossVmError> {
         let chain = self.base.cosmwasm()?;
-        let code_id = chain
+        let stored = chain
             .store_code(cosmos_counter::contract(), WalletLabel::wrap(wallet))
             .await?;
-        let addr = chain
+        let instantiated = chain
             .instantiate(
-                code_id,
+                stored.code_id,
                 cosmos_counter::InstantiateMsg {},
                 WalletLabel::wrap(wallet),
                 &[],
                 "counter",
             )
             .await?;
-        self.base.set_address(Account::CosmWasm(addr));
+        self.base
+            .set_address(Account::CosmWasm(instantiated.address));
         Ok(())
     }
 
@@ -88,7 +89,12 @@ impl Counter {
             .contract_as::<cosmos_counter::CounterContract>(self.base.cw_addr()?)
             .increment(wallet)
             .await?;
-        Ok(AppResponse::cosmwasm((), exec.response, exec.tx_hash))
+        Ok(AppResponse::cosmwasm(
+            (),
+            exec.response,
+            exec.tx_hash,
+            exec.gas,
+        ))
     }
 
     async fn cw_count(&self) -> Result<u64, CrossVmError> {
@@ -110,14 +116,14 @@ impl Counter {
     async fn evm_setup(&self, wallet: &str) -> Result<(), CrossVmError> {
         use cross_vm_solidity::Bytes;
         let chain = self.base.evm()?;
-        let addr = chain
+        let deployed = chain
             .deploy_create(
                 evm_counter::Counter::BYTECODE.clone(),
                 Bytes::new(),
                 WalletLabel::wrap(wallet),
             )
             .await?;
-        self.base.set_address(Account::Evm(addr));
+        self.base.set_address(Account::Evm(deployed.address));
         Ok(())
     }
 
@@ -130,7 +136,13 @@ impl Counter {
         let exec = chain
             .call(&addr, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::evm((), exec.output, exec.logs, exec.tx_hash))
+        Ok(AppResponse::evm(
+            (),
+            exec.output,
+            exec.logs,
+            exec.tx_hash,
+            exec.gas,
+        ))
     }
 
     async fn evm_count(&self) -> Result<u64, CrossVmError> {
@@ -160,14 +172,14 @@ impl Counter {
     async fn tron_setup(&self, wallet: &str) -> Result<(), CrossVmError> {
         use cross_vm_tron::Bytes;
         let chain = self.base.tron()?;
-        let addr = chain
+        let deployed = chain
             .deploy_create(
                 tron_counter::Counter::BYTECODE.clone(),
                 Bytes::new(),
                 WalletLabel::wrap(wallet),
             )
             .await?;
-        self.base.set_address(Account::Tron(addr));
+        self.base.set_address(Account::Tron(deployed.address));
         Ok(())
     }
 
@@ -180,7 +192,13 @@ impl Counter {
         let exec = chain
             .call(&addr, calldata, WalletLabel::wrap(wallet))
             .await?;
-        Ok(AppResponse::tron((), exec.output, exec.logs, exec.tx_hash))
+        Ok(AppResponse::tron(
+            (),
+            exec.output,
+            exec.logs,
+            exec.tx_hash,
+            exec.resources,
+        ))
     }
 
     async fn tron_count(&self) -> Result<u64, CrossVmError> {

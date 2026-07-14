@@ -29,6 +29,7 @@ use solana_signer::Signer;
 use crate::asset::SvmAsset;
 use crate::chains::{Commitment, SolanaChainInfo};
 use crate::error::SvmError;
+use crate::provider::SvmDeploy;
 use crate::wallet::SvmSigner;
 
 /// A live-RPC Solana provider. Read-only: chain-level reads and account reads hit a real
@@ -139,17 +140,17 @@ impl SvmRpcProvider {
 
     // ----- Write paths: unimplemented until signing + tx broadcast land. -----
 
-    /// Load a program into the chain and return its program id.
-    pub async fn add_program(&self, _bytecode: Vec<u8>) -> Result<Address, SvmError> {
+    /// Load a program into the chain at a fresh program id.
+    pub async fn add_program(&self, _bytecode: Vec<u8>) -> Result<SvmDeploy, SvmError> {
         Err(SvmError::Unimplemented("rpc add_program".into()))
     }
 
-    /// Load a program at a specific program id and return it.
+    /// Load a program at a specific program id.
     pub async fn add_program_at(
         &self,
         _program_id: Address,
         _bytecode: Vec<u8>,
-    ) -> Result<Address, SvmError> {
+    ) -> Result<SvmDeploy, SvmError> {
         Err(SvmError::Unimplemented("rpc add_program_at".into()))
     }
 

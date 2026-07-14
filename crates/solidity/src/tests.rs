@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use crate::chains::{ETHEREUM, LOCAL};
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use cross_vm_core::{BlockTime, ChainProvider, ChainSpec, WalletFactory};
 use cross_vm_macros::define_wallet_roster;
 
@@ -86,19 +86,87 @@ async fn reads_storage_slot_written_by_constructor() {
     ]);
     let mut chain = LOCAL.mock(empty_wallets());
     let deployer = chain.new_account("deployer").await;
-    let addr = chain
+    let deploy = chain
         .deploy_create(initcode, [], &deployer)
         .await
         .expect("storage-writing deploy succeeds");
     // The constructor wrote 42 at slot 0; an untouched slot reads as zero.
     assert_eq!(
-        chain.get_storage_at(&addr, U256::ZERO).await.unwrap(),
+        chain
+            .get_storage_at(&deploy.address, U256::ZERO)
+            .await
+            .unwrap(),
         U256::from(42u64)
     );
     assert_eq!(
-        chain.get_storage_at(&addr, U256::from(1u64)).await.unwrap(),
+        chain
+            .get_storage_at(&deploy.address, U256::from(1u64))
+            .await
+            .unwrap(),
         U256::ZERO
     );
+}
+
+#[tokio::test]
+async fn mutating_ops_carry_a_transaction_hash() {
+    // Initcode returning an empty runtime: enough to exercise deploy -> call on the mock.
+    let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+    let chain = crate::EvmChain::from(LOCAL.mock(test_wallets()));
+
+    let deploy = chain
+        .deploy_create(initcode, [], TEST_WALLETS.alice)
+        .await
+        .expect("deploy");
+    assert_ne!(deploy.address, Address::ZERO);
+    assert_ne!(deploy.tx_hash, B256::ZERO);
+
+    let exec = chain
+        .call(&deploy.address, [], TEST_WALLETS.alice)
+        .await
+        .expect("call");
+    assert_ne!(exec.tx_hash, B256::ZERO);
+    // Deploys and calls draw from one hash sequence, so the two never collide.
+    assert_ne!(exec.tx_hash, deploy.tx_hash);
+
+    let exec_value = chain
+        .call_value(&deploy.address, [], TEST_WALLETS.alice, U256::from(1u64))
+        .await
+        .expect("payable call");
+    assert_ne!(exec_value.tx_hash, B256::ZERO);
+    assert_ne!(exec_value.tx_hash, exec.tx_hash);
+}
+
+#[tokio::test]
+async fn mutating_ops_report_the_gas_they_burned() {
+    // Initcode whose constructor writes 42 into slot 0 before returning an empty runtime: a
+    // deploy that pays for an SSTORE plus the create intrinsic, against a call into the empty
+    // runtime that pays for little beyond the call intrinsic.
+    let initcode = Bytes::from(vec![
+        0x60, 0x2a, 0x60, 0x00, 0x55, 0x60, 0x00, 0x60, 0x00, 0xf3,
+    ]);
+    let chain = crate::EvmChain::from(LOCAL.mock(test_wallets()));
+
+    let deploy = chain
+        .deploy_create(initcode, [], TEST_WALLETS.alice)
+        .await
+        .expect("deploy");
+    assert!(deploy.gas.used > 0, "deploy reported no gas");
+
+    let exec = chain
+        .call(&deploy.address, [], TEST_WALLETS.alice)
+        .await
+        .expect("call");
+    assert!(exec.gas.used > 0, "call reported no gas");
+    assert!(
+        deploy.gas.used > exec.gas.used,
+        "deploy ({}) must cost more gas than a trivial call ({})",
+        deploy.gas.used,
+        exec.gas.used
+    );
+
+    // The mock has no gas price to multiply by, so it reports no fee rather than a fake zero.
+    assert_eq!(deploy.gas.fee, None);
+    assert_eq!(exec.gas.fee, None);
 }
 
 #[tokio::test]
@@ -174,6 +242,72 @@ async fn transfer_funds_rejects_insufficient_balance() {
         "unexpected error: {err}"
     );
     assert_eq!(chain.balance(&bob).await.unwrap(), U256::ZERO);
+}
+
+/// The EIP-55 spec's own published test vectors: two all-caps, two all-lower, four normal.
+/// Each is already in its checksummed form, so re-checksumming a lowercased copy must reproduce it.
+const EIP55_VECTORS: [&str; 8] = [
+    // All caps
+    "0x52908400098527886E0F7030069857D2E4169EE7",
+    "0x8617E340B3D01FA5F11F306F4090FD50E238070D",
+    // All lower
+    "0xde709f2102306220921060314715629080e2fb77",
+    "0x27b1fdb04752bbc536007a920d24acb045561c26",
+    // Normal
+    "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+    "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+    "0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB",
+    "0xD1220A0cf47c7B9Be7A2E6BA89F429762e7b9aDb",
+];
+
+#[test]
+fn address_rendering_matches_eip55_reference_vectors() {
+    for vector in EIP55_VECTORS {
+        // Parse the *lowercased* form, so the rendered case can only come from a checksum
+        // computation and not from echoing back the input's case.
+        let addr: Address = vector
+            .to_lowercase()
+            .parse()
+            .expect("EIP-55 vector is valid hex");
+        assert_eq!(
+            addr.to_string(),
+            vector,
+            "rendering `{vector}` lost its EIP-55 checksum"
+        );
+    }
+}
+
+#[tokio::test]
+async fn chain_ops_render_eip55_checksummed_addresses() {
+    // Addresses out of the mock are deterministic: an account is keccak(label)[12..] and a
+    // deploy is CREATE(deployer, nonce 0). The literals below were checksummed with an
+    // implementation independent of alloy, so matching them pins the rendered case, not just
+    // the bytes. Both are mixed-case, so any lowercasing regression fails this test.
+    const ALICE: &str = "0x5dad7600C5D89fE3824fFa99ec1c3eB8BF3b0501";
+    const DEPLOYER: &str = "0x1b5CEb79b60DC455aD691D856E6E4025Cf542CAA";
+    const CONTRACT: &str = "0x25A25a4Cd120784f7428d26001d9E34FFb90FAFe";
+    for pinned in [ALICE, DEPLOYER, CONTRACT] {
+        assert_ne!(
+            pinned,
+            pinned.to_lowercase(),
+            "`{pinned}` must be mixed-case or it cannot detect a lowercasing regression"
+        );
+    }
+
+    let mut chain = LOCAL.mock(empty_wallets());
+    let alice = chain.new_account("alice").await;
+    assert_eq!(alice.to_string(), ALICE);
+
+    let deployer = chain.new_account("deployer").await;
+    assert_eq!(deployer.to_string(), DEPLOYER);
+
+    // Initcode returning an empty runtime.
+    let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+    let deploy = chain
+        .deploy_create(initcode, [], &deployer)
+        .await
+        .expect("deploy");
+    assert_eq!(deploy.address.to_string(), CONTRACT);
 }
 
 #[tokio::test]

@@ -39,7 +39,8 @@ async fn deploy_increment_reset_query() {
     let contract = chain
         .deploy_create(Counter::BYTECODE.clone(), Bytes::new(), &deployer)
         .await
-        .expect("deploy_create");
+        .expect("deploy_create")
+        .address;
     assert_eq!(read_count(&chain, &contract).await, 0);
 
     chain

@@ -1,9 +1,9 @@
 //! Common imports for writing cross-VM tests and scripts.
 
 pub use crate::{
-    Account, AnyChain, AppResponse, BeforeContext, ContractBase, EmptyWallets, EnvError,
-    FundTarget, HookContext, MultiChainEnv, RawResponse, Running, Setup, Shortfall, TestWallets,
-    EMPTY_WALLETS, TEST_WALLETS,
+    Account, AnyChain, AppResponse, BeforeContext, ContractBase, Cost, CostUnit, EmptyWallets,
+    EnvError, FundTarget, HookContext, MultiChainEnv, RawResponse, Running, Setup, Shortfall,
+    TestWallets, EMPTY_WALLETS, TEST_WALLETS,
 };
 // Property-testing harness.
 pub use crate::harness::{

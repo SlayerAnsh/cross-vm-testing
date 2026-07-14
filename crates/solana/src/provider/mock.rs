@@ -23,6 +23,7 @@ use solana_transaction::Transaction;
 
 use crate::chains::SolanaChainInfo;
 use crate::error::SvmError;
+use crate::provider::SvmDeploy;
 
 /// Default funding handed to accounts created via [`ChainProvider::new_account`]:
 /// 100 SOL in lamports.
@@ -68,14 +69,13 @@ impl SvmMockProvider {
         self.svm.borrow()
     }
 
-    /// Load a program into the chain and return its program id.
-    pub async fn add_program(&self, bytecode: Vec<u8>) -> Result<Address, SvmError> {
-        let program = Keypair::new();
-        let program_id = program.pubkey();
+    /// Load a program into the chain at a fresh program id.
+    pub async fn add_program(&self, bytecode: Vec<u8>) -> Result<SvmDeploy, SvmError> {
+        let program_id = Keypair::new().pubkey();
         self.add_program_at(program_id, bytecode).await
     }
 
-    /// Load a program at a specific program id and return it.
+    /// Load a program at a specific program id.
     ///
     /// Required for frameworks like Anchor whose `declare_id!` makes the program reject
     /// execution unless it is deployed at its declared address.
@@ -83,12 +83,19 @@ impl SvmMockProvider {
         &self,
         program_id: Address,
         bytecode: Vec<u8>,
-    ) -> Result<Address, SvmError> {
+    ) -> Result<SvmDeploy, SvmError> {
+        let blockhash = self.svm.borrow().latest_blockhash();
         self.svm
             .borrow_mut()
             .add_program(program_id, &bytecode)
             .map_err(|e| SvmError::Deploy(format!("{e:?}")))?;
-        Ok(program_id)
+        // litesvm loads the program by writing the account store directly, so there is no signed
+        // transaction to report: mint the hash from the blockhash the load landed under, then
+        // expire that blockhash (as `send_transaction` does) so a repeat load of the same bytecode
+        // at the same id still reports a distinct hash.
+        let deploy = SvmDeploy::minted(blockhash.as_ref(), program_id, &bytecode);
+        self.svm.borrow_mut().expire_blockhash();
+        Ok(deploy)
     }
 
     /// Sign and send a transaction built from `instructions`, paid and signed by `signer`.

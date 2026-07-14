@@ -22,7 +22,7 @@ use solana_keypair::Keypair;
 use crate::asset::SvmAsset;
 use crate::chains::SolanaChainInfo;
 use crate::error::SvmError;
-use crate::provider::{SvmMockProvider, SvmRpcProvider};
+use crate::provider::{SvmDeploy, SvmMockProvider, SvmRpcProvider};
 use crate::wallet::SvmSigner;
 
 /// Byte offset of the `amount` field (u64 LE) in an SPL token account.
@@ -110,8 +110,9 @@ impl SvmChain {
         Ok(pubkey)
     }
 
-    /// Load a program into the chain and return its program id.
-    pub async fn add_program(&self, bytecode: Vec<u8>) -> Result<Address, SvmError> {
+    /// Load a program into the chain at a fresh program id, returning that id and the base58
+    /// signature of the loading transaction.
+    pub async fn add_program(&self, bytecode: Vec<u8>) -> Result<SvmDeploy, SvmError> {
         match self {
             SvmChain::Mock(p) => p.add_program(bytecode).await,
             SvmChain::Rpc(p) => p.add_program(bytecode).await,
@@ -123,7 +124,7 @@ impl SvmChain {
         &self,
         program_id: Address,
         bytecode: Vec<u8>,
-    ) -> Result<Address, SvmError> {
+    ) -> Result<SvmDeploy, SvmError> {
         match self {
             SvmChain::Mock(p) => p.add_program_at(program_id, bytecode).await,
             SvmChain::Rpc(p) => p.add_program_at(program_id, bytecode).await,

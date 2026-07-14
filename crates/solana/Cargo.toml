@@ -21,6 +21,9 @@ solana-keypair = { version = "3", features = ["seed-derivable"] }
 solana-derivation-path = "3"
 solana-message = "4"
 solana-native-token = "3"
+# Mint the synthetic base58 signature litesvm's account-store program load cannot produce.
+solana-sha256-hasher = "3"
+solana-signature = "3"
 solana-signer = "3"
 solana-system-interface = { version = "2", features = ["bincode"] }
 solana-transaction = "3"

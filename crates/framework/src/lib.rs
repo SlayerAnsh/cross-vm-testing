@@ -54,7 +54,8 @@ mod tests;
 
 pub use any_chain::AnyChain;
 pub use contract::{
-    Account, AppResponse, BeforeContext, ContractBase, HookContext, Hooks, RawResponse,
+    Account, AppResponse, BeforeContext, ContractBase, Cost, CostUnit, HookContext, Hooks,
+    RawResponse,
 };
 pub use env::{MultiChainEnv, Running, Setup};
 pub use error::EnvError;

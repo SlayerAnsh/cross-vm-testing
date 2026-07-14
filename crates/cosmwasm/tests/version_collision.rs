@@ -55,7 +55,8 @@ async fn shared_method_names_resolve_per_contract() {
     let counter_code = chain
         .store_code(counter_contract(), TEST_WALLETS.alice)
         .await
-        .expect("store counter");
+        .expect("store counter")
+        .code_id;
     let counter_addr = chain
         .instantiate(
             counter_code,
@@ -65,12 +66,14 @@ async fn shared_method_names_resolve_per_contract() {
             "counter",
         )
         .await
-        .expect("instantiate counter");
+        .expect("instantiate counter")
+        .address;
 
     let vault_code = chain
         .store_code(vault_contract(), TEST_WALLETS.alice)
         .await
-        .expect("store vault");
+        .expect("store vault")
+        .code_id;
     let vault_addr = chain
         .instantiate(
             vault_code,
@@ -80,7 +83,8 @@ async fn shared_method_names_resolve_per_contract() {
             "vault",
         )
         .await
-        .expect("instantiate vault");
+        .expect("instantiate vault")
+        .address;
 
     // Two typed handles, distinguished only by their marker type. `set_version` / `get_version`
     // resolve to the counter impl vs the vault impl purely from the handle's `I`.

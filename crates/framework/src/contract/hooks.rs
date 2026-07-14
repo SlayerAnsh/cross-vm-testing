@@ -31,7 +31,7 @@ use cross_vm_solidity::Log;
 #[cfg(all(feature = "tron", not(feature = "evm")))]
 use cross_vm_tron::Log;
 
-use super::response::RawResponse;
+use super::response::{Cost, RawResponse};
 
 /// What a before-hook is handed: the logical method about to run, and its VM. No response yet.
 pub struct BeforeContext<'a> {
@@ -81,14 +81,16 @@ impl<'a> HookContext<'a> {
         self.raw
     }
 
-    /// The transaction hash, when the backend provides one (Solana only on the mocks).
-    pub fn transaction_hash(&self) -> Result<String, CrossVmError> {
+    /// The transaction hash: real on the live RPC backends, synthetic and deterministic on the
+    /// in-process mocks. See [`RawResponse::transaction_hash`].
+    pub fn transaction_hash(&self) -> String {
         self.raw.transaction_hash()
     }
 
-    /// Gas / compute units consumed, when the backend reports it.
-    pub fn gas_used(&self) -> Option<u128> {
-        self.raw.gas_used()
+    /// What the operation consumed and paid, when the backend meters it. `None` means the
+    /// backend cannot meter, not that the operation was free. See [`RawResponse::cost`].
+    pub fn cost(&self) -> Option<Cost> {
+        self.raw.cost()
     }
 
     /// The events emitted by a CosmWasm execution, or [`CrossVmError::WrongVm`] for another VM.

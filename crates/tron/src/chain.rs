@@ -21,7 +21,7 @@ use crate::asset::TronAsset;
 use crate::chains::TronChainInfo;
 use crate::error::TronError;
 use crate::provider::address::TronAddress;
-use crate::provider::{TronExecution, TronMockProvider, TronRpcProvider};
+use crate::provider::{TronDeploy, TronExecution, TronMockProvider, TronRpcProvider};
 
 /// `balanceOf(address)` selector (TRC20 is ERC20-shaped, same selector).
 const BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
@@ -107,13 +107,14 @@ impl TronChain {
         Ok(addr)
     }
 
-    /// Deploy bytecode via a create transaction signed by wallet `wallet`.
+    /// Deploy bytecode via a create transaction signed by wallet `wallet`, returning the contract's
+    /// address and the transaction hash.
     pub async fn deploy_create(
         &self,
         bytecode: Bytes,
         constructor_args: impl AsRef<[u8]>,
         wallet: WalletLabel<'_>,
-    ) -> Result<TronAddress, TronError> {
+    ) -> Result<TronDeploy, TronError> {
         let signer = self.acquire(wallet).await?;
         let addr = self.signer_address(&signer);
         match self {
@@ -393,6 +394,33 @@ mod tests {
             .await
             .unwrap();
         assert!(chain.balance(&a).await.unwrap() >= huge);
+    }
+
+    #[tokio::test]
+    async fn deploy_and_call_report_tx_hashes_on_mock() {
+        // PUSH1 0x00, PUSH1 0x00, RETURN: deploys a zero-length runtime.
+        let initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xf3]);
+        let chain = chain_with_wallets();
+
+        let deploy = chain
+            .deploy_create(initcode, [], TEST_WALLETS.alice)
+            .await
+            .expect("empty-runtime deploy succeeds");
+        assert!(deploy.address.to_base58().starts_with('T'));
+        // The mock reports the core's synthetic hash in the RPC arm's textual shape: a 32-byte
+        // hash as unprefixed hex.
+        assert_eq!(deploy.tx_hash.len(), 64);
+        assert!(deploy.tx_hash.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let exec = chain
+            .call(&deploy.address, [], TEST_WALLETS.alice)
+            .await
+            .expect("value-less call succeeds");
+        assert_eq!(exec.tx_hash.len(), 64);
+        assert_ne!(
+            exec.tx_hash, deploy.tx_hash,
+            "the deploy and the call are distinct transactions"
+        );
     }
 
     #[tokio::test]

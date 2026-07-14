@@ -35,7 +35,7 @@ use serde_json::{json, Value};
 use crate::chains::TronChainInfo;
 use crate::error::TronError;
 use crate::provider::address::{address_from_label, address_from_pubkey, TronAddress};
-use crate::provider::execution::TronExecution;
+use crate::provider::execution::{TronCompute, TronDeploy, TronExecution, TronResources};
 
 /// Default fee ceiling for a write, in sun (1000 TRX). Tron rejects a tx that would burn more.
 const DEFAULT_FEE_LIMIT: u64 = 1_000_000_000;
@@ -143,13 +143,18 @@ impl TronRpcProvider {
     }
 
     /// Deploy bytecode via a create transaction signed by `signer`, returning the new contract
-    /// address the node assigns.
+    /// address the node assigns, the broadcast transaction's `txID`, and the resources it consumed.
+    ///
+    /// The node reports energy, bandwidth and fee only on the mined receipt, so this polls
+    /// `gettransactioninfobyid` after broadcasting, as the [`call`](Self::call) path does. A deploy
+    /// that fails on chain (out of energy, reverting constructor) therefore surfaces as
+    /// [`TronError::Deploy`] instead of a success carrying an address no code lives at.
     pub async fn deploy_create(
         &self,
         bytecode: Bytes,
         constructor_args: impl AsRef<[u8]>,
         signer: &PrivateKeySigner,
-    ) -> Result<TronAddress, TronError> {
+    ) -> Result<TronDeploy, TronError> {
         let owner = signer_address(signer);
         let mut initcode = bytecode.to_vec();
         initcode.extend_from_slice(constructor_args.as_ref());
@@ -176,11 +181,20 @@ impl TronRpcProvider {
                     .as_str()
             })
             .ok_or_else(|| TronError::Deploy("deploycontract: no contract_address".into()))?;
-        let addr = tron_address_from_hex(contract_hex).map_err(|e| TronError::Deploy(e.0))?;
-        self.sign_and_broadcast(unsigned, signer)
+        let address = tron_address_from_hex(contract_hex).map_err(|e| TronError::Deploy(e.0))?;
+        let tx_hash = self
+            .sign_and_broadcast(unsigned, signer)
             .await
             .map_err(|e| TronError::Deploy(e.to_string()))?;
-        Ok(addr)
+        let info = self.await_tx_info(&tx_hash).await?;
+        if let Some(msg) = tx_failure(&info) {
+            return Err(TronError::Deploy(msg));
+        }
+        Ok(TronDeploy {
+            address,
+            tx_hash,
+            resources: parse_resources(&info),
+        })
     }
 
     /// Execute a state-mutating call against `to`, signed by `signer`.
@@ -223,12 +237,8 @@ impl TronRpcProvider {
             )
             .await?;
         check_node_ok(&resp["result"], "triggersmartcontract")?;
-        let unsigned = resp["transaction"].clone();
-        let txid = unsigned["txID"]
-            .as_str()
-            .ok_or_else(|| TronError::Execute("triggersmartcontract: no txID".into()))?
-            .to_string();
-        self.sign_and_broadcast(unsigned, signer)
+        let txid = self
+            .sign_and_broadcast(resp["transaction"].clone(), signer)
             .await
             .map_err(|e| TronError::Execute(e.to_string()))?;
         let info = self.await_tx_info(&txid).await?;
@@ -263,11 +273,8 @@ impl TronRpcProvider {
             )
             .await?;
         check_node_ok(&unsigned, "createtransaction")?;
-        let txid = unsigned["txID"]
-            .as_str()
-            .ok_or_else(|| TronError::Execute("createtransaction: no txID".into()))?
-            .to_string();
-        self.sign_and_broadcast(unsigned, signer)
+        let txid = self
+            .sign_and_broadcast(unsigned, signer)
             .await
             .map_err(|e| TronError::Execute(e.to_string()))?;
         self.await_tx_info(&txid).await?;
@@ -337,22 +344,24 @@ impl TronRpcProvider {
             .map_err(|e| TronError::Query(format!("eth_getStorageAt parse: {e}")))
     }
 
-    /// Sign an unsigned transaction's `txID` with `signer` and broadcast it.
+    /// Sign an unsigned transaction's `txID` with `signer` and broadcast it, returning that `txID`
+    /// (unprefixed hex): the broadcast transaction's hash, which every write path reports.
     async fn sign_and_broadcast(
         &self,
         mut tx: Value,
         signer: &PrivateKeySigner,
-    ) -> Result<(), TronError> {
+    ) -> Result<String, TronError> {
         let txid_hex = tx["txID"]
             .as_str()
-            .ok_or_else(|| TronError::Rpc("transaction has no txID".into()))?;
+            .ok_or_else(|| TronError::Rpc("transaction has no txID".into()))?
+            .to_string();
         let txid =
-            hex::decode(txid_hex).map_err(|e| TronError::Rpc(format!("bad txID hex: {e}")))?;
+            hex::decode(&txid_hex).map_err(|e| TronError::Rpc(format!("bad txID hex: {e}")))?;
         let sig = sign_txid(signer, &txid)?;
         tx["signature"] = json!([hex::encode(sig)]);
         let res = self.post("broadcasttransaction", tx).await?;
         if res["result"].as_bool() == Some(true) {
-            return Ok(());
+            return Ok(txid_hex);
         }
         let code = res["code"].as_str().unwrap_or("FAILED");
         let msg = res["message"]
@@ -421,23 +430,49 @@ fn check_node_ok(result: &Value, ctx: &str) -> Result<(), TronError> {
     Ok(())
 }
 
-/// Map a mined `TransactionInfo` into a [`TronExecution`], surfacing an on-chain failure as an
-/// error. Tron logs are EVM-shaped; the log `address` is the 20-byte form without the `0x41`
-/// prefix. Source: <https://developers.tron.network/docs/event>
-fn parse_tx_info(info: &Value, txid: &str) -> Result<TronExecution, TronError> {
-    // A reverted / out-of-energy tx is `result == "FAILED"` (top level) or a non-`SUCCESS`
-    // `receipt.result`; mirror the mock, which errors rather than returning a bad success.
+/// The failure message of a mined `TransactionInfo` that reverted or ran out of energy:
+/// `result == "FAILED"` (top level) or a non-`SUCCESS` `receipt.result`. `None` if it succeeded.
+/// The caller wraps the message in the [`TronError`] variant its operation reports, mirroring the
+/// mock, which errors rather than returning a bad success.
+fn tx_failure(info: &Value) -> Option<String> {
     let failed = info["result"].as_str() == Some("FAILED")
         || info["receipt"]["result"]
             .as_str()
             .is_some_and(|r| r != "SUCCESS");
-    if failed {
+    failed.then(|| {
         let msg = info["resMessage"]
             .as_str()
             .map(decode_hex_message)
             .unwrap_or_default();
         let reason = info["receipt"]["result"].as_str().unwrap_or("FAILED");
-        return Err(TronError::Execute(format!("tx {reason}: {msg}")));
+        format!("tx {reason}: {msg}")
+    })
+}
+
+/// The resources a mined `TransactionInfo` reports: energy (`receipt.energy_usage_total`, the sum
+/// of the energy the caller staked for, the contract paid, and any that was burned for), bandwidth
+/// (`receipt.net_usage`), and the `fee` the transaction was billed, in sun.
+///
+/// A member java-tron omits means the transaction consumed none of that resource: a fully
+/// staked-for transaction burns nothing and carries no `fee`, and a transaction that burned TRX for
+/// its bytes carries no `net_usage`. Energy is what a live chain actually meters, so it is reported
+/// as [`TronCompute::Energy`] (never as gas; see [`TronCompute`]).
+/// Source: <https://developers.tron.network/docs/resource-model>
+fn parse_resources(info: &Value) -> TronResources {
+    let receipt = &info["receipt"];
+    TronResources {
+        compute: TronCompute::Energy(receipt["energy_usage_total"].as_u64().unwrap_or(0)),
+        bandwidth: receipt["net_usage"].as_u64().unwrap_or(0),
+        fee: Some(info["fee"].as_u64().unwrap_or(0)),
+    }
+}
+
+/// Map a mined `TransactionInfo` into a [`TronExecution`], surfacing an on-chain failure as an
+/// error. Tron logs are EVM-shaped; the log `address` is the 20-byte form without the `0x41`
+/// prefix. Source: <https://developers.tron.network/docs/event>
+fn parse_tx_info(info: &Value, txid: &str) -> Result<TronExecution, TronError> {
+    if let Some(msg) = tx_failure(info) {
+        return Err(TronError::Execute(msg));
     }
 
     let output = info["contractResult"][0]
@@ -477,15 +512,14 @@ fn parse_tx_info(info: &Value, txid: &str) -> Result<TronExecution, TronError> {
         }
     }
 
-    let tx_hash = hex::decode(txid)
-        .ok()
-        .filter(|b| b.len() == 32)
-        .map(|b| B256::from_slice(&b));
-
     Ok(TronExecution {
         output,
         logs,
-        tx_hash,
+        // The node's `txID`, verbatim, exactly as `transfer_funds` reports it. It is already known
+        // to be hex (`sign_and_broadcast` decoded it to sign it), and a hash is a `String` here, so
+        // there is nothing left to parse or validate.
+        tx_hash: txid.to_string(),
+        resources: parse_resources(info),
     })
 }
 
@@ -585,5 +619,63 @@ mod tests {
     fn signer_address_is_tron_shaped() {
         let signer = PrivateKeySigner::random();
         assert!(signer_address(&signer).to_base58().starts_with('T'));
+    }
+
+    /// A mined `gettransactioninfobyid` receipt, trimmed to the members the parser reads.
+    fn receipt() -> Value {
+        json!({
+            "id": "aa".repeat(32),
+            "fee": 1_345_600,
+            "contractResult": [""],
+            "receipt": {
+                "energy_usage": 3_000,
+                "energy_fee": 1_260_000,
+                "energy_usage_total": 13_456,
+                "net_usage": 345,
+                "result": "SUCCESS",
+            },
+        })
+    }
+
+    #[test]
+    fn rpc_reports_tron_energy_bandwidth_and_fee() {
+        // The live chain meters energy, so that is what the RPC backend reports: never gas, which
+        // is the mock's (revm's) unit and a different quantity entirely.
+        let r = parse_resources(&receipt());
+        assert_eq!(r.compute, TronCompute::Energy(13_456));
+        assert_eq!(r.bandwidth, 345);
+        assert_eq!(r.fee, Some(1_345_600));
+    }
+
+    #[test]
+    fn a_receipt_without_a_fee_burned_nothing() {
+        // java-tron omits `fee` and `net_usage` when the transaction consumed none of them (fully
+        // covered by staked resources); that is a real zero, not an unknown.
+        let info = json!({ "id": "bb".repeat(32), "receipt": { "energy_usage_total": 7, "result": "SUCCESS" } });
+        let r = parse_resources(&info);
+        assert_eq!(r.compute, TronCompute::Energy(7));
+        assert_eq!(r.bandwidth, 0);
+        assert_eq!(r.fee, Some(0));
+    }
+
+    #[test]
+    fn parse_tx_info_carries_the_receipt_resources() {
+        let txid = "aa".repeat(32);
+        let exec = parse_tx_info(&receipt(), &txid).expect("SUCCESS receipt");
+        assert_eq!(exec.tx_hash, txid);
+        assert_eq!(exec.resources.compute, TronCompute::Energy(13_456));
+        assert_eq!(exec.resources.bandwidth, 345);
+        assert_eq!(exec.resources.fee, Some(1_345_600));
+    }
+
+    #[test]
+    fn a_failed_receipt_is_an_error_not_a_zero_cost_success() {
+        let mut info = receipt();
+        info["receipt"]["result"] = json!("OUT_OF_ENERGY");
+        assert!(tx_failure(&info).is_some_and(|m| m.contains("OUT_OF_ENERGY")));
+        assert!(matches!(
+            parse_tx_info(&info, &"aa".repeat(32)),
+            Err(TronError::Execute(_))
+        ));
     }
 }
