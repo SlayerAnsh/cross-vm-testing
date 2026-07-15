@@ -52,6 +52,7 @@ use cw_multi_test::IntoBech32;
 use prost::Message;
 
 use crate::asset::CwAsset;
+use crate::batch::{CwBatch, CwBatchMember};
 use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
@@ -575,6 +576,45 @@ impl CwRpcProvider {
         })
     }
 
+    /// Sign and broadcast every member of `batch` as one atomic transaction under `gas`, signed by
+    /// `signer`, and return one [`CwExecution`] carrying the single broadcast tx hash, what it
+    /// cost, and its emitted events.
+    ///
+    /// The members map to protobuf `Any` messages ([`batch_member_to_any`]) and ride one signed
+    /// transaction, so they commit all-or-nothing under a single hash. Reuses the same signing, gas
+    /// resolution ([`CwGasLimit::Estimated`] simulates the exact set), and broadcast plumbing the
+    /// typed write paths use.
+    pub async fn execute_batch(
+        &self,
+        batch: &CwBatch,
+        signer: &CosmosSigner,
+        gas: CwGasLimit,
+    ) -> Result<CwExecution, CwError> {
+        let msgs = batch_msgs(batch, signer)?;
+        let gas_limit = self.resolve_gas_limit(gas, msgs.clone(), signer).await?;
+        let (tx_hash, events, gas) = self.sign_and_broadcast(msgs, signer, gas_limit, "").await?;
+        Ok(CwExecution {
+            tx_hash,
+            gas: Some(gas),
+            response: cw_multi_test::AppResponse {
+                events: events.iter().map(to_cw_event).collect(),
+                data: None,
+                msg_responses: Vec::new(),
+            },
+        })
+    }
+
+    /// Estimate what broadcasting `batch` would cost, by simulating the whole message set against
+    /// the node without broadcasting it. See [`Self::simulate`] and [`estimated_gas`].
+    pub async fn estimate_execute_batch(
+        &self,
+        batch: &CwBatch,
+        signer: &CosmosSigner,
+    ) -> Result<CwGas, CwError> {
+        let simulated = self.simulate(batch_msgs(batch, signer)?, signer).await?;
+        Ok(self.forecast(simulated))
+    }
+
     /// The hex-encoded sha256 checksum of the wasm blob behind `code_id` (wasmd's `data_hash`).
     pub async fn code_checksum(&self, code_id: u64) -> Result<String, CwError> {
         // cosmos-sdk-proto carries no `CodeInfo`-named request/response type, but wasmd's
@@ -725,6 +765,19 @@ fn migrate_msg<Migrate: CwSerde>(
     msg: &Migrate,
     signer: &CosmosSigner,
 ) -> Result<cosmrs::Any, CwError> {
+    let bytes = serde_json::to_vec(msg).map_err(|e| CwError::Deploy(e.to_string()))?;
+    migrate_msg_bytes(contract, new_code_id, bytes, signer)
+}
+
+/// Build the `MsgMigrateContract` migrating `contract` to `new_code_id`, carrying `msg` already
+/// serialized to JSON bytes. Shared by the typed [`migrate_msg`] and the batch path, which
+/// serializes its members at build time.
+fn migrate_msg_bytes(
+    contract: &Addr,
+    new_code_id: u64,
+    msg: Vec<u8>,
+    signer: &CosmosSigner,
+) -> Result<cosmrs::Any, CwError> {
     MsgMigrateContract {
         sender: signer_account(signer)?,
         contract: contract
@@ -732,7 +785,7 @@ fn migrate_msg<Migrate: CwSerde>(
             .parse()
             .map_err(|e| CwError::Deploy(format!("contract addr: {e}")))?,
         code_id: new_code_id,
-        msg: serde_json::to_vec(msg).map_err(|e| CwError::Deploy(e.to_string()))?,
+        msg,
     }
     .to_any()
     .map_err(|e| CwError::Deploy(format!("encode migrate: {e}")))
@@ -745,17 +798,62 @@ fn execute_msg<Exec: CwSerde>(
     signer: &CosmosSigner,
     funds: &[Coin],
 ) -> Result<cosmrs::Any, CwError> {
+    let bytes = serde_json::to_vec(msg).map_err(|e| CwError::Execute(e.to_string()))?;
+    execute_msg_bytes(addr, bytes, signer, funds)
+}
+
+/// Build the `MsgExecuteContract` running `msg` (already serialized to JSON bytes) against `addr`,
+/// encoded as a protobuf `Any`. Shared by the typed [`execute_msg`] and the batch path, which
+/// serializes its members at build time.
+fn execute_msg_bytes(
+    addr: &Addr,
+    msg: Vec<u8>,
+    signer: &CosmosSigner,
+    funds: &[Coin],
+) -> Result<cosmrs::Any, CwError> {
     MsgExecuteContract {
         sender: signer_account(signer)?,
         contract: addr
             .as_str()
             .parse()
             .map_err(|e| CwError::Execute(format!("contract addr: {e}")))?,
-        msg: serde_json::to_vec(msg).map_err(|e| CwError::Execute(e.to_string()))?,
+        msg,
         funds: to_cosmrs_coins(funds)?,
     }
     .to_any()
     .map_err(|e| CwError::Execute(format!("encode execute: {e}")))
+}
+
+/// Map every member of `batch` to the protobuf `Any` messages the RPC path signs into one tx.
+fn batch_msgs(batch: &CwBatch, signer: &CosmosSigner) -> Result<Vec<cosmrs::Any>, CwError> {
+    batch
+        .members()
+        .iter()
+        .map(|m| batch_member_to_any(m, signer))
+        .collect()
+}
+
+/// Map a single [`CwBatchMember`] to the protobuf `Any` the RPC path signs, filling in `signer`
+/// as the sender (unknown until broadcast). A [`CwBatchMember::Raw`] member passes through
+/// verbatim.
+fn batch_member_to_any(
+    member: &CwBatchMember,
+    signer: &CosmosSigner,
+) -> Result<cosmrs::Any, CwError> {
+    match member {
+        CwBatchMember::Execute {
+            contract,
+            msg,
+            funds,
+        } => execute_msg_bytes(contract, msg.clone(), signer, funds),
+        CwBatchMember::Send { to, amount, denom } => transfer_msg(to, denom, *amount, signer),
+        CwBatchMember::Migrate {
+            contract,
+            new_code_id,
+            msg,
+        } => migrate_msg_bytes(contract, *new_code_id, msg.clone(), signer),
+        CwBatchMember::Raw(any) => Ok(any.clone()),
+    }
 }
 
 /// Build the bank `MsgSend` moving `amount` `denom` to `to`, encoded as a protobuf `Any`.

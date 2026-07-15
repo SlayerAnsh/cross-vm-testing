@@ -230,6 +230,44 @@ impl CwMockProvider {
         })
     }
 
+    /// Run a set of pre-mapped `msgs` as one atomic transaction, signed by `sender`, and return a
+    /// single [`CwExecution`] carrying one synthetic tx hash (see [`Self::next_tx_hash`]).
+    ///
+    /// `cw-multi-test`'s `App::execute_multi` caches state before running and only flushes it if
+    /// every message succeeds, so a failing member rolls the whole batch back, exactly as a live
+    /// chain's atomic transaction does. The per-message responses are folded into one (their events
+    /// and `msg_responses` concatenated) so the batch reads as the single transaction it is; `data`
+    /// is left `None` (there is no single message payload). The reported `gas` is `NO_GAS_METER`
+    /// and the declared `_gas` limit is inert, as on every mock op.
+    pub async fn execute_batch(
+        &self,
+        msgs: Vec<CosmosMsg>,
+        sender: &Addr,
+        _gas: CwGasLimit,
+    ) -> Result<CwExecution, CwError> {
+        let count = msgs.len() as u64;
+        let responses = self
+            .app
+            .borrow_mut()
+            .execute_multi(sender.clone(), msgs)
+            .map_err(|e| CwError::Execute(any_chain(&e)))?;
+        let mut events = Vec::new();
+        let mut msg_responses = Vec::new();
+        for r in responses {
+            events.extend(r.events);
+            msg_responses.extend(r.msg_responses);
+        }
+        Ok(CwExecution {
+            tx_hash: self.next_tx_hash(&[sender.as_bytes(), &count.to_be_bytes()]),
+            gas: NO_GAS_METER,
+            response: cw_multi_test::AppResponse {
+                events,
+                data: None,
+                msg_responses,
+            },
+        })
+    }
+
     /// Migrate a contract to `new_code_id`, running the new code's `migrate` entry point with
     /// `msg`, and return the synthetic tx hash (see [`Self::next_tx_hash`]).
     ///

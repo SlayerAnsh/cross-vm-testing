@@ -16,6 +16,7 @@
 //! ```
 
 mod asset;
+mod batch;
 mod chain;
 pub mod chains;
 mod contract;
@@ -28,6 +29,7 @@ mod wallet;
 mod tests;
 
 pub use asset::CwAsset;
+pub use batch::CwBatch;
 pub use chain::CwChain;
 pub use chains::CosmosChainInfo;
 pub use contract::{CwContract, CwInterface};

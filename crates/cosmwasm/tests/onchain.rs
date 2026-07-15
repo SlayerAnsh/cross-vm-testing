@@ -14,7 +14,7 @@ use std::rc::Rc;
 use counter::{CountResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
 use cross_vm_core::{ChainProvider, WalletFactory};
 use cross_vm_cosmwasm::chains::OSMOSIS_TESTNET;
-use cross_vm_cosmwasm::{CwChain, CwError, CwGas, CwGasLimit};
+use cross_vm_cosmwasm::{CwBatch, CwChain, CwError, CwGas, CwGasLimit};
 use cross_vm_macros::define_wallet_roster;
 
 /// A live node meters every transaction, so each RPC op must come back with a real gas figure:
@@ -437,5 +437,101 @@ async fn live_raw_sign_and_broadcast_on_osmosis_testnet() {
         after,
         before + AMOUNT,
         "recipient should be credited the raw-broadcast send"
+    );
+}
+
+#[tokio::test]
+#[ignore = "live: requires Osmosis testnet RPC + funded MNEMONIC_TEST osmo address (coin 118)"]
+async fn live_execute_batch_on_osmosis_testnet() {
+    dotenvy::from_path(ENV_PATH).unwrap_or_else(|e| panic!("load {ENV_PATH}: {e}"));
+    let wallets = Rc::new(
+        WalletFactory::from_roster(OnchainWallets::SPECS)
+            .unwrap_or_else(|e| panic!("resolve roster: {e}")),
+    );
+    let chain: CwChain = OSMOSIS_TESTNET.rpc(wallets).into();
+    let denom = chain.chain_info().native_denom;
+
+    // A dust bank send rides alongside the two increments; keep it tiny so a faucet grant covers
+    // many runs.
+    const DUST: u128 = 1_000;
+
+    let from = chain
+        .wallet_address(ONCHAIN_WALLETS.test)
+        .await
+        .expect("derive test wallet");
+    let sink = chain
+        .wallet_address(ONCHAIN_WALLETS.sink)
+        .await
+        .expect("derive sink wallet");
+    assert!(
+        chain.balance(&from).await.expect("balance") > DUST,
+        "wallet {from} has no testnet OSMO; fund this osmo address (BIP-44 coin 118) and retry"
+    );
+
+    // Deploy a fresh counter to target.
+    let stored = chain
+        .store_code(
+            COUNTER_WASM.to_vec(),
+            ONCHAIN_WALLETS.test,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("store_code");
+    let addr = chain
+        .instantiate(
+            stored.code_id,
+            InstantiateMsg {},
+            ONCHAIN_WALLETS.test,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("instantiate")
+        .address;
+    let before: CountResponse = chain
+        .query_wasm_smart(&addr, QueryMsg::GetCount {})
+        .await
+        .expect("count before");
+    let sink_before = chain.balance(&sink).await.expect("sink balance");
+
+    // Two increments and a dust send, all in one signed transaction.
+    let batch = CwBatch::new()
+        .execute(&addr, ExecuteMsg::Increment {}, &[])
+        .execute(&addr, ExecuteMsg::Increment {}, &[])
+        .send(&sink, DUST, denom);
+
+    let est = chain
+        .estimate_execute_batch(&batch, ONCHAIN_WALLETS.test)
+        .await
+        .expect("estimate batch");
+    let receipt = chain
+        .execute_batch(&batch, ONCHAIN_WALLETS.test, CwGasLimit::Estimated)
+        .await
+        .expect("execute_batch");
+
+    // One transaction: a single hash covers both increments and the send, and the node meters it.
+    assert!(!receipt.tx_hash.is_empty(), "tx hash should be non-empty");
+    assert_metered("execute_batch", receipt.gas);
+    assert_estimated("execute_batch", est, receipt.gas.expect("metered"));
+    println!("batch tx hash: {}", receipt.tx_hash);
+
+    // Both contract state changes landed atomically: the counter advanced by exactly two.
+    let after: CountResponse = chain
+        .query_wasm_smart(&addr, QueryMsg::GetCount {})
+        .await
+        .expect("count after");
+    assert_eq!(
+        after.count,
+        before.count + 2,
+        "both increments in the batch must land"
+    );
+
+    // And the dust send moved in the same transaction.
+    let sink_after = chain.balance(&sink).await.expect("sink balance");
+    assert_eq!(
+        sink_after,
+        sink_before + DUST,
+        "the batch's bank send must credit the sink"
     );
 }

@@ -17,6 +17,7 @@ use cross_vm_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::asset::CwAsset;
+use crate::batch::CwBatch;
 use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
@@ -337,6 +338,49 @@ impl CwChain {
         }
     }
 
+    /// Sign and broadcast a [`CwBatch`] as one atomic transaction under `gas`, signed by wallet
+    /// `wallet`, returning one [`CwExecution`]: a single tx hash covering every member, what it
+    /// cost, and its emitted events.
+    ///
+    /// The batch commits all-or-nothing: a member that fails rolls the whole batch back, so partial
+    /// application never happens. The mock maps the members to `cw-multi-test` `CosmosMsg`s and runs
+    /// them through `App::execute_multi` (one synthetic hash, no gas figure); the RPC path maps them
+    /// to protobuf messages and signs them into a single transaction under the process-wide
+    /// broadcast lock (the real hash and metered gas).
+    ///
+    /// An empty batch is a caller error, reported here rather than broadcast as a no-op transaction.
+    /// A [`CwBatch::raw`] member is live-RPC only: it fails on the mock with
+    /// [`CwError::Unimplemented`] (the mock has no `CosmosMsg` equivalent for a raw protobuf
+    /// message).
+    ///
+    /// `gas` is required and behaves as on [`Self::store_code`].
+    pub async fn execute_batch(
+        &self,
+        batch: &CwBatch,
+        wallet: WalletLabel<'_>,
+        gas: CwGasLimit,
+    ) -> Result<CwExecution, CwError> {
+        if let Some(err) = batch.deferred_error() {
+            return Err(err);
+        }
+        if batch.is_empty() {
+            return Err(CwError::Execute(
+                "execute_batch: an empty batch has nothing to broadcast".into(),
+            ));
+        }
+        let signer = self.acquire(wallet).await?;
+        match self {
+            CwChain::Mock(p) => {
+                let msgs = batch.cosmos_msgs()?;
+                p.execute_batch(msgs, &signer.address, gas).await
+            }
+            CwChain::Rpc(p) => {
+                let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
+                p.execute_batch(batch, &signer, gas).await
+            }
+        }
+    }
+
     // ----- Estimation: gas forecasts without broadcasting. -----
     //
     // Every `estimate_*` mirrors its mutating sibling's shape and reports the same type a
@@ -468,6 +512,33 @@ impl CwChain {
                     p.estimate_transfer_funds(to, denom, amount, &signer)
                         .await?,
                 ))
+            }
+        }
+    }
+
+    /// Estimate what [`Self::execute_batch`] would cost, without broadcasting anything.
+    /// `Some(CwGas)` on the RPC backend (the node simulates the whole message set), `None` on the
+    /// mock (which cannot meter). An empty batch is a caller error, exactly as on
+    /// [`Self::execute_batch`].
+    pub async fn estimate_execute_batch(
+        &self,
+        batch: &CwBatch,
+        wallet: WalletLabel<'_>,
+    ) -> Result<Option<CwGas>, CwError> {
+        if let Some(err) = batch.deferred_error() {
+            return Err(err);
+        }
+        if batch.is_empty() {
+            return Err(CwError::Execute(
+                "estimate_execute_batch: an empty batch has nothing to simulate".into(),
+            ));
+        }
+        match self {
+            CwChain::Mock(_) => Ok(None),
+            CwChain::Rpc(p) => {
+                let signer = self.acquire(wallet).await?;
+                let _g = Self::broadcast_guard(p, signer.address.as_str()).await;
+                Ok(Some(p.estimate_execute_batch(batch, &signer).await?))
             }
         }
     }
