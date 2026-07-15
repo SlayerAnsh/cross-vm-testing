@@ -7,7 +7,9 @@ pub use crate::msg::{CountResponse, ExecuteMsg, InstantiateMsg, QueryMsg, Versio
 #[cfg(feature = "cross-vm")]
 pub use crate::msg::{CounterContract, ExecuteMsgFns, QueryMsgFns};
 
-use cosmwasm_std::{entry_point, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult};
+use cosmwasm_std::{
+    entry_point, Binary, Deps, DepsMut, Empty, Env, MessageInfo, Response, StdResult,
+};
 
 #[entry_point]
 pub fn instantiate(
@@ -32,4 +34,12 @@ pub fn execute(
 #[entry_point]
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     contract::query(deps, msg)
+}
+
+/// No-op migration so the code can be the target of a `MsgMigrateContract`; state carries over
+/// untouched. Present only to exercise the migrate path (a contract with no `migrate` export
+/// cannot be migrated at all).
+#[entry_point]
+pub fn migrate(_deps: DepsMut, _env: Env, _msg: Empty) -> StdResult<Response> {
+    Ok(Response::new().add_attribute("action", "migrate"))
 }

@@ -30,15 +30,18 @@ use cosmrs::proto::cosmos::bank::v1beta1::{QueryBalanceRequest, QueryBalanceResp
 use cosmrs::proto::cosmos::base::query::v1beta1::PageRequest;
 use cosmrs::proto::cosmos::tx::v1beta1::{SimulateRequest, SimulateResponse, TxRaw};
 use cosmrs::proto::cosmwasm::wasm::v1::{
-    QueryAllContractStateRequest, QueryAllContractStateResponse, QueryRawContractStateRequest,
-    QueryRawContractStateResponse, QuerySmartContractStateRequest, QuerySmartContractStateResponse,
+    CodeInfoResponse, QueryAllContractStateRequest, QueryAllContractStateResponse,
+    QueryCodeRequest, QueryRawContractStateRequest, QueryRawContractStateResponse,
+    QuerySmartContractStateRequest, QuerySmartContractStateResponse,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use cosmrs::bank::MsgSend;
-use cosmrs::cosmwasm::{MsgExecuteContract, MsgInstantiateContract, MsgStoreCode};
+use cosmrs::cosmwasm::{
+    MsgExecuteContract, MsgInstantiateContract, MsgMigrateContract, MsgStoreCode,
+};
 use cosmrs::rpc::{Client, HttpClient};
 use cosmrs::tendermint::abci::Event as TmEvent;
 use cosmrs::tx::{Body, Fee, Msg, SignDoc, SignerInfo};
@@ -52,7 +55,7 @@ use crate::asset::CwAsset;
 use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
-use crate::provider::{CwExecution, CwGas, CwGasLimit, CwInstantiate, CwStoreCode};
+use crate::provider::{CwExecution, CwGas, CwGasLimit, CwInstantiate, CwMigrate, CwStoreCode};
 use crate::wallet::CosmosSigner;
 
 /// A live-RPC CosmWasm provider. Chain-level reads and contract queries hit a real node via
@@ -183,14 +186,15 @@ impl CwRpcProvider {
         Ok((base.account_number, base.sequence))
     }
 
-    /// Build, sign, and broadcast a transaction carrying `msgs`, waiting for it to commit.
-    /// Returns the tx hash, the delivered events, and what the transaction cost ([`CwGas`]).
-    /// Fails on a nonzero check/deliver code.
+    /// Build, sign, and broadcast a transaction carrying `msgs` under `memo`, waiting for it to
+    /// commit. Returns the tx hash, the delivered events, and what the transaction cost
+    /// ([`CwGas`]). Fails on a nonzero check/deliver code.
     async fn sign_and_broadcast(
         &self,
         msgs: Vec<cosmrs::Any>,
         signer: &CosmosSigner,
         gas_limit: u64,
+        memo: &str,
     ) -> Result<(String, Vec<TmEvent>, CwGas), CwError> {
         let client = self.client()?;
         let (account_number, sequence) = self.account_info(signer.address.as_str()).await?;
@@ -200,7 +204,7 @@ impl CwRpcProvider {
             .chain_id
             .parse::<cosmrs::tendermint::chain::Id>()
             .map_err(|e| CwError::Rpc(format!("chain id: {e}")))?;
-        let body = Body::new(msgs, "", 0u16);
+        let body = Body::new(msgs, memo, 0u16);
 
         let fee_amount = fee_for(gas_limit, self.info.gas_price);
         let denom = self
@@ -386,6 +390,25 @@ impl CwRpcProvider {
         Ok(self.forecast(simulated))
     }
 
+    /// Estimate what migrating `contract` to `new_code_id` with `msg` would cost, by simulating
+    /// the `MsgMigrateContract` against the node without broadcasting it. See [`Self::simulate`]
+    /// and [`estimated_gas`].
+    pub async fn estimate_migrate_contract<Migrate: CwSerde>(
+        &self,
+        contract: &Addr,
+        new_code_id: u64,
+        msg: Migrate,
+        signer: &CosmosSigner,
+    ) -> Result<CwGas, CwError> {
+        let simulated = self
+            .simulate(
+                vec![migrate_msg(contract, new_code_id, &msg, signer)?],
+                signer,
+            )
+            .await?;
+        Ok(self.forecast(simulated))
+    }
+
     /// Upload raw wasm bytecode to the chain under `gas`, signed by `signer`, and return its code
     /// id, the broadcast transaction hash, and what the upload cost ([`CwGas`]).
     ///
@@ -402,7 +425,7 @@ impl CwRpcProvider {
             .resolve_gas_limit(gas, vec![any.clone()], signer)
             .await?;
         let (tx_hash, events, gas) = self
-            .sign_and_broadcast(vec![any], signer, gas_limit)
+            .sign_and_broadcast(vec![any], signer, gas_limit, "")
             .await?;
         let code_id = find_attr(&events, "store_code", "code_id")?
             .parse::<u64>()
@@ -431,7 +454,7 @@ impl CwRpcProvider {
             .resolve_gas_limit(gas, vec![any.clone()], signer)
             .await?;
         let (tx_hash, _, _) = self
-            .sign_and_broadcast(vec![any], signer, gas_limit)
+            .sign_and_broadcast(vec![any], signer, gas_limit, "")
             .await?;
         Ok(tx_hash)
     }
@@ -453,7 +476,7 @@ impl CwRpcProvider {
             .resolve_gas_limit(gas, vec![any.clone()], signer)
             .await?;
         let (tx_hash, events, gas) = self
-            .sign_and_broadcast(vec![any], signer, gas_limit)
+            .sign_and_broadcast(vec![any], signer, gas_limit, "")
             .await?;
         let addr = find_attr(&events, "instantiate", "_contract_address")?;
         Ok(CwInstantiate {
@@ -484,7 +507,7 @@ impl CwRpcProvider {
             .resolve_gas_limit(gas, vec![any.clone()], signer)
             .await?;
         let (tx_hash, events, gas) = self
-            .sign_and_broadcast(vec![any], signer, gas_limit)
+            .sign_and_broadcast(vec![any], signer, gas_limit, "")
             .await?;
         Ok(CwExecution {
             tx_hash,
@@ -495,6 +518,76 @@ impl CwRpcProvider {
                 msg_responses: Vec::new(),
             },
         })
+    }
+
+    /// Migrate `contract` to `new_code_id` under `gas`, signed by `signer`, and return the
+    /// broadcast transaction hash and what the migration cost ([`CwGas`]).
+    ///
+    /// `signer` must be the contract's admin on chain (a live node rejects the migration
+    /// otherwise); the migration runs the new code's `migrate` entry point with `msg`.
+    pub async fn migrate_contract<Migrate: CwSerde>(
+        &self,
+        contract: &Addr,
+        new_code_id: u64,
+        msg: Migrate,
+        signer: &CosmosSigner,
+        gas: CwGasLimit,
+    ) -> Result<CwMigrate, CwError> {
+        let any = migrate_msg(contract, new_code_id, &msg, signer)?;
+        let gas_limit = self
+            .resolve_gas_limit(gas, vec![any.clone()], signer)
+            .await?;
+        let (tx_hash, _events, gas) = self
+            .sign_and_broadcast(vec![any], signer, gas_limit, "")
+            .await?;
+        Ok(CwMigrate {
+            tx_hash,
+            gas: Some(gas),
+        })
+    }
+
+    /// Sign and broadcast a caller-supplied set of `msgs` under `gas` and `memo`, signed by
+    /// `signer`, and return the tx hash, what it cost, and its emitted events.
+    ///
+    /// The framework's escape hatch: it broadcasts any protobuf `Any` messages a caller assembles
+    /// (module messages the typed paths do not wrap), reusing the same signing, gas resolution
+    /// (so [`CwGasLimit::Estimated`] simulates the exact `msgs`), and broadcast plumbing the typed
+    /// write paths use. `data` on the response is left `None` (the raw tx data is proto-wrapped).
+    pub async fn sign_and_broadcast_msgs(
+        &self,
+        msgs: Vec<cosmrs::Any>,
+        signer: &CosmosSigner,
+        gas: CwGasLimit,
+        memo: &str,
+    ) -> Result<CwExecution, CwError> {
+        let gas_limit = self.resolve_gas_limit(gas, msgs.clone(), signer).await?;
+        let (tx_hash, events, gas) = self
+            .sign_and_broadcast(msgs, signer, gas_limit, memo)
+            .await?;
+        Ok(CwExecution {
+            tx_hash,
+            gas: Some(gas),
+            response: cw_multi_test::AppResponse {
+                events: events.iter().map(to_cw_event).collect(),
+                data: None,
+                msg_responses: Vec::new(),
+            },
+        })
+    }
+
+    /// The hex-encoded sha256 checksum of the wasm blob behind `code_id` (wasmd's `data_hash`).
+    pub async fn code_checksum(&self, code_id: u64) -> Result<String, CwError> {
+        // cosmos-sdk-proto carries no `CodeInfo`-named request/response type, but wasmd's
+        // `Query/CodeInfo` takes `{code_id}` and returns `{code_id, creator, data_hash, ...}`,
+        // wire-identical to `QueryCodeRequest` / `CodeInfoResponse`, so those stand in here (and
+        // avoid `Query/Code`, which would also stream back the whole wasm blob).
+        let req = QueryCodeRequest { code_id };
+        let bytes = self
+            .abci_query("/cosmwasm.wasm.v1.Query/CodeInfo", req.encode_to_vec())
+            .await?;
+        let resp = CodeInfoResponse::decode(bytes.as_slice())
+            .map_err(|e| CwError::Query(e.to_string()))?;
+        Ok(hex::encode(resp.data_hash))
     }
 
     /// Run a read-only smart query against a contract instance.
@@ -612,7 +705,9 @@ fn instantiate_msg<Init: CwSerde>(
 ) -> Result<cosmrs::Any, CwError> {
     MsgInstantiateContract {
         sender: signer_account(signer)?,
-        admin: None,
+        // Set the instantiator as the contract's admin, so it can later be migrated (wasmd rejects
+        // a migration from a non-admin, and an admin-less contract is immutable).
+        admin: Some(signer_account(signer)?),
         code_id,
         label: Some(label.to_string()),
         msg: serde_json::to_vec(init).map_err(|e| CwError::Deploy(e.to_string()))?,
@@ -620,6 +715,27 @@ fn instantiate_msg<Init: CwSerde>(
     }
     .to_any()
     .map_err(|e| CwError::Deploy(format!("encode instantiate: {e}")))
+}
+
+/// Build the `MsgMigrateContract` migrating `contract` to `new_code_id` with `msg`, encoded as a
+/// protobuf `Any`.
+fn migrate_msg<Migrate: CwSerde>(
+    contract: &Addr,
+    new_code_id: u64,
+    msg: &Migrate,
+    signer: &CosmosSigner,
+) -> Result<cosmrs::Any, CwError> {
+    MsgMigrateContract {
+        sender: signer_account(signer)?,
+        contract: contract
+            .as_str()
+            .parse()
+            .map_err(|e| CwError::Deploy(format!("contract addr: {e}")))?,
+        code_id: new_code_id,
+        msg: serde_json::to_vec(msg).map_err(|e| CwError::Deploy(e.to_string()))?,
+    }
+    .to_any()
+    .map_err(|e| CwError::Deploy(format!("encode migrate: {e}")))
 }
 
 /// Build the `MsgExecuteContract` running `msg` against `addr`, encoded as a protobuf `Any`.

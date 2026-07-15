@@ -21,7 +21,7 @@ use cw_multi_test::{
 use crate::chains::CosmosChainInfo;
 use crate::error::{any_chain, CwError};
 use crate::msg::CwSerde;
-use crate::provider::{CwExecution, CwGas, CwGasLimit, CwInstantiate, CwStoreCode};
+use crate::provider::{CwExecution, CwGas, CwGasLimit, CwInstantiate, CwMigrate, CwStoreCode};
 
 /// Default funding handed to accounts created via [`ChainProvider::new_account`].
 pub const DEFAULT_FUNDING: u128 = 1_000_000_000_000;
@@ -177,10 +177,20 @@ impl CwMockProvider {
         label: &str,
         _gas: CwGasLimit,
     ) -> Result<CwInstantiate, CwError> {
+        // Set the instantiator as the contract's admin, so it can later `migrate_contract` it
+        // (cw-multi-test, like wasmd, rejects a migration from a non-admin, and an admin-less
+        // contract is immutable).
         let address = self
             .app
             .borrow_mut()
-            .instantiate_contract(code_id, sender.clone(), &init, funds, label, None)
+            .instantiate_contract(
+                code_id,
+                sender.clone(),
+                &init,
+                funds,
+                label,
+                Some(sender.to_string()),
+            )
             .map_err(|e| CwError::Deploy(any_chain(&e)))?;
         Ok(CwInstantiate {
             tx_hash: self.next_tx_hash(&[
@@ -218,6 +228,46 @@ impl CwMockProvider {
             gas: NO_GAS_METER,
             response,
         })
+    }
+
+    /// Migrate a contract to `new_code_id`, running the new code's `migrate` entry point with
+    /// `msg`, and return the synthetic tx hash (see [`Self::next_tx_hash`]).
+    ///
+    /// `sender` must be the contract's registered admin, exactly as on a live chain, else
+    /// `cw-multi-test` rejects the migration. The reported `gas` is `NO_GAS_METER` and the
+    /// declared `_gas` limit is inert: `cw-multi-test` can neither meter this nor run out of gas.
+    pub async fn migrate_contract<Migrate: CwSerde>(
+        &self,
+        contract: &Addr,
+        new_code_id: u64,
+        msg: Migrate,
+        sender: &Addr,
+        _gas: CwGasLimit,
+    ) -> Result<CwMigrate, CwError> {
+        self.app
+            .borrow_mut()
+            .migrate_contract(sender.clone(), contract.clone(), &msg, new_code_id)
+            .map_err(|e| CwError::Deploy(any_chain(&e)))?;
+        Ok(CwMigrate {
+            tx_hash: self.next_tx_hash(&[
+                sender.as_bytes(),
+                contract.as_bytes(),
+                &new_code_id.to_be_bytes(),
+            ]),
+            gas: NO_GAS_METER,
+        })
+    }
+
+    /// The hex-encoded sha256 checksum of the code behind `code_id`, matching the live RPC
+    /// backend's `data_hash` shape (lowercase hex).
+    pub async fn code_checksum(&self, code_id: u64) -> Result<String, CwError> {
+        let info = self
+            .app
+            .borrow()
+            .wrap()
+            .query_wasm_code_info(code_id)
+            .map_err(|e| CwError::Query(e.to_string()))?;
+        Ok(info.checksum.to_hex())
     }
 
     /// Send `amount` base units of bank `denom` from `sender` to `to`, and return the synthetic

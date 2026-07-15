@@ -17,10 +17,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use alloy::eips::eip2718::Encodable2718;
 use alloy::network::{EthereumWallet, ReceiptResponse, TransactionBuilder};
-use alloy::providers::{Provider, ProviderBuilder};
+use alloy::providers::{Provider, ProviderBuilder, SendableTx};
 use alloy::rpc::types::TransactionRequest;
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_signer_local::PrivateKeySigner;
 use cross_vm_core::{BlockTime, ChainProvider, FundError, WalletFactory};
 
@@ -356,6 +357,78 @@ impl EvmRpcProvider {
             .get_storage_at(*addr, slot)
             .await
             .map_err(|e| EvmError::Query(e.to_string()))
+    }
+
+    /// Read the deployed runtime bytecode at `address` (`eth_getCode`); empty for an EOA or an
+    /// undeployed address.
+    pub async fn get_code(&self, address: &Address) -> Result<Bytes, EvmError> {
+        self.provider()?
+            .get_code_at(*address)
+            .await
+            .map_err(|e| EvmError::Query(e.to_string()))
+    }
+
+    /// Generic JSON-RPC escape hatch: send `method` with `params` and return the raw result, for
+    /// node methods this provider exposes no typed wrapper for.
+    pub async fn raw_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, EvmError> {
+        self.provider()?
+            .raw_request(method.to_string().into(), params)
+            .await
+            .map_err(|e| EvmError::Rpc(e.to_string()))
+    }
+
+    /// Fill and sign `tx` into broadcastable RLP bytes, an escape hatch for a transaction the typed
+    /// write paths do not build. The signing provider's fillers supply whatever the request leaves
+    /// unset (nonce, chain id, gas limit, EIP-1559 fees) before the wallet signs it; a request the
+    /// fillers cannot complete into an envelope is an error rather than a half-signed transaction.
+    pub async fn sign_transaction(
+        &self,
+        tx: TransactionRequest,
+        signer: &PrivateKeySigner,
+    ) -> Result<Bytes, EvmError> {
+        // `fill` is an inherent method on the concrete signing provider, so it is built here rather
+        // than through `signing_provider`, whose `impl Provider` erases it.
+        if self.rpc_url.is_empty() {
+            return Err(EvmError::Rpc(format!(
+                "chain '{}' has no rpc_url; use a chain preset with an endpoint",
+                self.info.chain_id
+            )));
+        }
+        let url = self
+            .rpc_url
+            .parse()
+            .map_err(|e| EvmError::Rpc(format!("invalid rpc url: {e}")))?;
+        let wallet = EthereumWallet::from(signer.clone());
+        let provider = ProviderBuilder::new().wallet(wallet).connect_http(url);
+        match provider
+            .fill(tx)
+            .await
+            .map_err(|e| EvmError::Execute(e.to_string()))?
+        {
+            SendableTx::Envelope(env) => Ok(Bytes::from(env.encoded_2718())),
+            SendableTx::Builder(_) => Err(EvmError::Execute(
+                "transaction request could not be fully filled for signing".into(),
+            )),
+        }
+    }
+
+    /// Broadcast raw signed transaction bytes (`eth_sendRawTransaction`) and wait for the mined
+    /// receipt, returning its transaction hash. Waiting on the receipt mirrors the typed write
+    /// paths, so a caller that sees a hash back knows the transaction was mined.
+    pub async fn send_raw_transaction(&self, raw: &[u8]) -> Result<B256, EvmError> {
+        let receipt = self
+            .provider()?
+            .send_raw_transaction(raw)
+            .await
+            .map_err(|e| EvmError::Execute(e.to_string()))?
+            .get_receipt()
+            .await
+            .map_err(|e| EvmError::Execute(e.to_string()))?;
+        Ok(receipt.transaction_hash())
     }
 }
 

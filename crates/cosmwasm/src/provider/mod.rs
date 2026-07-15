@@ -142,6 +142,21 @@ pub struct CwInstantiate {
     pub gas: Option<CwGas>,
 }
 
+/// The result of migrating a contract to a new code id: the transaction hash and what the
+/// migration cost. Unlike [`CwInstantiate`], migration produces no new address (the contract
+/// keeps its own); the caller updates the stored `code_id` from the `new_code_id` it passed in.
+///
+/// `tx_hash` follows the same rule as [`CwExecution::tx_hash`]: real on live RPC, synthetic on
+/// the mock, always present. `gas` follows [`CwGas`]: `Some` on live RPC, `None` on the mock.
+#[derive(Debug, Clone)]
+pub struct CwMigrate {
+    /// The transaction hash of the migration.
+    pub tx_hash: String,
+    /// The gas the migration consumed and the fee it paid, or `None` on the mock, which cannot
+    /// meter gas. See [`CwGas`].
+    pub gas: Option<CwGas>,
+}
+
 /// The result of a CosmWasm contract execution: the raw `cw-multi-test`-shaped
 /// [`CwAppResponse`], the transaction hash, and what the execution cost.
 ///

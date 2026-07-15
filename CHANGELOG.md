@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added (CosmWasm contract migration)
+
+* `CwChain::migrate_contract(contract, new_code_id, msg, wallet, gas)` returns `CwMigrate { tx_hash: String, gas: Option<CwGas> }`, and `CwChain::estimate_migrate_contract` forecasts it without broadcasting, mirroring the shape of every other mutating op and its estimator. The mock migrates inside its in-process `cw-multi-test` `App` and returns a synthetic hash with `gas: None` (no meter); the live RPC backend signs and broadcasts a `MsgMigrateContract` under the process-wide broadcast lock, honoring `CwGasLimit::Estimated` by simulating the exact message. Both backends require the signing wallet to be the contract's admin, exactly as wasmd does.
+* `CwContract`, the typed lifecycle handle, gains `migrate(new_code_id, msg, wallet, gas)` (updates the stored `code_id` and records the receipt), `estimate_migrate`, and the accessors `migrate_tx_hash() -> Option<&str>` and `migrate_gas() -> Option<Option<CwGas>>`, nested exactly like `store_code_gas`.
+* **Behavior change (instantiate now sets an admin):** both backends now instantiate contracts with the deployer as admin (previously `admin: None`). Without an admin a CosmWasm contract is permanently immutable, so migration would be unreachable through the framework, which exposes no admin parameter on `instantiate`. A contract instantiated by an older build keeps its admin-less, immutable state; only new instantiations change.
+* The example counter contract gained a no-op `migrate` entry point (state carries over untouched), because a code blob with no `migrate` export cannot be the target of a migration at all. Run `make compile-cosmwasm` to rebuild the local `counter.wasm` before running the live migration test; `contracts/cosmwasm/Cargo.lock` is regenerated so the optimizer image's cargo accepts the build under `--locked`.
+
+### Added (code introspection: CosmWasm code checksum and EVM `get_code`)
+
+* `CwChain::code_checksum(code_id) -> String` reports the sha256 checksum of the stored wasm as lowercase hex on both backends: wasmd's `data_hash` via `/cosmwasm.wasm.v1.Query/CodeInfo` on the live RPC backend (deliberately not `Query/Code`, which would stream the whole wasm blob back just to hash it), and `cw-multi-test`'s code info checksum on the mock (the `cosmwasm_1_2` cw-multi-test feature turns that query on).
+* `EvmChain::get_code(address) -> Bytes` reads the deployed runtime bytecode (`eth_getCode` on the live RPC backend, the `revm` DB via the new `RevmCore::code` on the mock), returning empty bytes for an EOA or an address never deployed to.
+
+### Added (raw escape hatches: sign and broadcast anything, call any RPC method)
+
+* `CwChain::sign_and_broadcast(msgs: Vec<cosmrs::Any>, wallet, gas, memo) -> CwExecution` broadcasts caller-assembled protobuf messages through the same signing, gas resolution, and broadcast plumbing the typed write paths use, so module messages the framework wraps no typed API for (gov, staking, authz, anything) are reachable without forking it. `CwGasLimit::Estimated` simulates the exact `msgs` supplied. Live RPC only; the in-process mock builds no Cosmos transactions and returns `CwError::Unimplemented`. The transaction memo is now threaded through the private broadcast path (the typed ops pass an empty one, unchanged on the wire).
+* `EvmChain::raw_request(method, params: serde_json::Value) -> serde_json::Value` is the generic JSON-RPC escape hatch (the shape of ethers' `provider.request`): any node method the typed surface does not wrap. Live RPC only; the mock has no node to answer an arbitrary method.
+* `EvmChain::sign_transaction(tx: TransactionRequest, wallet) -> Bytes` fills whatever the request leaves unset (nonce, chain id, gas limit, EIP-1559 fees), signs it, and returns broadcastable raw transaction bytes; `EvmChain::send_raw_transaction(raw) -> B256` broadcasts them and waits for the mined receipt, mirroring the typed write paths. Together they cover custom transactions the typed paths do not build. Live RPC only on both; the mock returns `EvmError::Unimplemented`.
+
 ### Breaking (`AppResponse::gas_used` replaced by a self describing `cost()`)
 
 * `AppResponse::gas_used() -> Option<u128>` is removed. `RawResponse::cost()`, `AppResponse::cost()`, and `HookContext::cost()` return `Option<Cost>` instead: `Cost { units: u128, unit: CostUnit, bandwidth: Option<u64>, fee: Option<u128> }`, where `CostUnit` is `Gas` (EVM, CosmWasm, and the Tron mock), `ComputeUnits` (Solana), or `Energy` (the Tron live RPC backend only). A single scalar could not describe cost across VMs: Tron bills energy and bandwidth as two independent resources neither derivable from the other, and Solana's fee is priced per signature rather than derived from its compute units. `None` means the backend cannot meter the operation, never that it was free.

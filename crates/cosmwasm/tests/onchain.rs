@@ -277,3 +277,165 @@ async fn live_transfer_funds_on_osmosis_testnet() {
         "recipient should be credited the transferred amount"
     );
 }
+
+#[tokio::test]
+#[ignore = "live: requires Osmosis testnet RPC + funded MNEMONIC_TEST osmo address (coin 118)"]
+async fn live_migrate_and_checksum_on_osmosis_testnet() {
+    use cosmwasm_std::Empty;
+
+    dotenvy::from_path(ENV_PATH).unwrap_or_else(|e| panic!("load {ENV_PATH}: {e}"));
+    let wallets = Rc::new(
+        WalletFactory::from_roster(OnchainWallets::SPECS)
+            .unwrap_or_else(|e| panic!("resolve roster: {e}")),
+    );
+    let chain: CwChain = OSMOSIS_TESTNET.rpc(wallets).into();
+
+    let who = chain
+        .wallet_address(ONCHAIN_WALLETS.test)
+        .await
+        .expect("derive test wallet");
+    assert!(
+        chain.balance(&who).await.expect("balance") > 0,
+        "wallet {who} has no testnet OSMO; fund this osmo address and retry"
+    );
+
+    // Two uploads of the same wasm: identical checksums (a pure function of the bytes), distinct
+    // code ids, so the migration has a real target to move to.
+    let v1 = chain
+        .store_code(
+            COUNTER_WASM.to_vec(),
+            ONCHAIN_WALLETS.test,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("store v1");
+    let v2 = chain
+        .store_code(
+            COUNTER_WASM.to_vec(),
+            ONCHAIN_WALLETS.test,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("store v2");
+    assert_ne!(v1.code_id, v2.code_id);
+
+    let sum1 = chain.code_checksum(v1.code_id).await.expect("checksum v1");
+    let sum2 = chain.code_checksum(v2.code_id).await.expect("checksum v2");
+    assert_eq!(sum1.len(), 64, "sha256 data_hash is 32 bytes of hex");
+    assert!(
+        sum1.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "checksum `{sum1}` must be lowercase hex"
+    );
+    assert_eq!(sum1, sum2, "identical bytes hash to the same checksum");
+    println!("code {} / {} checksum: {sum1}", v1.code_id, v2.code_id);
+
+    // Instantiate now records the deployer as admin, so the same wallet may migrate it.
+    let instantiated = chain
+        .instantiate(
+            v1.code_id,
+            InstantiateMsg {},
+            ONCHAIN_WALLETS.test,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("instantiate");
+    let addr = instantiated.address;
+
+    let est_migrate = chain
+        .estimate_migrate_contract(&addr, v2.code_id, Empty {}, ONCHAIN_WALLETS.test)
+        .await
+        .expect("estimate migrate");
+    let migrated = chain
+        .migrate_contract(
+            &addr,
+            v2.code_id,
+            Empty {},
+            ONCHAIN_WALLETS.test,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("migrate");
+    assert!(!migrated.tx_hash.is_empty(), "tx hash should be non-empty");
+    assert_metered("migrate_contract", migrated.gas);
+    assert_estimated(
+        "migrate_contract",
+        est_migrate,
+        migrated.gas.expect("metered"),
+    );
+    println!("migrated to code {} (tx {})", v2.code_id, migrated.tx_hash);
+
+    let resp: CountResponse = chain
+        .query_wasm_smart(&addr, QueryMsg::GetCount {})
+        .await
+        .expect("query count after migrate");
+    assert_eq!(resp.count, 0, "the no-op migration must preserve state");
+}
+
+#[tokio::test]
+#[ignore = "live: requires Osmosis testnet RPC + funded MNEMONIC_TEST osmo address (coin 118)"]
+async fn live_raw_sign_and_broadcast_on_osmosis_testnet() {
+    use cosmrs::bank::MsgSend;
+    use cosmrs::tx::Msg;
+    use cosmrs::{Coin as CosmrsCoin, Denom};
+
+    dotenvy::from_path(ENV_PATH).unwrap_or_else(|e| panic!("load {ENV_PATH}: {e}"));
+    let wallets = Rc::new(
+        WalletFactory::from_roster(OnchainWallets::SPECS)
+            .unwrap_or_else(|e| panic!("resolve roster: {e}")),
+    );
+    let chain: CwChain = OSMOSIS_TESTNET.rpc(wallets).into();
+    let denom = chain.chain_info().native_denom;
+
+    const AMOUNT: u128 = 1_000;
+
+    let from = chain
+        .wallet_address(ONCHAIN_WALLETS.test)
+        .await
+        .expect("derive test wallet");
+    let to = chain
+        .wallet_address(ONCHAIN_WALLETS.sink)
+        .await
+        .expect("derive sink wallet");
+    assert!(
+        chain.balance(&from).await.expect("balance") > AMOUNT,
+        "wallet {from} has no testnet OSMO; fund this osmo address and retry"
+    );
+
+    // A bank send assembled by hand and pushed through the raw escape hatch, proving a caller can
+    // broadcast a module message the typed paths do not wrap. `Estimated` must simulate this exact
+    // message and come back metered.
+    let msg = MsgSend {
+        from_address: from.as_str().parse().expect("from addr"),
+        to_address: to.as_str().parse().expect("to addr"),
+        amount: vec![CosmrsCoin {
+            denom: denom.parse::<Denom>().expect("denom"),
+            amount: AMOUNT,
+        }],
+    }
+    .to_any()
+    .expect("encode MsgSend");
+
+    let before = chain.balance(&to).await.expect("recipient balance");
+    let receipt = chain
+        .sign_and_broadcast(
+            vec![msg],
+            ONCHAIN_WALLETS.test,
+            CwGasLimit::Estimated,
+            "cross-vm raw broadcast",
+        )
+        .await
+        .expect("raw sign_and_broadcast");
+    assert!(!receipt.tx_hash.is_empty(), "tx hash should be non-empty");
+    assert_metered("sign_and_broadcast", receipt.gas);
+    println!("raw broadcast tx hash: {}", receipt.tx_hash);
+
+    let after = chain.balance(&to).await.expect("recipient balance");
+    assert_eq!(
+        after,
+        before + AMOUNT,
+        "recipient should be credited the raw-broadcast send"
+    );
+}
