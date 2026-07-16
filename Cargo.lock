@@ -2404,10 +2404,12 @@ name = "cross-vm-solana"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bincode",
  "bip39",
  "cross-vm-core",
  "cross-vm-macros",
  "cross-vm-solana",
+ "dotenvy",
  "litesvm",
  "reqwest 0.12.28",
  "serde_json",

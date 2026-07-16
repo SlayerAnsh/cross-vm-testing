@@ -281,6 +281,82 @@ impl TronChain {
         }
     }
 
+    /// Read the deployed runtime bytecode at `address` (empty for an ordinary account or an
+    /// undeployed address).
+    pub async fn get_code(&self, address: &TronAddress) -> Result<Bytes, TronError> {
+        match self {
+            TronChain::Mock(p) => p.get_code(address).await,
+            TronChain::Rpc(p) => p.get_code(address).await,
+        }
+    }
+
+    /// Generic JSON-RPC escape hatch over TronGrid's Ethereum-compatible endpoint: send `method`
+    /// with `params` and return the raw JSON result. Its native-transport counterpart is
+    /// [`wallet_request`](Self::wallet_request).
+    ///
+    /// Live only. The in-process mock has no node to answer an arbitrary method and returns a
+    /// [`TronError::Unimplemented`].
+    pub async fn raw_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, TronError> {
+        match self {
+            TronChain::Mock(p) => p.raw_request(method, params).await,
+            TronChain::Rpc(p) => p.raw_request(method, params).await,
+        }
+    }
+
+    /// Generic java-tron REST escape hatch: POST `body` to the node's `/wallet/{path}` endpoint and
+    /// return the raw JSON, the native transport most Tron operations speak (see
+    /// [`raw_request`](Self::raw_request) for the Ethereum-compatible subset).
+    ///
+    /// Live only. The mock has no `/wallet/*` node and returns a [`TronError::Unimplemented`].
+    pub async fn wallet_request(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, TronError> {
+        match self {
+            TronChain::Mock(p) => p.wallet_request(path, body).await,
+            TronChain::Rpc(p) => p.wallet_request(path, body).await,
+        }
+    }
+
+    /// Sign an unsigned transaction's `txID` with wallet `wallet`, returning the signed transaction
+    /// JSON without broadcasting it. Escape hatch for a custom transaction the typed write paths do
+    /// not build (usually one produced by [`wallet_request`](Self::wallet_request)); pair it with
+    /// [`broadcast_transaction`](Self::broadcast_transaction).
+    ///
+    /// Live only. The mock signs no real transaction and returns a [`TronError::Unimplemented`].
+    pub async fn sign_transaction(
+        &self,
+        unsigned: serde_json::Value,
+        wallet: WalletLabel<'_>,
+    ) -> Result<serde_json::Value, TronError> {
+        match self {
+            TronChain::Mock(p) => p.sign_transaction(unsigned).await,
+            TronChain::Rpc(p) => {
+                let signer = self.acquire(wallet).await?;
+                p.sign_transaction(unsigned, &signer).await
+            }
+        }
+    }
+
+    /// Broadcast a signed transaction and wait for its mined receipt, returning its `txID`. Pairs
+    /// with [`sign_transaction`](Self::sign_transaction).
+    ///
+    /// Live only. The mock has no node to broadcast to and returns a [`TronError::Unimplemented`].
+    pub async fn broadcast_transaction(
+        &self,
+        signed: serde_json::Value,
+    ) -> Result<String, TronError> {
+        match self {
+            TronChain::Mock(p) => p.broadcast_transaction(signed).await,
+            TronChain::Rpc(p) => p.broadcast_transaction(signed).await,
+        }
+    }
+
     /// Ensure `who` holds at least `amount` (sun, or token base units) of `asset`.
     ///
     /// Mock native: mints the shortfall. Mock TRC20: validates `balanceOf`. RPC native:
@@ -466,6 +542,71 @@ mod tests {
             chain.get_storage_at(&a, U256::ZERO).await.unwrap(),
             U256::ZERO
         );
+    }
+
+    /// Initcode returning `runtime` (a CODECOPY of the bytes trailing this 12-byte prologue), so a
+    /// deploy yields a contract carrying exactly `runtime` as its code.
+    fn initcode_returning(runtime: &[u8]) -> Bytes {
+        let n = runtime.len() as u8;
+        let mut code = vec![
+            0x60, n, 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, n, 0x60, 0x00, 0xf3,
+        ];
+        code.extend_from_slice(runtime);
+        Bytes::from(code)
+    }
+
+    #[tokio::test]
+    async fn get_code_plumbs_through_chain() {
+        // Exercise the `TronChain` enum dispatch: a deployed contract's runtime reads back, an EOA
+        // reads empty.
+        let chain = chain_with_wallets();
+        let alice = chain.wallet_address(TEST_WALLETS.alice).await.unwrap();
+
+        let runtime = [0x60u8, 0x00, 0x00];
+        let deploy = chain
+            .deploy_create(
+                initcode_returning(&runtime),
+                [],
+                TEST_WALLETS.alice,
+                AMPLE,
+                CALLER_PAYS,
+            )
+            .await
+            .expect("deploy succeeds");
+        assert_eq!(
+            chain.get_code(&deploy.address).await.unwrap().as_ref(),
+            runtime
+        );
+        assert!(chain.get_code(&alice).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn raw_escape_hatches_are_unimplemented_on_the_mock_chain() {
+        // The mock backend has no node, so every live-only escape hatch surfaces as `Unimplemented`
+        // through the enum dispatch.
+        let chain = chain_with_wallets();
+        assert!(matches!(
+            chain
+                .raw_request("eth_chainId", serde_json::json!([]))
+                .await,
+            Err(TronError::Unimplemented(_))
+        ));
+        assert!(matches!(
+            chain
+                .wallet_request("getnowblock", serde_json::json!({}))
+                .await,
+            Err(TronError::Unimplemented(_))
+        ));
+        assert!(matches!(
+            chain
+                .sign_transaction(serde_json::json!({}), TEST_WALLETS.alice)
+                .await,
+            Err(TronError::Unimplemented(_))
+        ));
+        assert!(matches!(
+            chain.broadcast_transaction(serde_json::json!({})).await,
+            Err(TronError::Unimplemented(_))
+        ));
     }
 
     #[tokio::test]

@@ -356,6 +356,42 @@ async fn send_transaction_rejects_a_caller_supplied_compute_budget() {
 }
 
 #[tokio::test]
+async fn mock_raw_escape_hatches_unimplemented() {
+    use cross_vm_core::WalletLabel;
+
+    // The raw escape hatches are live-only: the in-process mock has no node to answer an arbitrary
+    // method and no cluster to broadcast to, and its typed `send_transaction` is its signing path.
+    let chain: crate::SvmChain = SOLANA_LOCALNET.mock(empty_wallets()).into();
+
+    let err = chain
+        .raw_request("getSlot", serde_json::json!([]))
+        .await
+        .expect_err("mock has no node");
+    assert!(
+        matches!(&err, crate::SvmError::Unimplemented(what) if what == "mock raw_request"),
+        "got: {err}"
+    );
+
+    let err = chain
+        .sign_transaction(Vec::new(), WalletLabel::new("alice"))
+        .await
+        .expect_err("mock signs via send_transaction");
+    assert!(
+        matches!(&err, crate::SvmError::Unimplemented(what) if what == "mock sign_transaction"),
+        "got: {err}"
+    );
+
+    let err = chain
+        .send_raw_transaction(b"raw")
+        .await
+        .expect_err("mock has no mempool");
+    assert!(
+        matches!(&err, crate::SvmError::Unimplemented(what) if what == "mock send_raw_transaction"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
 async fn blocks_advance() {
     let mut chain = SOLANA_LOCALNET.mock(empty_wallets());
     assert_eq!(chain.block_height().await, 0);
