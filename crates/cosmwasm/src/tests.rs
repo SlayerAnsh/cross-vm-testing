@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use crate::chains::{LOCAL, OSMOSIS};
-use crate::{CwAsset, CwChain, CwError, CwGasLimit};
+use crate::{CwAsset, CwBatch, CwChain, CwContract, CwError, CwGasLimit};
 use cross_vm_core::{BlockTime, ChainProvider, ChainSpec, WalletFactory};
 use cross_vm_macros::define_wallet_roster;
 
@@ -526,6 +526,262 @@ async fn a_mock_cannot_run_out_of_gas() {
     assert_eq!(instantiated.gas, None);
 }
 
+/// A `cw-multi-test` contract wrapping the counter code with a no-op `migrate` entry point, so it
+/// can be the target of a migration (the plain counter wrapper has none). Built fresh each call
+/// because `store_code` takes the boxed contract by value.
+fn migratable_counter() -> Box<dyn cw_multi_test::Contract<cosmwasm_std::Empty, cosmwasm_std::Empty>>
+{
+    use cosmwasm_std::{DepsMut, Empty, Env, Response, StdResult};
+    fn migrate(_deps: DepsMut, _env: Env, _msg: Empty) -> StdResult<Response> {
+        Ok(Response::new())
+    }
+    Box::new(
+        cw_multi_test::ContractWrapper::new(counter::execute, counter::instantiate, counter::query)
+            .with_migrate(migrate),
+    )
+}
+
+#[tokio::test]
+async fn mock_migrate_contract_swaps_code_and_preserves_state() {
+    use cosmwasm_std::Empty;
+    use counter::{CountResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
+
+    let chain: CwChain = OSMOSIS.mock(wallets()).into();
+    // Two stored codes so the migration has a distinct target code id to move to.
+    let v1 = chain
+        .store_code(
+            migratable_counter(),
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("store v1");
+    let v2 = chain
+        .store_code(
+            migratable_counter(),
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("store v2");
+    assert_ne!(v1.code_id, v2.code_id);
+
+    // Instantiate now records the deployer as admin, so the same wallet may migrate it.
+    let inst = chain
+        .instantiate(
+            v1.code_id,
+            InstantiateMsg {},
+            TEST_WALLETS.alice,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("instantiate");
+    let addr = inst.address;
+
+    // Bump the counter so we can prove the migration keeps state.
+    chain
+        .execute_contract(
+            &addr,
+            ExecuteMsg::Increment {},
+            TEST_WALLETS.alice,
+            &[],
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("increment");
+
+    let migrated = chain
+        .migrate_contract(
+            &addr,
+            v2.code_id,
+            Empty {},
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("migrate");
+    assert_tendermint_hash(&migrated.tx_hash);
+    assert!(migrated.gas.is_none(), "mock cannot meter a migration");
+
+    // The contract runs the new code id now, and its state survived the migration.
+    let p = match &chain {
+        CwChain::Mock(p) => p.clone(),
+        CwChain::Rpc(_) => unreachable!("mock chain"),
+    };
+    let info = p
+        .app()
+        .wrap()
+        .query_wasm_contract_info(&addr)
+        .expect("info");
+    assert_eq!(
+        info.code_id, v2.code_id,
+        "code id must move to the new code"
+    );
+    let count: CountResponse = chain
+        .query_wasm_smart(&addr, QueryMsg::GetCount {})
+        .await
+        .expect("query");
+    assert_eq!(count.count, 1, "state must survive the migration");
+}
+
+#[tokio::test]
+async fn mock_migrate_rejects_a_non_admin_sender() {
+    use cosmwasm_std::Empty;
+    use counter::InstantiateMsg;
+
+    let chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let v1 = chain
+        .store_code(
+            migratable_counter(),
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("store v1");
+    let v2 = chain
+        .store_code(
+            migratable_counter(),
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("store v2");
+    // Alice instantiates, so alice is the admin; bob is not.
+    let inst = chain
+        .instantiate(
+            v1.code_id,
+            InstantiateMsg {},
+            TEST_WALLETS.alice,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("instantiate");
+
+    let err = chain
+        .migrate_contract(
+            &inst.address,
+            v2.code_id,
+            Empty {},
+            TEST_WALLETS.bob,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect_err("bob is not the admin");
+    assert!(matches!(err, CwError::Deploy(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn typed_contract_migrate_updates_code_id_and_records_receipt() {
+    use cosmwasm_std::Empty;
+    use counter::InstantiateMsg;
+
+    let chain: CwChain = OSMOSIS.mock(wallets()).into();
+    // Store the migration target first so its code id is known before the handle walks the deploy.
+    let target = chain
+        .store_code(
+            migratable_counter(),
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("store target");
+
+    let counter = CwContract::<()>::new(chain.clone())
+        .store_code(
+            migratable_counter(),
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("store_code")
+        .instantiate(
+            InstantiateMsg {},
+            TEST_WALLETS.alice,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("instantiate");
+    let before = counter.code_id().expect("code id after store_code");
+    assert_ne!(before, target.code_id);
+
+    let counter = counter
+        .migrate(
+            target.code_id,
+            Empty {},
+            TEST_WALLETS.alice,
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("migrate");
+
+    assert_eq!(
+        counter.code_id(),
+        Some(target.code_id),
+        "the handle's stored code id must follow the migration"
+    );
+    assert_tendermint_hash(counter.migrate_tx_hash().expect("migrated"));
+    // Ran the step (outer `Some`) on a backend that cannot meter (inner `None`).
+    assert_eq!(counter.migrate_gas(), Some(None));
+}
+
+#[tokio::test]
+async fn mock_code_checksum_is_lowercase_hex_and_stable() {
+    use cosmwasm_std::Empty;
+    use cw_multi_test::{Contract, ContractWrapper};
+
+    let chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let code: Box<dyn Contract<Empty, Empty>> = Box::new(ContractWrapper::new(
+        counter::execute,
+        counter::instantiate,
+        counter::query,
+    ));
+    let stored = chain
+        .store_code(code, TEST_WALLETS.alice, CwGasLimit::Estimated)
+        .await
+        .expect("store_code");
+
+    let checksum = chain.code_checksum(stored.code_id).await.expect("checksum");
+    assert_eq!(checksum.len(), 64, "sha256 checksum is 32 bytes of hex");
+    assert!(
+        checksum
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "checksum `{checksum}` must be lowercase hex (matches wasmd's data_hash shape)"
+    );
+    // A pure read: the same code id yields the same checksum every time.
+    assert_eq!(
+        checksum,
+        chain.code_checksum(stored.code_id).await.expect("checksum")
+    );
+}
+
+#[tokio::test]
+async fn mock_code_checksum_errors_on_an_unknown_code_id() {
+    let chain: CwChain = OSMOSIS.mock(wallets()).into();
+    assert!(
+        chain.code_checksum(9_999).await.is_err(),
+        "an unstored code id has no checksum"
+    );
+}
+
+#[tokio::test]
+async fn mock_sign_and_broadcast_is_unimplemented() {
+    // The in-process backend builds no Cosmos transactions, so the raw escape hatch has nothing to
+    // sign or broadcast; it must say so rather than silently no-op.
+    let chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let err = chain
+        .sign_and_broadcast(vec![], TEST_WALLETS.alice, CwGasLimit::Exact(1), "")
+        .await
+        .expect_err("mock cannot broadcast raw messages");
+    assert!(matches!(err, CwError::Unimplemented(_)), "got {err:?}");
+}
+
 #[tokio::test]
 async fn rpc_write_paths_unimplemented() {
     let mut chain = OSMOSIS.rpc(empty_wallets());
@@ -679,4 +935,152 @@ async fn get_contract_states_dumps_all_storage() {
         serde_json::from_slice::<u64>(&counter.1).expect("raw bytes parse as u64"),
         2
     );
+}
+
+/// Deploy a fresh counter on `chain`, signed by `alice`, and return its address. Used by the batch
+/// tests, which each need a live contract to target.
+async fn deploy_counter(chain: &CwChain) -> cosmwasm_std::Addr {
+    use cosmwasm_std::Empty;
+    use counter::InstantiateMsg;
+    use cw_multi_test::{Contract, ContractWrapper};
+
+    let code: Box<dyn Contract<Empty, Empty>> = Box::new(ContractWrapper::new(
+        counter::execute,
+        counter::instantiate,
+        counter::query,
+    ));
+    let stored = chain
+        .store_code(code, TEST_WALLETS.alice, CwGasLimit::Estimated)
+        .await
+        .expect("store_code");
+    chain
+        .instantiate(
+            stored.code_id,
+            InstantiateMsg {},
+            TEST_WALLETS.alice,
+            &[],
+            "counter",
+            CwGasLimit::Estimated,
+        )
+        .await
+        .expect("instantiate")
+        .address
+}
+
+#[tokio::test]
+async fn execute_batch_lands_every_member_under_one_hash() {
+    use counter::{CountResponse, ExecuteMsg, QueryMsg};
+
+    let mut chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let denom = chain.chain_info().native_denom;
+    let addr = deploy_counter(&chain).await;
+
+    let alice = chain
+        .wallet_address(TEST_WALLETS.alice)
+        .await
+        .expect("alice addr");
+    let bob = chain
+        .wallet_address(TEST_WALLETS.bob)
+        .await
+        .expect("bob addr");
+    chain.set_balance(&alice, denom, 1_000).await.unwrap();
+
+    // Two contract executes and one bank send in a single atomic transaction.
+    let batch = CwBatch::new()
+        .execute(&addr, ExecuteMsg::Increment {}, &[])
+        .execute(&addr, ExecuteMsg::Increment {}, &[])
+        .send(&bob, 400, denom);
+    assert_eq!(batch.len(), 3);
+    assert!(!batch.is_empty());
+
+    let receipt = chain
+        .execute_batch(&batch, TEST_WALLETS.alice, CwGasLimit::Estimated)
+        .await
+        .expect("batch");
+
+    // One transaction, so one hash covers all three members, and the mock cannot meter it.
+    assert_tendermint_hash(&receipt.tx_hash);
+    assert!(receipt.gas.is_none(), "mock cannot meter a batch");
+
+    // Both contract state changes landed: the counter advanced by exactly two.
+    let count: CountResponse = chain
+        .query_wasm_smart(&addr, QueryMsg::GetCount {})
+        .await
+        .expect("count");
+    assert_eq!(count.count, 2, "both increments must land");
+
+    // And the bank send moved the funds in the same transaction.
+    assert_eq!(chain.balance(&alice).await.unwrap(), 600);
+    assert_eq!(chain.balance(&bob).await.unwrap(), 400);
+}
+
+#[tokio::test]
+async fn execute_batch_rolls_back_when_a_member_fails() {
+    use counter::{CountResponse, ExecuteMsg, QueryMsg};
+
+    let mut chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let denom = chain.chain_info().native_denom;
+    let addr = deploy_counter(&chain).await;
+
+    let alice = chain
+        .wallet_address(TEST_WALLETS.alice)
+        .await
+        .expect("alice addr");
+    let bob = chain
+        .wallet_address(TEST_WALLETS.bob)
+        .await
+        .expect("bob addr");
+    chain.set_balance(&alice, denom, 100).await.unwrap();
+
+    // A valid increment followed by an unfundable send: the send fails, so the whole batch must
+    // roll back and the increment must not persist.
+    let batch = CwBatch::new()
+        .execute(&addr, ExecuteMsg::Increment {}, &[])
+        .send(&bob, 1_000_000, denom);
+
+    let err = chain
+        .execute_batch(&batch, TEST_WALLETS.alice, CwGasLimit::Estimated)
+        .await
+        .expect_err("the send cannot be funded");
+    assert!(
+        matches!(err, CwError::Execute(_)),
+        "a failing member is an execute failure, got {err:?}"
+    );
+
+    // Nothing from the batch persisted: the counter never advanced and no funds moved.
+    let count: CountResponse = chain
+        .query_wasm_smart(&addr, QueryMsg::GetCount {})
+        .await
+        .expect("count");
+    assert_eq!(count.count, 0, "the increment must have rolled back");
+    assert_eq!(chain.balance(&alice).await.unwrap(), 100);
+    assert_eq!(chain.balance(&bob).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn execute_batch_rejects_an_empty_batch() {
+    // An empty batch is a caller error, not a no-op transaction to broadcast.
+    let chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let err = chain
+        .execute_batch(&CwBatch::new(), TEST_WALLETS.alice, CwGasLimit::Estimated)
+        .await
+        .expect_err("an empty batch has nothing to broadcast");
+    assert!(matches!(err, CwError::Execute(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn mock_execute_batch_rejects_a_raw_member() {
+    // A raw protobuf member has no cw-multi-test CosmosMsg equivalent, so the mock must reject it
+    // rather than silently drop it; raw members require the live RPC backend.
+    let chain: CwChain = OSMOSIS.mock(wallets()).into();
+    let raw = cosmrs::Any {
+        type_url: "/cosmos.bank.v1beta1.MsgSend".to_string(),
+        value: Vec::new(),
+    };
+    let batch = CwBatch::new().raw(raw);
+    let err = chain
+        .execute_batch(&batch, TEST_WALLETS.alice, CwGasLimit::Exact(1))
+        .await
+        .expect_err("mock cannot run a raw member");
+    assert!(matches!(err, CwError::Unimplemented(_)), "got {err:?}");
 }

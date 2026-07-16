@@ -386,6 +386,30 @@ impl RevmCore {
             .map_err(|e| ExecFailure::Internal(format!("{e:?}")))
     }
 
+    /// The deployed runtime bytecode at `addr`, empty for an account that carries none (an EOA, or
+    /// an address never deployed to). `basic_ref` may hand the code back inline; otherwise it is
+    /// fetched by its hash from the contract store.
+    pub fn code(&self, addr: Address) -> Result<Bytes, ExecFailure> {
+        let evm = self.evm.borrow();
+        let db = evm.ctx.journaled_state.db();
+        let Some(info) = db
+            .basic_ref(addr)
+            .map_err(|e| ExecFailure::Internal(format!("{e:?}")))?
+        else {
+            return Ok(Bytes::new());
+        };
+        if info.is_empty_code_hash() {
+            return Ok(Bytes::new());
+        }
+        match info.code {
+            Some(code) => Ok(code.original_bytes()),
+            None => db
+                .code_by_hash_ref(info.code_hash)
+                .map(|code| code.original_bytes())
+                .map_err(|e| ExecFailure::Internal(format!("{e:?}"))),
+        }
+    }
+
     /// Set the native balance of `addr`.
     pub fn set_balance(&self, addr: Address, amount: U256) {
         let mut evm = self.evm.borrow_mut();

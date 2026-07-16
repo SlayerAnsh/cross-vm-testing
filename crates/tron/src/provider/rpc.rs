@@ -508,13 +508,54 @@ impl TronRpcProvider {
             .map_err(|e| TronError::Query(format!("eth_getStorageAt parse: {e}")))
     }
 
-    /// Sign an unsigned transaction's `txID` with `signer` and broadcast it, returning that `txID`
-    /// (unprefixed hex): the broadcast transaction's hash, which every write path reports.
-    async fn sign_and_broadcast(
+    /// Read the deployed runtime bytecode at `addr` (empty for an ordinary account or an address
+    /// never deployed to), via TronGrid's Ethereum-compatible JSON-RPC (`eth_getCode` at
+    /// `<rest_base>/jsonrpc`), the same transport [`get_storage_at`](Self::get_storage_at) uses.
+    ///
+    /// The address crosses the wire as the 20-byte EVM form ([`TronAddress::as_evm`]), not the
+    /// base58 or `0x41` Tron form, and only the `"latest"` block is available.
+    /// Source: <https://developers.tron.network/reference/eth_getcode>
+    pub async fn get_code(&self, addr: &TronAddress) -> Result<Bytes, TronError> {
+        let addr_hex = format!("{:#x}", addr.as_evm());
+        let result = self
+            .post_jsonrpc("eth_getCode", json!([addr_hex, "latest"]))
+            .await?;
+        let s = result
+            .as_str()
+            .ok_or_else(|| TronError::Query("eth_getCode: non-string result".into()))?;
+        let bytes = hex::decode(s.trim_start_matches("0x"))
+            .map_err(|e| TronError::Query(format!("eth_getCode hex: {e}")))?;
+        Ok(Bytes::from(bytes))
+    }
+
+    /// Generic JSON-RPC escape hatch over TronGrid's Ethereum-compatible endpoint: send `method`
+    /// with `params` and return the raw `result`, for node methods this provider exposes no typed
+    /// wrapper for. Pairs with [`wallet_request`](Self::wallet_request), the native REST transport.
+    pub async fn raw_request(&self, method: &str, params: Value) -> Result<Value, TronError> {
+        self.post_jsonrpc(method, params).await
+    }
+
+    /// Generic java-tron REST escape hatch: POST `body` to `/wallet/{path}` and return the decoded
+    /// JSON, for the native endpoints this provider exposes no typed wrapper for. This is the
+    /// transport most Tron operations actually speak (the Ethereum-compatible JSON-RPC of
+    /// [`raw_request`](Self::raw_request) covers only a subset).
+    /// Source: <https://developers.tron.network/reference/wallet-node-http-api-overview>
+    pub async fn wallet_request(&self, path: &str, body: Value) -> Result<Value, TronError> {
+        self.post(path, body).await
+    }
+
+    /// Sign an unsigned transaction's `txID` with `signer`, returning the signed transaction JSON
+    /// (its `signature` array populated) without broadcasting it. Escape hatch for a custom
+    /// transaction the typed write paths do not build (usually one produced by
+    /// [`wallet_request`](Self::wallet_request)); pair it with
+    /// [`broadcast_transaction`](Self::broadcast_transaction).
+    ///
+    /// Signing a `txID` is local secp256k1 work, so this needs no node.
+    pub async fn sign_transaction(
         &self,
         mut tx: Value,
         signer: &PrivateKeySigner,
-    ) -> Result<String, TronError> {
+    ) -> Result<Value, TronError> {
         let txid_hex = tx["txID"]
             .as_str()
             .ok_or_else(|| TronError::Rpc("transaction has no txID".into()))?
@@ -523,7 +564,40 @@ impl TronRpcProvider {
             hex::decode(&txid_hex).map_err(|e| TronError::Rpc(format!("bad txID hex: {e}")))?;
         let sig = sign_txid(signer, &txid)?;
         tx["signature"] = json!([hex::encode(sig)]);
-        let res = self.post("broadcasttransaction", tx).await?;
+        Ok(tx)
+    }
+
+    /// Broadcast an already-signed transaction and wait for its mined receipt, returning its `txID`
+    /// (unprefixed hex). Pairs with [`sign_transaction`](Self::sign_transaction).
+    ///
+    /// Waiting on the receipt mirrors the typed write paths (see [`await_tx_info`](Self::await_tx_info)),
+    /// so a caller that sees a `txID` back knows the transaction was mined.
+    pub async fn broadcast_transaction(&self, signed: Value) -> Result<String, TronError> {
+        let txid = self.broadcast(signed).await?;
+        self.await_tx_info(&txid).await?;
+        Ok(txid)
+    }
+
+    /// Sign an unsigned transaction's `txID` with `signer` and broadcast it, returning that `txID`
+    /// (unprefixed hex): the broadcast transaction's hash, which every write path reports. Does not
+    /// wait for the receipt; callers poll [`await_tx_info`](Self::await_tx_info) separately.
+    async fn sign_and_broadcast(
+        &self,
+        tx: Value,
+        signer: &PrivateKeySigner,
+    ) -> Result<String, TronError> {
+        let signed = self.sign_transaction(tx, signer).await?;
+        self.broadcast(signed).await
+    }
+
+    /// Broadcast an already-signed transaction (`/wallet/broadcasttransaction`), returning its
+    /// `txID` (unprefixed hex) on acceptance. Does not wait for the receipt.
+    async fn broadcast(&self, signed: Value) -> Result<String, TronError> {
+        let txid_hex = signed["txID"]
+            .as_str()
+            .ok_or_else(|| TronError::Rpc("transaction has no txID".into()))?
+            .to_string();
+        let res = self.post("broadcasttransaction", signed).await?;
         if res["result"].as_bool() == Some(true) {
             return Ok(txid_hex);
         }
@@ -926,6 +1000,59 @@ mod tests {
         let addr = c.new_account("x").await;
         let res = c.get_storage_at(&addr, U256::ZERO).await;
         assert!(matches!(res, Err(TronError::Rpc(_))));
+    }
+
+    #[tokio::test]
+    async fn read_and_broadcast_escape_hatches_error_offline() {
+        // LOCAL has no rpc_url, so every hatch that reaches a node fails fast as `Rpc` without
+        // touching the network: the JSON-RPC reads (`get_code`, `raw_request`), the REST hatch
+        // (`wallet_request`), and the broadcast of an already-signed transaction.
+        let mut c = TronRpcProvider::new(LOCAL, Rc::new(WalletFactory::from_roster(&[]).unwrap()));
+        let addr = c.new_account("x").await;
+        assert!(matches!(c.get_code(&addr).await, Err(TronError::Rpc(_))));
+        assert!(matches!(
+            c.raw_request("eth_chainId", json!([])).await,
+            Err(TronError::Rpc(_))
+        ));
+        assert!(matches!(
+            c.wallet_request("getnowblock", json!({})).await,
+            Err(TronError::Rpc(_))
+        ));
+        assert!(matches!(
+            c.broadcast_transaction(json!({ "txID": "aa".repeat(32) }))
+                .await,
+            Err(TronError::Rpc(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn sign_transaction_is_local_and_populates_the_signature() {
+        // Signing a `txID` is local secp256k1 work, so it succeeds even on LOCAL (no rpc_url): the
+        // escape-hatch sign step reaches no node, exactly as the private write paths' signing does.
+        let c = TronRpcProvider::new(LOCAL, Rc::new(WalletFactory::from_roster(&[]).unwrap()));
+        let signer = PrivateKeySigner::random();
+        let txid = "aa".repeat(32);
+        let signed = c
+            .sign_transaction(json!({ "txID": txid, "raw_data": {} }), &signer)
+            .await
+            .expect("signing is local, needs no node");
+        // The signature array carries one 65-byte (130 hex char) `r || s || v` Tron signature.
+        let sig = signed["signature"][0]
+            .as_str()
+            .expect("signature is populated");
+        assert_eq!(sig.len(), 130, "65-byte r||s||v rendered as hex");
+        // The txID is left intact, so the broadcast step can still read it back.
+        assert_eq!(signed["txID"].as_str().unwrap(), txid);
+    }
+
+    #[tokio::test]
+    async fn signing_a_transaction_without_a_txid_is_an_error() {
+        let c = TronRpcProvider::new(LOCAL, Rc::new(WalletFactory::from_roster(&[]).unwrap()));
+        let signer = PrivateKeySigner::random();
+        assert!(matches!(
+            c.sign_transaction(json!({ "raw_data": {} }), &signer).await,
+            Err(TronError::Rpc(_))
+        ));
     }
 
     #[test]

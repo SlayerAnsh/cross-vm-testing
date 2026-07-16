@@ -19,6 +19,8 @@ alloy.workspace = true
 # Local signer with BIP-39 mnemonic derivation (MnemonicBuilder/PrivateKeySigner). The
 # `mnemonic` feature pulls in coins-bip39, which alloy's `full` does not enable.
 alloy-signer-local.workspace = true
+# Generic JSON-RPC escape hatch (`raw_request`) carries free-form params/results.
+serde_json.workspace = true
 thiserror.workspace = true
 # Async mutex for the per-wallet broadcast lock (held across await on a current-thread rt).
 tokio.workspace = true

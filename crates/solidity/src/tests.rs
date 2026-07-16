@@ -494,6 +494,58 @@ async fn get_storage_at_plumbs_through_chain() {
 }
 
 #[tokio::test]
+async fn get_code_returns_runtime_for_a_contract_and_empty_for_an_eoa() {
+    let chain = crate::EvmChain::from(LOCAL.mock(test_wallets()));
+    let alice = chain.wallet_address(TEST_WALLETS.alice).await.unwrap();
+
+    // An account with no deployed code (an EOA) reads back empty.
+    assert!(
+        chain.get_code(&alice).await.unwrap().is_empty(),
+        "an EOA carries no code"
+    );
+
+    // A contract whose runtime is a known byte string reads that string back verbatim.
+    let runtime: &[u8] = &[0x60, 0x2a, 0x60, 0x00, 0x55, 0x00];
+    let deploy = chain
+        .deploy_create(initcode_returning(runtime), [], TEST_WALLETS.alice, AMPLE)
+        .await
+        .expect("deploy");
+    assert_eq!(
+        chain.get_code(&deploy.address).await.unwrap().as_ref(),
+        runtime,
+        "get_code must return the deployed runtime bytecode"
+    );
+}
+
+#[tokio::test]
+async fn mock_rejects_the_rpc_only_escape_hatches() {
+    // The in-process mock has no node, no signer over a real transaction, and no mempool, so each
+    // of these surfaces `unimplemented` rather than a fabricated answer.
+    let chain = crate::EvmChain::from(LOCAL.mock(test_wallets()));
+
+    let err = chain
+        .raw_request("eth_blockNumber", serde_json::Value::Null)
+        .await
+        .expect_err("mock has no node to answer a raw request");
+    assert!(err.to_string().contains("unimplemented"), "got: {err}");
+
+    let err = chain
+        .sign_transaction(
+            alloy::rpc::types::TransactionRequest::default(),
+            TEST_WALLETS.alice,
+        )
+        .await
+        .expect_err("mock signs no real transaction");
+    assert!(err.to_string().contains("unimplemented"), "got: {err}");
+
+    let err = chain
+        .send_raw_transaction(&[0x01])
+        .await
+        .expect_err("mock has no mempool");
+    assert!(err.to_string().contains("unimplemented"), "got: {err}");
+}
+
+#[tokio::test]
 async fn transfer_funds_moves_the_balance() {
     let mut chain = crate::EvmChain::from(LOCAL.mock(test_wallets()));
     let alice = chain.wallet_address(TEST_WALLETS.alice).await.unwrap();

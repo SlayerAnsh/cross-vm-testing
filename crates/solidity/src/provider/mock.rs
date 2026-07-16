@@ -8,7 +8,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy::rpc::types::TransactionRequest;
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_signer_local::PrivateKeySigner;
 use cross_vm_core::{BlockTime, ChainProvider, WalletFactory};
 use cross_vm_revm_common::{ExecFailure, RevmCore};
@@ -217,6 +218,36 @@ impl EvmMockProvider {
         self.core
             .storage(*addr, slot)
             .map_err(|f| EvmError::Query(f.call_message("get_storage_at")))
+    }
+
+    /// Read the deployed runtime bytecode at `address` (empty for an EOA or an undeployed address).
+    pub async fn get_code(&self, address: &Address) -> Result<Bytes, EvmError> {
+        self.core
+            .code(*address)
+            .map_err(|f| EvmError::Query(f.call_message("get_code")))
+    }
+
+    /// Generic JSON-RPC escape hatch. Unsupported on the in-process mock: there is no node to
+    /// answer an arbitrary method, so the call names one that does not exist here.
+    pub async fn raw_request(
+        &self,
+        method: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value, EvmError> {
+        Err(EvmError::Unimplemented(format!(
+            "mock raw_request '{method}'"
+        )))
+    }
+
+    /// Sign a raw transaction into broadcastable bytes. Unsupported on the mock, which executes
+    /// in-process and signs no real transaction (see the synthetic-hash note on `RevmCore`).
+    pub async fn sign_transaction(&self, _tx: TransactionRequest) -> Result<Bytes, EvmError> {
+        Err(EvmError::Unimplemented("mock sign_transaction".into()))
+    }
+
+    /// Broadcast raw signed transaction bytes. Unsupported on the mock, which has no mempool.
+    pub async fn send_raw_transaction(&self, _raw: &[u8]) -> Result<B256, EvmError> {
+        Err(EvmError::Unimplemented("mock send_raw_transaction".into()))
     }
 }
 

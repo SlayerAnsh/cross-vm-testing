@@ -9,6 +9,8 @@
 
 use std::rc::Rc;
 
+use alloy::network::TransactionBuilder;
+use alloy::rpc::types::TransactionRequest;
 use alloy::sol_types::SolCall;
 use cross_vm_core::{ChainProvider, WalletFactory};
 use cross_vm_macros::define_wallet_roster;
@@ -201,6 +203,104 @@ async fn live_transfer_funds_on_base_sepolia() {
         "hash `{tx_hash}` is not 0x-prefixed"
     );
     assert_eq!(tx_hash.len(), 66, "hash `{tx_hash}` is not 32 bytes of hex");
+
+    let end = chain.balance(&who).await.expect("read balance");
+    println!("balance after self-transfer: {end} wei (was {start})");
+    assert!(end < start, "the transfer should at least have burnt gas");
+}
+
+#[tokio::test]
+#[ignore = "live: requires Base Sepolia RPC + funded MNEMONIC_TEST index 0"]
+async fn live_get_code_and_raw_request_on_base_sepolia() {
+    dotenvy::from_path(ENV_PATH).unwrap_or_else(|e| panic!("load {ENV_PATH}: {e}"));
+    let wallets = Rc::new(
+        WalletFactory::from_roster(OnchainWallets::SPECS)
+            .unwrap_or_else(|e| panic!("resolve roster: {e}")),
+    );
+    let chain: EvmChain = BASE_SEPOLIA.rpc(wallets).into();
+
+    let who = chain
+        .wallet_address(ONCHAIN_WALLETS.test)
+        .await
+        .expect("derive test wallet");
+    let balance = chain.balance(&who).await.expect("read balance");
+    println!("test wallet: {who}");
+    assert!(
+        balance > U256::ZERO,
+        "wallet {who} has no Base Sepolia ETH; fund it (index 0 of MNEMONIC_TEST) and retry"
+    );
+
+    // The signer's own account is an EOA, so it carries no code.
+    assert!(
+        chain.get_code(&who).await.expect("get_code EOA").is_empty(),
+        "an EOA carries no code"
+    );
+
+    // Deploy the Counter and read its runtime bytecode back: a deployed contract carries code.
+    let deploy = chain
+        .deploy_create(
+            Counter::BYTECODE.clone(),
+            Bytes::new(),
+            ONCHAIN_WALLETS.test,
+            EvmGasLimit::Estimated,
+        )
+        .await
+        .expect("deploy_create");
+    let code = chain.get_code(&deploy.address).await.expect("get_code");
+    println!("Counter runtime code: {} bytes", code.len());
+    assert!(!code.is_empty(), "a deployed contract must carry code");
+
+    // The generic escape hatch reaches a method the typed surface does not wrap: `eth_chainId`
+    // must report the very chain this provider is bound to.
+    let raw = chain
+        .raw_request("eth_chainId", serde_json::Value::Array(vec![]))
+        .await
+        .expect("raw_request eth_chainId");
+    let hex = raw.as_str().expect("eth_chainId returns a hex string");
+    let reported = u64::from_str_radix(hex.trim_start_matches("0x"), 16).expect("decode chain id");
+    println!("eth_chainId: {hex} ({reported})");
+    assert_eq!(reported, chain.chain_info().numeric_id());
+}
+
+#[tokio::test]
+#[ignore = "live: requires Base Sepolia RPC + funded MNEMONIC_TEST index 0"]
+async fn live_sign_and_send_raw_transaction_on_base_sepolia() {
+    dotenvy::from_path(ENV_PATH).unwrap_or_else(|e| panic!("load {ENV_PATH}: {e}"));
+    let wallets = Rc::new(
+        WalletFactory::from_roster(OnchainWallets::SPECS)
+            .unwrap_or_else(|e| panic!("resolve roster: {e}")),
+    );
+    let chain: EvmChain = BASE_SEPOLIA.rpc(wallets).into();
+
+    let who = chain
+        .wallet_address(ONCHAIN_WALLETS.test)
+        .await
+        .expect("derive test wallet");
+    let start = chain.balance(&who).await.expect("read balance");
+    println!("test wallet: {who}");
+    assert!(
+        start > U256::ZERO,
+        "wallet {who} has no Base Sepolia ETH; fund it (index 0 of MNEMONIC_TEST) and retry"
+    );
+
+    // Sign a dust self-transfer through the raw escape hatch (nonce/chain id/gas/fees filled), then
+    // broadcast the signed bytes: the two halves of a custom-transaction round trip.
+    let tx = TransactionRequest::default()
+        .with_to(who)
+        .with_value(U256::from(1_000u64));
+    let raw = chain
+        .sign_transaction(tx, ONCHAIN_WALLETS.test)
+        .await
+        .expect("sign_transaction");
+    println!("signed raw tx: {} bytes", raw.len());
+    assert!(!raw.is_empty(), "a signed transaction cannot be empty");
+
+    let hash = chain
+        .send_raw_transaction(&raw)
+        .await
+        .expect("send_raw_transaction");
+    println!("broadcast tx hash: {hash}");
+    assert_ne!(hash, B256::ZERO, "a broadcast tx carries its hash");
 
     let end = chain.balance(&who).await.expect("read balance");
     println!("balance after self-transfer: {end} wei (was {start})");

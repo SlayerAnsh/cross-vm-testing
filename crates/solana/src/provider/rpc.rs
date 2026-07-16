@@ -1,20 +1,29 @@
-//! Live-RPC Solana provider (read-only).
+//! Live-RPC Solana provider: read-only for typed operations, with raw escape hatches.
 //!
 //! [`SvmRpcProvider`] talks to a real Solana cluster over JSON-RPC (a thin `reqwest`
 //! client). Read paths need no signer: [`block_height`] (`getSlot`), [`balance`]
-//! (`getBalance`), and [`get_account`] (`getAccountInfo`). Write paths (`add_program`,
-//! `send_transaction`, `transfer_funds`, `set_balance`) still return
-//! [`SvmError::Unimplemented`] until signing and broadcast land, and so does
-//! `estimate_transaction`, which needs the same transaction assembly they do.
+//! (`getBalance`), and [`get_account`] (`getAccountInfo`). The typed write paths
+//! (`add_program`, `send_transaction`, `transfer_funds`, `set_balance`) still return
+//! [`SvmError::Unimplemented`], and so does `estimate_transaction`, which needs the same
+//! transaction assembly they do.
+//!
+//! Explicit escape hatches sidestep that read-only stance for callers who want raw control:
+//! [`raw_request`] issues an arbitrary JSON-RPC method, and [`sign_transaction`] +
+//! [`send_raw_transaction`] assemble, sign, and broadcast a transaction the typed paths do not
+//! build.
 //!
 //! [`block_height`]: SvmRpcProvider::block_height
 //! [`balance`]: SvmRpcProvider::balance
 //! [`get_account`]: SvmRpcProvider::get_account
+//! [`raw_request`]: SvmRpcProvider::raw_request
+//! [`sign_transaction`]: SvmRpcProvider::sign_transaction
+//! [`send_raw_transaction`]: SvmRpcProvider::send_raw_transaction
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::str::FromStr;
+use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -26,12 +35,18 @@ use solana_address::Address;
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
+use solana_transaction::{Hash, Transaction};
 
 use crate::asset::SvmAsset;
 use crate::chains::{Commitment, SolanaChainInfo};
 use crate::error::SvmError;
 use crate::provider::{SvmComputeBudget, SvmDeploy};
 use crate::wallet::SvmSigner;
+
+/// How many times to poll `getSignatureStatuses` for a broadcast transaction's confirmation.
+const TX_POLL_ATTEMPTS: u32 = 40;
+/// Delay between confirmation polls (Solana slot time is ~0.4s).
+const TX_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// A live-RPC Solana provider. Read-only: chain-level reads and account reads hit a real
 /// cluster; state-mutating operations remain [`SvmError::Unimplemented`].
@@ -158,10 +173,15 @@ impl SvmRpcProvider {
     /// Sign and send a transaction built from `instructions`, capped at `budget` compute units,
     /// signed by `signer`.
     ///
-    /// The wallet signer is plumbed through, but live broadcast is not yet implemented: the
-    /// return type is litesvm's [`TransactionMetadata`], which a bare `sendTransaction` (which
-    /// yields only a signature) cannot produce. A focused follow-up will decouple the return
-    /// type. The per-wallet broadcast lock is already enforced at the chain level.
+    /// The wallet signer is plumbed through, but this typed path is not implemented: its return
+    /// type is litesvm's [`TransactionMetadata`], which a bare `sendTransaction` (which yields
+    /// only a signature) cannot produce. A focused follow-up will decouple the return type.
+    /// Callers who only need to broadcast can drop to the raw [`sign_transaction`] +
+    /// [`send_raw_transaction`] escape hatches, which return the signature directly. The
+    /// per-wallet broadcast lock is already enforced at the chain level.
+    ///
+    /// [`sign_transaction`]: Self::sign_transaction
+    /// [`send_raw_transaction`]: Self::send_raw_transaction
     pub async fn send_transaction(
         &self,
         _instructions: impl AsRef<[Instruction]>,
@@ -197,6 +217,104 @@ impl SvmRpcProvider {
         _budget: SvmComputeBudget,
     ) -> Result<String, SvmError> {
         Err(SvmError::Unimplemented("solana rpc transfer_funds".into()))
+    }
+
+    // ----- Raw escape hatches: explicit opt-outs of the read-only stance. -----
+
+    /// Generic JSON-RPC escape hatch: issue `method` with `params` and return the raw `result`.
+    ///
+    /// The public face of the private [`rpc`](Self::rpc) helper the typed read paths are built on,
+    /// for methods this provider does not model.
+    pub async fn raw_request(&self, method: &str, params: Value) -> Result<Value, SvmError> {
+        self.rpc(method, params).await
+    }
+
+    /// Fetch a live blockhash, then assemble and sign a transaction built from `instructions`,
+    /// paid and signed by `signer`, returning the bincode-serialized signed transaction (the wire
+    /// bytes [`send_raw_transaction`](Self::send_raw_transaction) base64-encodes for
+    /// `sendTransaction`).
+    ///
+    /// An escape hatch for a custom transaction the typed write paths do not build: it carries no
+    /// `SetComputeUnitLimit` cap (prepend one yourself if you need it), and takes no broadcast lock,
+    /// as it broadcasts nothing.
+    pub async fn sign_transaction(
+        &self,
+        instructions: Vec<Instruction>,
+        signer: &SvmSigner,
+    ) -> Result<Vec<u8>, SvmError> {
+        let result = self
+            .rpc(
+                "getLatestBlockhash",
+                json!([{ "commitment": self.commitment() }]),
+            )
+            .await?;
+        let blockhash = result["value"]["blockhash"]
+            .as_str()
+            .ok_or_else(|| SvmError::Rpc("getLatestBlockhash: missing blockhash".into()))?;
+        let blockhash = Hash::from_str(blockhash)
+            .map_err(|e| SvmError::Rpc(format!("getLatestBlockhash: bad blockhash: {e}")))?;
+        let payer = signer.pubkey();
+        let tx = Transaction::new_signed_with_payer(
+            &instructions,
+            Some(&payer),
+            &[signer.keypair()],
+            blockhash,
+        );
+        bincode::serialize(&tx).map_err(|e| SvmError::Rpc(format!("serialize transaction: {e}")))
+    }
+
+    /// Broadcast the bincode-serialized signed transaction `raw` (`sendTransaction`), then poll
+    /// `getSignatureStatuses` until it confirms, returning its base58 signature.
+    ///
+    /// Pairs with [`sign_transaction`](Self::sign_transaction). A transaction the cluster records as
+    /// failed, or one that never confirms within the poll budget, is an [`SvmError::Execute`].
+    pub async fn send_raw_transaction(&self, raw: &[u8]) -> Result<String, SvmError> {
+        let encoded = STANDARD.encode(raw);
+        let result = self
+            .rpc(
+                "sendTransaction",
+                json!([encoded, { "encoding": "base64", "preflightCommitment": self.commitment() }]),
+            )
+            .await?;
+        let signature = result
+            .as_str()
+            .ok_or_else(|| SvmError::Rpc(format!("sendTransaction: unexpected result {result}")))?
+            .to_string();
+        self.await_confirmation(&signature).await?;
+        Ok(signature)
+    }
+
+    /// Poll `getSignatureStatuses` until `signature` confirms. Errors if the cluster reports the
+    /// transaction as failed, or if it does not confirm within the poll budget.
+    async fn await_confirmation(&self, signature: &str) -> Result<(), SvmError> {
+        for _ in 0..TX_POLL_ATTEMPTS {
+            let result = self
+                .rpc(
+                    "getSignatureStatuses",
+                    json!([[signature], { "searchTransactionHistory": true }]),
+                )
+                .await?;
+            let status = &result["value"][0];
+            if !status.is_null() {
+                if !status["err"].is_null() {
+                    return Err(SvmError::Execute(format!(
+                        "transaction {signature} failed: {}",
+                        status["err"]
+                    )));
+                }
+                if matches!(
+                    status["confirmationStatus"].as_str(),
+                    Some("confirmed" | "finalized")
+                ) {
+                    return Ok(());
+                }
+            }
+            tokio::time::sleep(TX_POLL_INTERVAL).await;
+        }
+        Err(SvmError::Execute(format!(
+            "transaction {signature} not confirmed after {}s",
+            u64::from(TX_POLL_ATTEMPTS) * TX_POLL_INTERVAL.as_millis() as u64 / 1000
+        )))
     }
 
     /// Read on-chain account data (`getAccountInfo`) for `pubkey`.

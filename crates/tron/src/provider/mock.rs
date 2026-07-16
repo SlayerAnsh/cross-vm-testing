@@ -324,6 +324,58 @@ impl TronMockProvider {
             .map_err(|f| TronError::Query(f.call_message("get_storage_at")))
     }
 
+    /// Read the deployed runtime bytecode at `addr` (empty for an ordinary account or an undeployed
+    /// address). The TVM executes on the inner EVM address ([`TronAddress::as_evm`]), so this reads
+    /// the code the backing `revm` holds there.
+    pub async fn get_code(&self, addr: &TronAddress) -> Result<Bytes, TronError> {
+        self.core
+            .code(addr.as_evm())
+            .map_err(|f| TronError::Query(f.call_message("get_code")))
+    }
+
+    /// Generic JSON-RPC escape hatch. Unsupported on the in-process mock: there is no node to
+    /// answer an arbitrary method, so the call names one that does not exist here.
+    pub async fn raw_request(
+        &self,
+        method: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value, TronError> {
+        Err(TronError::Unimplemented(format!(
+            "mock raw_request '{method}'"
+        )))
+    }
+
+    /// Generic java-tron REST escape hatch. Unsupported on the mock for the same reason as
+    /// [`raw_request`](Self::raw_request): there is no `/wallet/*` node to POST to.
+    pub async fn wallet_request(
+        &self,
+        path: &str,
+        _body: serde_json::Value,
+    ) -> Result<serde_json::Value, TronError> {
+        Err(TronError::Unimplemented(format!(
+            "mock wallet_request '{path}'"
+        )))
+    }
+
+    /// Sign an unsigned transaction's `txID`. Unsupported on the mock, which executes in-process and
+    /// signs no real transaction (see the synthetic-hash note on [`mock_execution`]).
+    pub async fn sign_transaction(
+        &self,
+        _unsigned: serde_json::Value,
+    ) -> Result<serde_json::Value, TronError> {
+        Err(TronError::Unimplemented("mock sign_transaction".into()))
+    }
+
+    /// Broadcast a signed transaction. Unsupported on the mock, which has no node to broadcast to.
+    pub async fn broadcast_transaction(
+        &self,
+        _signed: serde_json::Value,
+    ) -> Result<String, TronError> {
+        Err(TronError::Unimplemented(
+            "mock broadcast_transaction".into(),
+        ))
+    }
+
     /// Freeze `trx_sun` sun of TRX for `who`, granting energy.
     /// Source: <https://developers.tron.network/docs/resource-model>
     pub fn freeze_for_energy(&self, who: &TronAddress, trx_sun: u64) {
@@ -1108,6 +1160,66 @@ mod tests {
 
         assert_eq!(c.bandwidth(&deployer), FREE_BANDWIDTH_PER_DAY);
         assert_eq!(c.block_height().await, height);
+    }
+
+    #[tokio::test]
+    async fn get_code_returns_runtime_for_a_contract_and_empty_for_an_eoa() {
+        let mut c = provider();
+        let deployer = c.new_account("deployer").await;
+
+        // Deploy a contract whose runtime is a fixed non-empty byte string, then read it back.
+        let runtime = [0x60u8, 0x00, 0x00];
+        let addr = c
+            .deploy_create(
+                initcode_returning(&runtime),
+                [],
+                &deployer,
+                AMPLE,
+                CALLER_PAYS,
+            )
+            .await
+            .expect("deploy succeeds")
+            .address;
+        assert_eq!(
+            c.get_code(&addr)
+                .await
+                .expect("read contract code")
+                .as_ref(),
+            runtime,
+            "get_code returns the deployed runtime bytecode"
+        );
+
+        // An ordinary account (the deployer is an EOA) carries no code.
+        assert!(
+            c.get_code(&deployer)
+                .await
+                .expect("read eoa code")
+                .is_empty(),
+            "an EOA has no runtime bytecode"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_escape_hatches_are_unimplemented_on_the_mock() {
+        // The mock is in-process: there is no node behind the JSON-RPC / REST escape hatches, and no
+        // real transaction to sign or broadcast, so each is an explicit `Unimplemented`.
+        let c = provider();
+        assert!(matches!(
+            c.raw_request("eth_chainId", serde_json::json!([])).await,
+            Err(TronError::Unimplemented(_))
+        ));
+        assert!(matches!(
+            c.wallet_request("getnowblock", serde_json::json!({})).await,
+            Err(TronError::Unimplemented(_))
+        ));
+        assert!(matches!(
+            c.sign_transaction(serde_json::json!({})).await,
+            Err(TronError::Unimplemented(_))
+        ));
+        assert!(matches!(
+            c.broadcast_transaction(serde_json::json!({})).await,
+            Err(TronError::Unimplemented(_))
+        ));
     }
 
     #[tokio::test]

@@ -9,7 +9,9 @@ description = "CosmWasm chain provider (cw-multi-test) for the cross-vm testing 
 
 [dependencies]
 cross-vm-core.workspace = true
-cw-multi-test.workspace = true
+# `cosmwasm_1_2` turns on the wasm module's `CodeInfo` query (checksum lookup) on both the
+# mock (cw-multi-test) and its cosmwasm-std querier; it is off by default in the crates.
+cw-multi-test = { workspace = true, features = ["cosmwasm_1_2"] }
 cosmwasm-std.workspace = true
 thiserror.workspace = true
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +41,10 @@ cross-vm-macros.workspace = true
 cross-vm-cosmwasm = { path = ".", features = ["presets"] }
 # Load `.env` into the process environment for the live onchain test.
 dotenvy.workspace = true
+# Assemble raw `cosmrs::Any` messages for the `sign_and_broadcast` escape-hatch onchain test.
+cosmrs.workspace = true
+# Name `Empty` (the counter's migrate msg) in the onchain migrate test.
+cosmwasm-std.workspace = true
 # The canonical counter contract from `examples/`, consumed as an rlib and wrapped in-process.
 # `cross-vm` on so its messages carry the typed-handle derives (needed for the collision test).
 counter = { path = "../../contracts/cosmwasm/contracts/counter", features = ["cross-vm"] }

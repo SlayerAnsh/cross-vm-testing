@@ -37,6 +37,9 @@ solana-transaction = "3"
 reqwest.workspace = true
 serde_json.workspace = true
 base64 = "0.22"
+# Serialize a signed transaction to the wire bytes `sendTransaction` base64-encodes (the raw
+# escape hatch); the same bincode format solana itself uses for transactions.
+bincode = "1"
 # BIP-39 mnemonic -> seed for wallet derivation.
 bip39.workspace = true
 # Async mutex for the per-wallet broadcast lock (held across await on a current-thread rt).
@@ -51,6 +54,8 @@ presets = []
 
 [dev-dependencies]
 tokio.workspace = true
+# Load the funded `MNEMONIC_TEST` from the workspace `.env` for the live Devnet signing test.
+dotenvy.workspace = true
 # Self dev-dependency to force-enable `presets` for this crate's own tests, doctests, and
 # examples without leaking the feature into a downstream default build.
 cross-vm-solana = { path = ".", features = ["presets"] }

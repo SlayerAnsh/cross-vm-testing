@@ -143,7 +143,9 @@ impl SvmChain {
     /// The cap is a `SetComputeUnitLimit` instruction prepended to `instructions`; it constrains
     /// execution, not cost (see [`SvmComputeBudget`]). [`SvmComputeBudget::Estimated`] resolves it
     /// by simulating the transaction first, which the RPC backend cannot do, so it is
-    /// [`SvmError::Unimplemented`] there like every other write path.
+    /// [`SvmError::Unimplemented`] there like the other typed write paths. Callers who only need
+    /// to broadcast on RPC can drop to the raw [`sign_transaction`](Self::sign_transaction) +
+    /// [`send_raw_transaction`](Self::send_raw_transaction) escape hatches.
     pub async fn send_transaction(
         &self,
         instructions: impl AsRef<[Instruction]>,
@@ -275,6 +277,54 @@ impl SvmChain {
     ) -> Result<Option<Vec<u8>>, SvmError> {
         let pda = Self::find_program_account(program_id, seeds);
         self.get_account_data_slice(&pda, offset, len).await
+    }
+
+    /// Generic JSON-RPC escape hatch: send `method` with `params` and return the raw JSON result.
+    ///
+    /// Live only. The in-process mock has no node to answer an arbitrary method and returns an
+    /// [`SvmError::Unimplemented`].
+    pub async fn raw_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, SvmError> {
+        match self {
+            SvmChain::Mock(_) => Err(SvmError::Unimplemented("mock raw_request".into())),
+            SvmChain::Rpc(p) => p.raw_request(method, params).await,
+        }
+    }
+
+    /// Assemble and sign `instructions` into a broadcastable transaction with wallet `wallet`,
+    /// fetching a live blockhash, returning the serialized signed transaction bytes (the wire shape
+    /// [`send_raw_transaction`](Self::send_raw_transaction) takes). Escape hatch for a custom
+    /// transaction the typed write paths do not build.
+    ///
+    /// Live only. The in-process mock's typed [`send_transaction`](Self::send_transaction) is its
+    /// signing path, so this returns an [`SvmError::Unimplemented`] there.
+    pub async fn sign_transaction(
+        &self,
+        instructions: Vec<Instruction>,
+        wallet: WalletLabel<'_>,
+    ) -> Result<Vec<u8>, SvmError> {
+        match self {
+            SvmChain::Mock(_) => Err(SvmError::Unimplemented("mock sign_transaction".into())),
+            SvmChain::Rpc(p) => {
+                let signer = self.acquire(wallet).await?;
+                p.sign_transaction(instructions, &signer).await
+            }
+        }
+    }
+
+    /// Broadcast raw signed transaction bytes and wait for confirmation, returning the base58
+    /// transaction signature. Pairs with [`sign_transaction`](Self::sign_transaction).
+    ///
+    /// Live only. The in-process mock has no cluster to broadcast to and returns an
+    /// [`SvmError::Unimplemented`].
+    pub async fn send_raw_transaction(&self, raw: &[u8]) -> Result<String, SvmError> {
+        match self {
+            SvmChain::Mock(_) => Err(SvmError::Unimplemented("mock send_raw_transaction".into())),
+            SvmChain::Rpc(p) => p.send_raw_transaction(raw).await,
+        }
     }
 
     /// Ensure `who` holds at least `amount` of `asset`.

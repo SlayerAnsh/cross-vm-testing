@@ -9,7 +9,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy::rpc::types::TransactionRequest;
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_signer_local::PrivateKeySigner;
 use cross_vm_core::{
     wallet_lock, BlockTime, ChainProvider, ChainSpec, FundError, WalletDeriver, WalletFactory,
@@ -278,6 +279,59 @@ impl EvmChain {
         match self {
             EvmChain::Mock(p) => p.get_storage_at(addr, slot).await,
             EvmChain::Rpc(p) => p.get_storage_at(addr, slot).await,
+        }
+    }
+
+    /// Read the deployed runtime bytecode at `address` (empty for an EOA or an undeployed address).
+    pub async fn get_code(&self, address: &Address) -> Result<Bytes, EvmError> {
+        match self {
+            EvmChain::Mock(p) => p.get_code(address).await,
+            EvmChain::Rpc(p) => p.get_code(address).await,
+        }
+    }
+
+    /// Generic JSON-RPC escape hatch: send `method` with `params` and return the raw JSON result.
+    ///
+    /// Live only. The in-process mock has no node to answer an arbitrary method and returns an
+    /// [`EvmError::Unimplemented`].
+    pub async fn raw_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, EvmError> {
+        match self {
+            EvmChain::Mock(p) => p.raw_request(method, params).await,
+            EvmChain::Rpc(p) => p.raw_request(method, params).await,
+        }
+    }
+
+    /// Fill (nonce, chain id, gas, fees where unset) and sign `tx` with wallet `wallet`, returning
+    /// the broadcastable raw transaction bytes. Escape hatch for a custom transaction the typed
+    /// write paths do not build; pair it with [`send_raw_transaction`](Self::send_raw_transaction).
+    ///
+    /// Live only. The mock signs no real transaction and returns an [`EvmError::Unimplemented`].
+    pub async fn sign_transaction(
+        &self,
+        tx: TransactionRequest,
+        wallet: WalletLabel<'_>,
+    ) -> Result<Bytes, EvmError> {
+        match self {
+            EvmChain::Mock(p) => p.sign_transaction(tx).await,
+            EvmChain::Rpc(p) => {
+                let signer = self.acquire(wallet).await?;
+                p.sign_transaction(tx, &signer).await
+            }
+        }
+    }
+
+    /// Broadcast raw signed transaction bytes and wait for the mined receipt, returning its
+    /// transaction hash. Pairs with [`sign_transaction`](Self::sign_transaction).
+    ///
+    /// Live only. The mock has no mempool and returns an [`EvmError::Unimplemented`].
+    pub async fn send_raw_transaction(&self, raw: &[u8]) -> Result<B256, EvmError> {
+        match self {
+            EvmChain::Mock(p) => p.send_raw_transaction(raw).await,
+            EvmChain::Rpc(p) => p.send_raw_transaction(raw).await,
         }
     }
 

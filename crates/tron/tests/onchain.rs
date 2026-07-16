@@ -303,6 +303,169 @@ async fn live_transfer_funds_on_nile() {
     );
 }
 
+#[tokio::test]
+#[ignore = "live: requires Nile RPC + funded MNEMONIC_TEST index 0 (coin 195)"]
+async fn live_get_code_on_nile() {
+    dotenvy::from_path(ENV_PATH).unwrap_or_else(|e| panic!("load {ENV_PATH}: {e}"));
+    let wallets = Rc::new(
+        WalletFactory::from_roster(OnchainWallets::SPECS)
+            .unwrap_or_else(|e| panic!("resolve roster: {e}")),
+    );
+    let chain: TronChain = NILE.rpc(wallets).into();
+
+    let who = chain
+        .wallet_address(ONCHAIN_WALLETS.test)
+        .await
+        .expect("derive test wallet");
+    let balance = chain.balance(&who).await.expect("read balance");
+    println!("test wallet: {who}");
+    println!("balance:     {balance} sun");
+    assert!(balance > 0, "fund {who} on Nile first (balance is zero)");
+
+    // A funded wallet is an ordinary account, so it carries no runtime bytecode.
+    let eoa_code = chain.get_code(&who).await.expect("get_code eoa");
+    println!("eoa code len: {}", eoa_code.len());
+    assert!(eoa_code.is_empty(), "an ordinary account has no code");
+
+    // A freshly deployed contract does: get_code returns its runtime.
+    let counter = chain
+        .deploy_create(
+            counter_bytecode(),
+            Bytes::new(),
+            ONCHAIN_WALLETS.test,
+            GENEROUS_FEE,
+            CALLER_PAYS,
+        )
+        .await
+        .expect("deploy counter")
+        .address;
+    println!("counter deployed at: {counter}");
+    settle().await;
+
+    let code = chain.get_code(&counter).await.expect("get_code contract");
+    println!("counter code len: {}", code.len());
+    assert!(
+        !code.is_empty(),
+        "a deployed contract reports non-empty runtime bytecode"
+    );
+}
+
+#[tokio::test]
+#[ignore = "live: requires Nile RPC network access"]
+async fn live_raw_request_eth_chain_id_on_nile() {
+    let wallets = Rc::new(WalletFactory::from_roster(&[]).expect("empty roster"));
+    let chain: TronChain = NILE.rpc(wallets).into();
+
+    // The Ethereum-compatible JSON-RPC escape hatch: `eth_chainId` returns a `0x`-prefixed hex id.
+    let id = chain
+        .raw_request("eth_chainId", serde_json::json!([]))
+        .await
+        .expect("eth_chainId over the JSON-RPC escape hatch");
+    println!("eth_chainId: {id}");
+    let s = id.as_str().expect("eth_chainId returns a hex string");
+    assert!(s.starts_with("0x"), "expected a 0x-prefixed chain id");
+    assert!(
+        u64::from_str_radix(s.trim_start_matches("0x"), 16).is_ok(),
+        "chain id parses as hex"
+    );
+}
+
+#[tokio::test]
+#[ignore = "live: requires Nile RPC network access"]
+async fn live_wallet_request_getnowblock_on_nile() {
+    let wallets = Rc::new(WalletFactory::from_roster(&[]).expect("empty roster"));
+    let chain: TronChain = NILE.rpc(wallets).into();
+
+    // The native java-tron REST escape hatch: `/wallet/getnowblock` returns the head block.
+    let block = chain
+        .wallet_request("getnowblock", serde_json::json!({}))
+        .await
+        .expect("getnowblock over the REST escape hatch");
+    let number = block["block_header"]["raw_data"]["number"]
+        .as_u64()
+        .expect("head block carries a number");
+    println!("getnowblock number: {number}");
+    assert!(number > 0, "expected a positive block number");
+}
+
+#[tokio::test]
+#[ignore = "live: requires Nile RPC + funded MNEMONIC_TEST index 0 (coin 195)"]
+async fn live_sign_and_broadcast_raw_transfer_on_nile() {
+    // 1 TRX in sun.
+    const AMOUNT_SUN: u64 = 1_000_000;
+
+    dotenvy::from_path(ENV_PATH).unwrap_or_else(|e| panic!("load {ENV_PATH}: {e}"));
+    let wallets = Rc::new(
+        WalletFactory::from_roster(OnchainWallets::SPECS)
+            .unwrap_or_else(|e| panic!("resolve roster: {e}")),
+    );
+    let chain: TronChain = NILE.rpc(wallets).into();
+
+    let who = chain
+        .wallet_address(ONCHAIN_WALLETS.test)
+        .await
+        .expect("derive test wallet");
+    // java-tron rejects a transfer to the sender's own address, so this raw transfer targets the
+    // recipient wallet, exactly as the typed `transfer_funds` test does.
+    let to = chain
+        .wallet_address(ONCHAIN_WALLETS.recipient)
+        .await
+        .expect("derive recipient wallet");
+    let balance = chain.balance(&who).await.expect("read balance");
+    println!("test wallet: {who}");
+    println!("balance:     {balance} sun");
+    println!("recipient:   {to}");
+    assert!(
+        balance > AMOUNT_SUN,
+        "fund {who} on Nile first (holds {balance} sun, needs more than {AMOUNT_SUN})"
+    );
+
+    // Build the unsigned native transfer at the node via the REST escape hatch, then drive the raw
+    // sign + broadcast pair by hand (what `transfer_funds` does internally).
+    let unsigned = chain
+        .wallet_request(
+            "createtransaction",
+            serde_json::json!({
+                "owner_address": who.to_hex(),
+                "to_address": to.to_hex(),
+                "amount": AMOUNT_SUN,
+                "visible": false,
+            }),
+        )
+        .await
+        .expect("createtransaction");
+    assert!(
+        unsigned["txID"].as_str().is_some(),
+        "the node returns an unsigned transaction carrying a txID"
+    );
+
+    let signed = chain
+        .sign_transaction(unsigned, ONCHAIN_WALLETS.test)
+        .await
+        .expect("sign the unsigned transfer");
+    assert!(
+        signed["signature"][0].as_str().is_some(),
+        "signing populates the signature array"
+    );
+
+    let before = chain.balance(&to).await.expect("read recipient balance");
+    let txid = chain
+        .broadcast_transaction(signed)
+        .await
+        .expect("broadcast the signed transfer");
+    println!("raw transfer txID: {txid}");
+    assert_eq!(txid.len(), 64, "expected a 32-byte txID in hex");
+    settle().await;
+
+    let after = chain.balance(&to).await.expect("read recipient balance");
+    println!("recipient balance: {before} -> {after} sun");
+    assert_eq!(
+        after,
+        before + AMOUNT_SUN,
+        "expected the recipient's balance to rise by exactly the transferred amount"
+    );
+}
+
 /// The energy a live Tron backend metered. A [`TronCompute::Gas`] here would mean the RPC arm is
 /// reporting revm's unit, which no live node produces.
 fn energy(compute: TronCompute) -> u64 {

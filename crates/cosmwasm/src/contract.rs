@@ -70,8 +70,10 @@ pub struct CwContract<I = ()> {
     addr: Option<Addr>,
     store_code_tx: Option<String>,
     instantiate_tx: Option<String>,
+    migrate_tx: Option<String>,
     store_code_gas: Option<Option<CwGas>>,
     instantiate_gas: Option<Option<CwGas>>,
+    migrate_gas: Option<Option<CwGas>>,
     _marker: PhantomData<I>,
 }
 
@@ -85,8 +87,10 @@ impl<I> CwContract<I> {
             addr: None,
             store_code_tx: None,
             instantiate_tx: None,
+            migrate_tx: None,
             store_code_gas: None,
             instantiate_gas: None,
+            migrate_gas: None,
             _marker: PhantomData,
         }
     }
@@ -100,8 +104,10 @@ impl<I> CwContract<I> {
             addr: Some(addr),
             store_code_tx: None,
             instantiate_tx: None,
+            migrate_tx: None,
             store_code_gas: None,
             instantiate_gas: None,
+            migrate_gas: None,
             _marker: PhantomData,
         }
     }
@@ -157,6 +163,32 @@ impl<I> CwContract<I> {
         Ok(self)
     }
 
+    /// Migrate the bound contract to `new_code_id`, running the new code's `migrate` entry point
+    /// with `msg`, then update the stored `code_id` and record the tx hash and gas internally, and
+    /// return the handle for chaining. Requires the handle to be bound to an address (from
+    /// [`instantiate`](Self::instantiate) or [`bound`](Self::bound)), signed by wallet `wallet`,
+    /// which must be the contract's admin. Read the receipt back with
+    /// [`migrate_tx_hash`](Self::migrate_tx_hash) and [`migrate_gas`](Self::migrate_gas).
+    ///
+    /// `gas` is required, as on every mutating op; see [`CwGasLimit`].
+    pub async fn migrate<Migrate: CwSerde>(
+        mut self,
+        new_code_id: u64,
+        msg: Migrate,
+        wallet: WalletLabel<'_>,
+        gas: CwGasLimit,
+    ) -> Result<Self, CwError> {
+        let addr = self.require_addr()?.clone();
+        let migrated = self
+            .chain
+            .migrate_contract(&addr, new_code_id, msg, wallet, gas)
+            .await?;
+        self.code_id = Some(new_code_id);
+        self.migrate_tx = Some(migrated.tx_hash);
+        self.migrate_gas = Some(migrated.gas);
+        Ok(self)
+    }
+
     /// The bound contract address, or `None` if not yet instantiated.
     pub fn address(&self) -> Option<&Addr> {
         self.addr.as_ref()
@@ -203,6 +235,21 @@ impl<I> CwContract<I> {
     /// this handle ran the step, the inner one whether the backend could meter it.
     pub fn instantiate_gas(&self) -> Option<Option<CwGas>> {
         self.instantiate_gas
+    }
+
+    /// The tx hash of the latest migration, or `None` if this handle has not run
+    /// [`migrate`](Self::migrate).
+    pub fn migrate_tx_hash(&self) -> Option<&str> {
+        self.migrate_tx.as_deref()
+    }
+
+    /// What the latest migration cost, or `None` if this handle has not run
+    /// [`migrate`](Self::migrate).
+    ///
+    /// Nested exactly like [`store_code_gas`](Self::store_code_gas): the outer `Option` is whether
+    /// this handle ran the step, the inner one whether the backend could meter it.
+    pub fn migrate_gas(&self) -> Option<Option<CwGas>> {
+        self.migrate_gas
     }
 
     /// The bound address, or an error if the handle is not yet instantiated.
@@ -282,6 +329,19 @@ impl<I> CwContract<I> {
         })?;
         self.chain
             .estimate_instantiate(code_id, init, wallet, funds, label)
+            .await
+    }
+
+    /// Estimate what [`migrate`](Self::migrate) would cost, without broadcasting anything.
+    /// Requires the handle to be bound to an address, exactly like the migrate it forecasts.
+    pub async fn estimate_migrate<Migrate: CwSerde>(
+        &self,
+        new_code_id: u64,
+        msg: Migrate,
+        wallet: WalletLabel<'_>,
+    ) -> Result<Option<CwGas>, CwError> {
+        self.chain
+            .estimate_migrate_contract(self.require_addr()?, new_code_id, msg, wallet)
             .await
     }
 

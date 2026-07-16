@@ -16,6 +16,7 @@
 //! ```
 
 mod asset;
+mod batch;
 mod chain;
 pub mod chains;
 mod contract;
@@ -28,6 +29,7 @@ mod wallet;
 mod tests;
 
 pub use asset::CwAsset;
+pub use batch::CwBatch;
 pub use chain::CwChain;
 pub use chains::CosmosChainInfo;
 pub use contract::{CwContract, CwInterface};
@@ -35,8 +37,8 @@ pub use cosmwasm_std::{Addr, Event};
 pub use error::CwError;
 pub use msg::CwSerde;
 pub use provider::{
-    CwApp, CwCode, CwCodeSource, CwExecution, CwGas, CwGasLimit, CwInstantiate, CwMockProvider,
-    CwRpcProvider, CwStoreCode, DEFAULT_FUNDING,
+    CwApp, CwCode, CwCodeSource, CwExecution, CwGas, CwGasLimit, CwInstantiate, CwMigrate,
+    CwMockProvider, CwRpcProvider, CwStoreCode, DEFAULT_FUNDING,
 };
 pub use wallet::CosmosSigner;
 
