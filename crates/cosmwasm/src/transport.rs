@@ -309,20 +309,40 @@ fn route(mut chunk: Vec<Pending>, body: &str) {
         serde_json::Value::Array(items) => items,
         single => vec![single],
     };
+    // An `error` element that no pending owns (id null, absent, or unknown) is a whole-response
+    // failure, not one call's error, so its message goes to every caller the response never
+    // answered. Matched elements still route first; the first such orphan error wins.
+    let mut whole_response_error: Option<String> = None;
     for element in elements {
-        let Some(pos) = chunk.iter().position(|p| Some(&p.id) == element.get("id")) else {
-            continue;
-        };
-        let pending = chunk.swap_remove(pos);
-        // Error envelopes ride through as Ok(text): `Response::from_string` types them later.
-        let _ = pending.tx.send(Ok(element.to_string()));
+        if let Some(pos) = chunk.iter().position(|p| Some(&p.id) == element.get("id")) {
+            let pending = chunk.swap_remove(pos);
+            // A matched-id error envelope rides through as Ok(text): `Response::from_string`
+            // types it later.
+            let _ = pending.tx.send(Ok(element.to_string()));
+        } else if whole_response_error.is_none() {
+            if let Some(err) = element.get("error") {
+                whole_response_error = Some(rpc_error_message(err));
+            }
+        }
     }
     for pending in chunk {
-        let msg = format!(
-            "batch response carried no entry for request id {}",
-            pending.id
-        );
+        let msg = whole_response_error.clone().unwrap_or_else(|| {
+            format!("batch response carried no entry for request id {}", pending.id)
+        });
         let _ = pending.tx.send(Err(CwError::Rpc(msg)));
+    }
+}
+
+/// Render a JSON-RPC `error` object as an `Rpc` message: its `message`, plus `code` when the
+/// node supplies one.
+fn rpc_error_message(err: &serde_json::Value) -> String {
+    let message = err
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown error");
+    match err.get("code") {
+        Some(code) if !code.is_null() => format!("batch response error: {message} (code {code})"),
+        _ => format!("batch response error: {message}"),
     }
 }
 
@@ -514,6 +534,61 @@ mod tests {
         let bad = parsed(bad);
         assert_eq!(bad["id"], "id-bad");
         assert_eq!(bad["error"]["message"], "boom");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_top_level_error_reaches_every_caller_in_the_chunk() {
+        // A node that rejects the whole batch answers with one id-null error object rather than
+        // a per-id array; every caller in the chunk must surface it.
+        let poster = FakePoster::with(|_| {
+            Ok(json!({"jsonrpc": "2.0", "id": null,
+                      "error": {"code": -32700, "message": "parse error"}})
+            .to_string())
+        });
+        let transport = batch(&poster, BatchConfig::default());
+
+        let (a, b) = tokio::join!(
+            transport.call(envelope("id-a", "status")),
+            transport.call(envelope("id-b", "status")),
+        );
+
+        for response in [a, b] {
+            match response.unwrap_err() {
+                CwError::Rpc(msg) => {
+                    assert!(msg.contains("parse error"), "unexpected message: {msg}")
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_partial_response_errors_only_the_missing_caller() {
+        // The node answers every envelope except id-b, modeling a dropped reply in an otherwise
+        // valid array.
+        let poster = FakePoster::with(|body| {
+            let Value::Array(items) = serde_json::from_str(body).unwrap() else {
+                panic!("expected a batch array");
+            };
+            let results: Vec<Value> = items
+                .iter()
+                .filter(|env| env["id"] != "id-b")
+                .map(result_for)
+                .collect();
+            Ok(Value::Array(results).to_string())
+        });
+        let transport = batch(&poster, BatchConfig::default());
+
+        let (a, b) = tokio::join!(
+            transport.call(envelope("id-a", "status")),
+            transport.call(envelope("id-b", "status")),
+        );
+
+        assert_eq!(parsed(a)["id"], "id-a", "the answered call still resolves Ok");
+        match b.unwrap_err() {
+            CwError::Rpc(msg) => assert!(msg.contains("id-b"), "unexpected message: {msg}"),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test(start_paused = true)]
