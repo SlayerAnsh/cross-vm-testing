@@ -23,6 +23,7 @@ mod contract;
 mod error;
 mod msg;
 mod provider;
+mod transport;
 mod wallet;
 
 #[cfg(test)]
@@ -39,6 +40,9 @@ pub use msg::CwSerde;
 pub use provider::{
     CwApp, CwCode, CwCodeSource, CwExecution, CwGas, CwGasLimit, CwInstantiate, CwMigrate,
     CwMockProvider, CwRpcProvider, CwStoreCode, DEFAULT_FUNDING,
+};
+pub use transport::{
+    BatchConfig, BatchHttpTransport, CosmosTransport, HttpTransport, TransportFuture,
 };
 pub use wallet::CosmosSigner;
 

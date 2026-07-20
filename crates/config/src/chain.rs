@@ -45,6 +45,18 @@ pub struct ChainDecl {
     pub ws_url: Option<String>,
     /// Solana only: commitment level name (e.g. `"finalized"`), parsed elsewhere.
     pub commitment: Option<String>,
+    /// RPC transport selector, chosen at construction (not stored in a preset). `"http"` (the
+    /// default when absent) on every kind; `"batch-http"` only on CosmWasm, where it merges
+    /// concurrent JSON-RPC calls into one CometBFT batch. Validated per kind in `validate.rs`.
+    pub transport: Option<String>,
+    /// CosmWasm `batch-http` only: the timer tick period in milliseconds; each tick drains at most
+    /// `batch_max_size` queued calls into one POST, with no early flush. Valid only alongside
+    /// `transport = "batch-http"`; the transport applies its own default when absent.
+    pub batch_interval_ms: Option<u64>,
+    /// CosmWasm `batch-http` only: the most calls one tick drains into a single POST; any beyond
+    /// that ride later ticks. Valid only alongside `transport = "batch-http"`; the transport
+    /// applies its own default when absent.
+    pub batch_max_size: Option<usize>,
 }
 
 /// Returns the names of fields required for `decl.kind` that are absent from `decl`.
@@ -92,6 +104,9 @@ mod tests {
             spec_id: None,
             ws_url: None,
             commitment: None,
+            transport: None,
+            batch_interval_ms: None,
+            batch_max_size: None,
         }
     }
 

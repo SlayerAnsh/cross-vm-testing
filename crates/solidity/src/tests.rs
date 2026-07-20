@@ -683,3 +683,56 @@ async fn rpc_write_paths_unimplemented() {
         .await
         .is_err());
 }
+
+/// A custom [`EvmTransport`] that hands the provider a `RpcClient::mocked` over a shared
+/// [`Asserter`], so reads resolve from a queue with no network. Proves the transport seam:
+/// `try_block_height` and `balance` return exactly the asserted values.
+#[tokio::test]
+async fn custom_transport_serves_reads_without_network() {
+    use crate::transport::{EvmClientFuture, EvmTransport};
+    use alloy::rpc::client::RpcClient;
+    use alloy::transports::mock::Asserter;
+    use alloy_primitives::U64;
+
+    struct MockTransport {
+        asserter: Asserter,
+    }
+    impl EvmTransport for MockTransport {
+        fn rpc_client(&self) -> EvmClientFuture<'_> {
+            // `Asserter` is `Arc`-backed, so each rebuilt client shares one response queue: the
+            // per-request `provider()` rebuild still pops from the same script in order.
+            let asserter = self.asserter.clone();
+            Box::pin(async move { Ok(RpcClient::mocked(asserter)) })
+        }
+    }
+
+    let asserter = Asserter::new();
+    // Order matters: `try_block_height` (eth_blockNumber) pops first, then `balance`
+    // (eth_getBalance). Quantities serialize as hex, exactly as a node would answer.
+    asserter.push_success(&U64::from(0x4d2u64)); // 1234
+    asserter.push_success(&U256::from(1_000_000u64));
+
+    let chain = ETHEREUM.rpc_with(empty_wallets(), Rc::new(MockTransport { asserter }));
+
+    assert_eq!(chain.try_block_height().await.unwrap(), 1234);
+    assert_eq!(
+        chain.balance(&Address::ZERO).await.unwrap(),
+        U256::from(1_000_000u64)
+    );
+}
+
+/// A chain declared without an `rpc_url` stays constructible (sugar is infallible); the missing-url
+/// error surfaces lazily at the first call, with the text preserved across the transport rework.
+#[tokio::test]
+async fn no_rpc_url_errors_lazily_with_preserved_text() {
+    // `LOCAL` preset carries no rpc_url.
+    let chain = LOCAL.rpc(empty_wallets());
+    let err = chain.try_block_height().await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "rpc: chain '{}' has no rpc_url; use a chain preset with an endpoint",
+            LOCAL.chain_id
+        )
+    );
+}
