@@ -10,18 +10,23 @@
 //!
 //! - [`HttpTransport`]: one POST per call, behaviorally identical to the `HttpClient` the
 //!   provider built per request before this seam existed.
-//! - [`BatchHttpTransport`]: merges concurrent calls into a single CometBFT JSON-RPC batch
-//!   request (a JSON array body), viem style: a debounce window plus a max batch size. Note
-//!   that some public RPC gateways reject array bodies, so batching is opt in, never the
-//!   default.
+//! - [`BatchHttpTransport`]: merges concurrent calls into CometBFT JSON-RPC batch requests
+//!   (JSON array bodies), timer paced in the style of interchainjs' batch client: a lazy
+//!   interval timer runs only while there is work, each tick drains at most `max_size` queued
+//!   calls into one POST, and bursts simply ride later ticks (there is no fire-when-full early
+//!   flush). A dispatched POST never blocks the tick loop, so slow responses overlap the next
+//!   tick's POST. Note that some public RPC gateways reject array bodies, so batching is opt
+//!   in, never the default.
 
 use std::cell::{Cell, RefCell};
-use std::future::Future;
+use std::future::{poll_fn, Future};
 use std::pin::Pin;
 use std::rc::Rc;
+use std::task::Poll;
 use std::time::Duration;
 
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::oneshot;
+use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::error::CwError;
 
@@ -117,21 +122,23 @@ impl CosmosTransport for HttpTransport {
     }
 }
 
-/// How a [`BatchHttpTransport`] coalesces calls: collect everything that arrives within `wait`
-/// of the first call, then flush in chunks of at most `max_size`.
+/// How a [`BatchHttpTransport`] coalesces calls: a timer ticks every `interval`, and each tick
+/// drains at most `max_size` queued calls into one POST. A fuller queue waits for later ticks;
+/// nothing flushes early.
 #[derive(Clone, Copy, Debug)]
 pub struct BatchConfig {
-    /// The debounce window: how long the first caller waits for others to pile on.
-    pub wait: Duration,
-    /// The largest batch a single POST carries; a fuller queue flushes early and in chunks.
+    /// The tick period: how often the leader drains the queue. The first drain happens one
+    /// full `interval` after the leader starts, never immediately.
+    pub interval: Duration,
+    /// The largest batch a single POST carries; anything beyond it rides the next tick.
     pub max_size: usize,
 }
 
 impl Default for BatchConfig {
     fn default() -> Self {
         Self {
-            wait: Duration::from_millis(5),
-            max_size: 100,
+            interval: Duration::from_millis(20),
+            max_size: 20,
         }
     }
 }
@@ -147,19 +154,16 @@ struct Pending {
 /// Merges concurrent JSON-RPC calls into CometBFT batch requests.
 ///
 /// Leader driven, no `spawn_local`: the first caller to find the leader flag clear becomes the
-/// leader, waits out the debounce window (or an early-flush signal when the queue hits
-/// `max_size`), then drains the queue in chunks, one POST each. Everyone else just parks a
-/// [`Pending`] and awaits its oneshot. Batch responses arrive in arbitrary order, so routing
-/// matches on the JSON-RPC id, never on position.
+/// leader and runs the tick loop, draining at most `max_size` queued calls into one POST per
+/// tick. Everyone else just parks a [`Pending`] and awaits its oneshot. Batch responses arrive
+/// in arbitrary order, so routing matches on the JSON-RPC id, never on position.
 pub struct BatchHttpTransport {
     poster: Rc<dyn JsonRpcPost>,
     cfg: BatchConfig,
     queue: RefCell<Vec<Pending>>,
-    /// True while some call future is driving the flush loop. Guarded by [`LeaderGuard`] so a
+    /// True while some call future is driving the tick loop. Guarded by [`LeaderGuard`] so a
     /// cancelled leader hands the queue to the next caller instead of stranding it.
     leader: Cell<bool>,
-    /// Fired by pushers when the queue reaches `max_size`, cutting the leader's window short.
-    notify: Notify,
 }
 
 impl BatchHttpTransport {
@@ -178,30 +182,50 @@ impl BatchHttpTransport {
             cfg,
             queue: RefCell::new(Vec::new()),
             leader: Cell::new(false),
-            notify: Notify::new(),
         }
     }
 
-    /// The leader's flush loop: wait out one debounce window (cut short when the queue fills),
-    /// then drain the queue in `max_size` chunks until it is empty, re-checking after every
-    /// POST so calls that arrived mid-flight ride the next chunk instead of waiting for a new
-    /// leader.
+    /// The leader's tick loop: every `interval`, drain at most `max_size` queued calls and
+    /// start their POST, without awaiting it. In-flight POSTs are driven concurrently with the
+    /// timer, so a slow response never delays the next tick's dispatch. The loop (and with it
+    /// the timer) ends once the queue is empty and no POST is in flight; the next call that
+    /// arrives after that starts a fresh leader.
     async fn lead(&self) {
-        tokio::select! {
-            _ = tokio::time::sleep(self.cfg.wait) => {}
-            _ = self.notify.notified() => {}
-        }
+        let mut interval =
+            tokio::time::interval_at(Instant::now() + self.cfg.interval, self.cfg.interval);
+        // A tick delayed by a slow poll reschedules from when it fired, keeping ticks paced
+        // rather than bursting to catch up.
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // Flushes dispatched on earlier ticks, still awaiting their response.
+        let mut in_flight: Vec<Pin<Box<dyn Future<Output = ()> + '_>>> = Vec::new();
         loop {
-            // Drain before posting: no queue borrow may live across an await.
+            // Wait for the next tick while polling in-flight flushes alongside; done entirely
+            // when everything is drained and answered.
+            let ticked = poll_fn(|cx| {
+                in_flight.retain_mut(|flush| flush.as_mut().poll(cx).is_pending());
+                if interval.poll_tick(cx).is_ready() {
+                    return Poll::Ready(true);
+                }
+                if in_flight.is_empty() && self.queue.borrow().is_empty() {
+                    return Poll::Ready(false);
+                }
+                Poll::Pending
+            })
+            .await;
+            if !ticked {
+                break;
+            }
+            // Drain before posting: no queue borrow may live across a poll of the flush.
             let chunk: Vec<Pending> = {
                 let mut queue = self.queue.borrow_mut();
-                if queue.is_empty() {
-                    break;
-                }
                 let n = queue.len().min(self.cfg.max_size);
                 queue.drain(..n).collect()
             };
-            self.flush(chunk).await;
+            if !chunk.is_empty() {
+                // Start the flush but do not await it: the next loop iteration polls it via
+                // `in_flight`, concurrently with the timer.
+                in_flight.push(Box::pin(self.flush(chunk)));
+            }
         }
     }
 
@@ -249,17 +273,11 @@ impl CosmosTransport for BatchHttpTransport {
         Box::pin(async move {
             let id = request_id(&request)?;
             let (tx, rx) = oneshot::channel();
-            {
-                let mut queue = self.queue.borrow_mut();
-                queue.push(Pending {
-                    id,
-                    envelope: request,
-                    tx,
-                });
-                if queue.len() >= self.cfg.max_size {
-                    self.notify.notify_one();
-                }
-            }
+            self.queue.borrow_mut().push(Pending {
+                id,
+                envelope: request,
+                tx,
+            });
             // Single-threaded, and no await between the read and the set: the check is race
             // free. The guard outlives `lead()` so cancellation at any await inside it clears
             // the flag.
@@ -327,7 +345,10 @@ fn route(mut chunk: Vec<Pending>, body: &str) {
     }
     for pending in chunk {
         let msg = whole_response_error.clone().unwrap_or_else(|| {
-            format!("batch response carried no entry for request id {}", pending.id)
+            format!(
+                "batch response carried no entry for request id {}",
+                pending.id
+            )
         });
         let _ = pending.tx.send(Err(CwError::Rpc(msg)));
     }
@@ -412,8 +433,21 @@ mod tests {
         serde_json::from_str(&response.expect("call succeeds")).expect("response is JSON")
     }
 
+    /// Polls `fut` exactly once and asserts it is still pending; drives paused-time tests one
+    /// deterministic step at a time.
+    async fn poll_pending(fut: &mut Pin<Box<impl Future>>) {
+        poll_fn(|cx| {
+            assert!(
+                fut.as_mut().poll(cx).is_pending(),
+                "future resolved too early"
+            );
+            Poll::Ready(())
+        })
+        .await;
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn calls_in_the_same_window_merge_into_one_post() {
+    async fn calls_queued_before_the_first_tick_merge_into_one_post() {
         let poster = FakePoster::echoing();
         let transport = batch(&poster, BatchConfig::default());
 
@@ -425,7 +459,11 @@ mod tests {
         let bodies = poster.bodies.borrow();
         assert_eq!(bodies.len(), 1, "both calls rode one POST");
         let body: Value = serde_json::from_str(&bodies[0]).unwrap();
-        assert_eq!(body.as_array().map(Vec::len), Some(2), "body is a 2-element array");
+        assert_eq!(
+            body.as_array().map(Vec::len),
+            Some(2),
+            "body is a 2-element array"
+        );
         assert_eq!(parsed(a)["id"], "id-a");
         assert_eq!(parsed(b)["id"], "id-b");
     }
@@ -452,26 +490,55 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn five_calls_at_max_size_two_flush_as_three_posts() {
+    async fn five_calls_at_max_size_two_pace_across_three_ticks() {
         let poster = FakePoster::echoing();
         let transport = batch(
             &poster,
             BatchConfig {
-                wait: Duration::from_millis(5),
+                interval: Duration::from_millis(20),
                 max_size: 2,
             },
         );
 
-        let (r1, r2, r3, r4, r5) = tokio::join!(
-            transport.call(envelope("id-1", "status")),
-            transport.call(envelope("id-2", "status")),
-            transport.call(envelope("id-3", "status")),
-            transport.call(envelope("id-4", "status")),
-            transport.call(envelope("id-5", "status")),
+        let mut calls = Box::pin(async {
+            tokio::join!(
+                transport.call(envelope("id-1", "status")),
+                transport.call(envelope("id-2", "status")),
+                transport.call(envelope("id-3", "status")),
+                transport.call(envelope("id-4", "status")),
+                transport.call(envelope("id-5", "status")),
+            )
+        });
+
+        // All five enqueue immediately, but nothing may go out before the first tick.
+        poll_pending(&mut calls).await;
+        assert!(
+            poster.bodies.borrow().is_empty(),
+            "no POST before the leader's first tick"
+        );
+        tokio::time::advance(Duration::from_millis(19)).await;
+        poll_pending(&mut calls).await;
+        assert!(
+            poster.bodies.borrow().is_empty(),
+            "no POST before the first interval elapses"
         );
 
+        // Tick 1 drains the first chunk; ticks 2 and 3 pace out the rest.
+        tokio::time::advance(Duration::from_millis(1)).await;
+        poll_pending(&mut calls).await;
+        assert_eq!(poster.bodies.borrow().len(), 1, "tick 1 posts one chunk");
+        tokio::time::advance(Duration::from_millis(20)).await;
+        poll_pending(&mut calls).await;
+        assert_eq!(
+            poster.bodies.borrow().len(),
+            2,
+            "tick 2 posts the next chunk"
+        );
+        tokio::time::advance(Duration::from_millis(20)).await;
+        let (r1, r2, r3, r4, r5) = calls.await;
+
         let bodies = poster.bodies.borrow();
-        assert_eq!(bodies.len(), 3, "5 calls at max_size 2 chunk into 3 POSTs");
+        assert_eq!(bodies.len(), 3, "5 calls at max_size 2 pace into 3 POSTs");
         let sizes: Vec<usize> = bodies
             .iter()
             .map(|b| match serde_json::from_str::<Value>(b).unwrap() {
@@ -480,7 +547,84 @@ mod tests {
             })
             .collect();
         assert_eq!(sizes, vec![2, 2, 1]);
-        for (response, id) in [(r1, "id-1"), (r2, "id-2"), (r3, "id-3"), (r4, "id-4"), (r5, "id-5")] {
+        for (response, id) in [
+            (r1, "id-1"),
+            (r2, "id-2"),
+            (r3, "id-3"),
+            (r4, "id-4"),
+            (r5, "id-5"),
+        ] {
+            assert_eq!(parsed(response)["id"], id);
+        }
+    }
+
+    /// A poster whose responses take `delay` of (paused) time: records the body at dispatch,
+    /// answers after the sleep. Lets tests observe a POST that is started but unresolved.
+    struct SlowPoster {
+        bodies: RefCell<Vec<String>>,
+        delay: Duration,
+    }
+
+    impl JsonRpcPost for SlowPoster {
+        fn post(&self, body: String) -> TransportFuture<'_> {
+            Box::pin(async move {
+                self.bodies.borrow_mut().push(body.clone());
+                tokio::time::sleep(self.delay).await;
+                echo(&body)
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_post_does_not_block_the_next_tick() {
+        // Each POST takes 50ms against a 20ms interval: tick 2's POST must go out while tick
+        // 1's is still in flight.
+        let poster = Rc::new(SlowPoster {
+            bodies: RefCell::new(Vec::new()),
+            delay: Duration::from_millis(50),
+        });
+        let transport = BatchHttpTransport::with_poster(
+            Rc::clone(&poster) as Rc<dyn JsonRpcPost>,
+            BatchConfig {
+                interval: Duration::from_millis(20),
+                max_size: 2,
+            },
+        );
+
+        let mut calls = Box::pin(async {
+            tokio::join!(
+                transport.call(envelope("id-1", "status")),
+                transport.call(envelope("id-2", "status")),
+                transport.call(envelope("id-3", "status")),
+            )
+        });
+
+        poll_pending(&mut calls).await;
+        assert!(poster.bodies.borrow().is_empty());
+
+        // t=20ms: tick 1 dispatches the first chunk; its response lands at t=70ms.
+        tokio::time::advance(Duration::from_millis(20)).await;
+        poll_pending(&mut calls).await;
+        assert_eq!(poster.bodies.borrow().len(), 1, "tick 1 dispatched");
+
+        // t=40ms: tick 2 dispatches the second chunk while POST 1 is still unresolved (the
+        // join is still pending, so no response has been routed): the POSTs overlap.
+        tokio::time::advance(Duration::from_millis(20)).await;
+        poll_pending(&mut calls).await;
+        assert_eq!(
+            poster.bodies.borrow().len(),
+            2,
+            "tick 2's POST started while tick 1's was in flight"
+        );
+
+        // t=70ms: POST 1 resolves; id-3's caller still waits on POST 2's 90ms landing.
+        tokio::time::advance(Duration::from_millis(30)).await;
+        poll_pending(&mut calls).await;
+
+        // t=90ms: POST 2 resolves and every caller gets its own response.
+        tokio::time::advance(Duration::from_millis(20)).await;
+        let (r1, r2, r3) = calls.await;
+        for (response, id) in [(r1, "id-1"), (r2, "id-2"), (r3, "id-3")] {
             assert_eq!(parsed(response)["id"], id);
         }
     }
@@ -495,7 +639,10 @@ mod tests {
         let bodies = poster.bodies.borrow();
         assert_eq!(bodies.len(), 1);
         let body: Value = serde_json::from_str(&bodies[0]).unwrap();
-        assert!(body.is_object(), "a chunk of one posts the bare envelope, not a 1-array");
+        assert!(
+            body.is_object(),
+            "a chunk of one posts the bare envelope, not a 1-array"
+        );
         assert_eq!(body["method"], "status");
         assert_eq!(parsed(response)["id"], "id-solo");
     }
@@ -584,7 +731,11 @@ mod tests {
             transport.call(envelope("id-b", "status")),
         );
 
-        assert_eq!(parsed(a)["id"], "id-a", "the answered call still resolves Ok");
+        assert_eq!(
+            parsed(a)["id"],
+            "id-a",
+            "the answered call still resolves Ok"
+        );
         match b.unwrap_err() {
             CwError::Rpc(msg) => assert!(msg.contains("id-b"), "unexpected message: {msg}"),
             other => panic!("unexpected error: {other:?}"),
@@ -639,8 +790,8 @@ mod tests {
         let poster = FakePoster::echoing();
         let transport = batch(&poster, BatchConfig::default());
 
-        // Poll the first call exactly once: it enqueues, takes the leader flag, and parks in
-        // the debounce window. Dropping it there models cancellation at an await point.
+        // Poll the first call exactly once: it enqueues, takes the leader flag, and parks
+        // waiting on the first tick. Dropping it there models cancellation at an await point.
         let mut abandoned = Box::pin(transport.call(envelope("id-a", "status")));
         poll_fn(|cx| {
             assert!(abandoned.as_mut().poll(cx).is_pending());
@@ -665,7 +816,10 @@ mod tests {
         assert_eq!(parsed(response)["id"], "id-b");
         let bodies = poster.bodies.borrow();
         assert_eq!(bodies.len(), 1);
-        assert!(bodies[0].contains("id-a"), "the abandoned envelope rode the recovery flush");
+        assert!(
+            bodies[0].contains("id-a"),
+            "the abandoned envelope rode the recovery flush"
+        );
         assert!(transport.queue.borrow().is_empty());
     }
 }

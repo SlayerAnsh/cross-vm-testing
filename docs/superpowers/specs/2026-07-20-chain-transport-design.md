@@ -49,11 +49,11 @@ pub(crate) trait JsonRpcPost {
 pub struct HttpTransport { /* url: Option<String>, chain_id: String, http: reqwest::Client */ }
 
 #[derive(Clone, Copy)]
-pub struct BatchConfig { pub wait: Duration, pub max_size: usize } // Default: 5ms / 100
+pub struct BatchConfig { pub interval: Duration, pub max_size: usize } // Default: 20ms / 20
 
 pub struct BatchHttpTransport {
     /* poster: Rc<dyn JsonRpcPost>, cfg, queue: RefCell<Vec<Pending>>,
-       leader: Cell<bool>, notify: Rc<Notify> */
+       leader: Cell<bool> */
 }
 ```
 
@@ -62,7 +62,7 @@ pub struct BatchHttpTransport {
 ### Batch algorithm (leader driven, no spawn_local)
 
 1. `call()` parses the envelope, extracts the UUIDv4 id, pushes `Pending { id, envelope, oneshot::Sender }` onto the queue.
-2. If the leader flag is clear, this future becomes leader (sets the flag with a drop guard that clears it on cancellation). Leader waits on `select! { sleep(cfg.wait), notify.notified() }`. Pushers fire `notify` when the queue reaches `max_size`, forcing an early flush. Then loop: drain the queue in chunks of `max_size`. A chunk of one posts the bare envelope, larger chunks post a JSON array. Parse the response (array or single object, handle both), route each element to its pending by id, re-serializing the element to `String` through the oneshot. A missing id or POST failure sends `Err` to the affected pendings. If the queue refilled during flight, loop again. When empty, clear the flag.
+2. If the leader flag is clear, this future becomes leader (sets the flag with a drop guard that clears it on cancellation). The leader then runs a tick loop: sleep one `cfg.interval` (the first drain lands a full interval after the leader starts, never immediately), drain at most `max_size` queued calls, and start that chunk's POST without awaiting it, so in flight POSTs overlap later ticks instead of the leader blocking on each. A chunk of one posts the bare envelope, larger chunks post a JSON array. Each POST, once it resolves, parses its response (array or single object, handle both) and routes each element to its pending by id, re-serializing the element to `String` through the oneshot. A missing id or POST failure sends `Err` to the affected pendings. Nothing flushes early: a queue longer than `max_size` simply drains over successive ticks, so a burst settles at a steady one chunk per `interval`. When the queue empties, clear the flag.
 3. Caller awaits its own oneshot for the response string. Closed receiver send errors are ignored (caller cancelled).
 
 No borrow is held across an await (drain before post). Fully unit testable with a fake `JsonRpcPost` and `#[tokio::test(start_paused = true)]`.
@@ -107,7 +107,7 @@ pub struct HttpTransport { /* url: Option<String>, chain_id: String */ }
 - Cosmos sugar (`crates/cosmwasm/src/chains/sugar.rs`): keep `rpc()`, add `rpc_with(wallets, transport)` and `rpc_batched(wallets, BatchConfig)`.
 - EVM sugar (`crates/solidity/src/chains/sugar.rs`): keep `rpc()`, add `rpc_with(wallets, transport)`.
 - Presets are `Copy` and `&'static`, untouched. Transport is chosen at construction, not stored in info.
-- TOML config: `ChainDecl` gains `transport: Option<String>` ("http" default, "batch-http" cosmos only), `batch_wait_ms: Option<u64>`, `batch_max_size: Option<usize>` (cosmos only, valid only with `transport = "batch-http"`). `deny_unknown_fields` means the fields thread explicitly through `ChainDecl`, `domain.rs`, `ChainSpecData`, and the `build_chain` arms. Validation lives in `validate.rs` per chain kind, matching the existing rpc url and target checks.
+- TOML config: `ChainDecl` gains `transport: Option<String>` ("http" default, "batch-http" cosmos only), `batch_interval_ms: Option<u64>`, `batch_max_size: Option<usize>` (cosmos only, valid only with `transport = "batch-http"`). `deny_unknown_fields` means the fields thread explicitly through `ChainDecl`, `domain.rs`, `ChainSpecData`, and the `build_chain` arms. Validation lives in `validate.rs` per chain kind, matching the existing rpc url and target checks.
 - Mock backends, `CwChain`, `AnyChain`: untouched. Transport hides behind `Rc<dyn>` inside the concrete provider.
 
 ## Risks
@@ -147,13 +147,13 @@ pub struct HttpTransport { /* url: Option<String>, chain_id: String */ }
 
 ### T5: Config schema plus validation (opus, parallel with T1 to T4)
 
-- Objective: `ChainDecl` gains `transport`, `batch_wait_ms`, `batch_max_size`; validation: `transport` in {http, batch-http} for cosmos, {http} for evm, absent or http for others; `batch_*` require `transport = "batch-http"`; error messages list valid values (house style).
+- Objective: `ChainDecl` gains `transport`, `batch_interval_ms`, `batch_max_size`; validation: `transport` in {http, batch-http} for cosmos, {http} for evm, absent or http for others; `batch_*` require `transport = "batch-http"`; error messages list valid values (house style).
 - Files: `crates/config/src/chain.rs`, `crates/config/src/validate.rs`, `crates/config/tests/schema.rs`.
 - Done: config crate tests cover accept and reject cases per chain kind.
 
 ### T6: Framework threading plus build_chain (opus, after T2, T4, T5)
 
-- Objective: thread the three fields through `ChainDecl`, `domain.rs`, `ChainSpecData`, and the build arms. Cosmos arm: `"batch-http"` builds `info.rpc_batched(wallets, BatchConfig { wait_ms, max_size })`, else `info.rpc(wallets)`. EVM arm: http only (validated upstream). Tests mirror the `build_threads_gas_adjustment_into_chain_info` pattern: batch selection builds an Rpc chain, absent default is identical to today.
+- Objective: thread the three fields through `ChainDecl`, `domain.rs`, `ChainSpecData`, and the build arms. Cosmos arm: `"batch-http"` builds `info.rpc_batched(wallets, BatchConfig { interval, max_size })`, else `info.rpc(wallets)`. EVM arm: http only (validated upstream). Tests mirror the `build_threads_gas_adjustment_into_chain_info` pattern: batch selection builds an Rpc chain, absent default is identical to today.
 - Files: `crates/framework/src/config/domain.rs`, `crates/framework/src/config/setup_request.rs`, `crates/framework/src/config/build_chain.rs`.
 - Done: framework tests green, mock target never sees transport.
 

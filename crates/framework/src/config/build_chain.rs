@@ -168,10 +168,10 @@ fn build_cosmwasm(
             Some("batch-http") => {
                 let defaults = BatchConfig::default();
                 let cfg = BatchConfig {
-                    wait: spec
-                        .batch_wait_ms
+                    interval: spec
+                        .batch_interval_ms
                         .map(std::time::Duration::from_millis)
-                        .unwrap_or(defaults.wait),
+                        .unwrap_or(defaults.interval),
                     max_size: spec.batch_max_size.unwrap_or(defaults.max_size),
                 };
                 info.rpc_batched(wallets, cfg).into()
@@ -315,7 +315,7 @@ mod tests {
             ws_url: Some("ws://localhost:8900".to_string()),
             commitment: Some("finalized".to_string()),
             transport: None,
-            batch_wait_ms: None,
+            batch_interval_ms: None,
             batch_max_size: None,
         }
     }
@@ -347,7 +347,7 @@ mod tests {
         let mut spec = base_spec(ChainKind::CosmWasm);
         spec.target = Target::Rpc;
         spec.transport = Some("batch-http".to_string());
-        spec.batch_wait_ms = Some(12);
+        spec.batch_interval_ms = Some(12);
         spec.batch_max_size = Some(7);
         let chain = build_chain(&spec, wallets()).expect("build_chain");
         assert!(matches!(chain, AnyChain::CosmWasm(_)));
@@ -361,7 +361,7 @@ mod tests {
         let mut spec = base_spec(ChainKind::CosmWasm);
         spec.target = Target::Rpc;
         spec.transport = Some("batch-http".to_string());
-        spec.batch_wait_ms = None;
+        spec.batch_interval_ms = None;
         spec.batch_max_size = None;
         let chain = build_chain(&spec, wallets()).expect("build_chain");
         assert!(matches!(chain, AnyChain::CosmWasm(_)));

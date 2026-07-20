@@ -122,9 +122,9 @@ fn validate_gas_adjustment(decl: &ChainDecl) -> Result<(), String> {
 /// always means the plain http default). An unknown value is rejected with the valid set spelled
 /// out, matching the `parse_target_str` style.
 ///
-/// `batch_wait_ms` and `batch_max_size` tune the batch transport, so they are meaningless without
-/// it: either set alongside anything but `transport = "batch-http"` is a hard error rather than a
-/// silently ignored field.
+/// `batch_interval_ms` and `batch_max_size` tune the batch transport, so they are meaningless
+/// without it: either set alongside anything but `transport = "batch-http"` is a hard error rather
+/// than a silently ignored field.
 fn validate_transport(decl: &ChainDecl) -> Result<(), String> {
     let allowed: &[&str] = match decl.kind.as_str() {
         "cosmwasm" => &["http", "batch-http"],
@@ -148,7 +148,7 @@ fn validate_transport(decl: &ChainDecl) -> Result<(), String> {
 
     if decl.transport.as_deref() != Some("batch-http") {
         for (value, field) in [
-            (decl.batch_wait_ms.is_some(), "batch_wait_ms"),
+            (decl.batch_interval_ms.is_some(), "batch_interval_ms"),
             (decl.batch_max_size.is_some(), "batch_max_size"),
         ] {
             if value {

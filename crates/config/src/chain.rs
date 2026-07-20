@@ -49,13 +49,13 @@ pub struct ChainDecl {
     /// default when absent) on every kind; `"batch-http"` only on CosmWasm, where it merges
     /// concurrent JSON-RPC calls into one CometBFT batch. Validated per kind in `validate.rs`.
     pub transport: Option<String>,
-    /// CosmWasm `batch-http` only: debounce window in milliseconds before a batch flushes. Valid
-    /// only alongside `transport = "batch-http"`; the transport applies its own default when
-    /// absent.
-    pub batch_wait_ms: Option<u64>,
-    /// CosmWasm `batch-http` only: max calls merged into one batch before an early flush. Valid
-    /// only alongside `transport = "batch-http"`; the transport applies its own default when
-    /// absent.
+    /// CosmWasm `batch-http` only: the timer tick period in milliseconds; each tick drains at most
+    /// `batch_max_size` queued calls into one POST, with no early flush. Valid only alongside
+    /// `transport = "batch-http"`; the transport applies its own default when absent.
+    pub batch_interval_ms: Option<u64>,
+    /// CosmWasm `batch-http` only: the most calls one tick drains into a single POST; any beyond
+    /// that ride later ticks. Valid only alongside `transport = "batch-http"`; the transport
+    /// applies its own default when absent.
     pub batch_max_size: Option<usize>,
 }
 
@@ -105,7 +105,7 @@ mod tests {
             ws_url: None,
             commitment: None,
             transport: None,
-            batch_wait_ms: None,
+            batch_interval_ms: None,
             batch_max_size: None,
         }
     }

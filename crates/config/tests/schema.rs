@@ -845,7 +845,7 @@ fn transport_http_accepted_on_every_kind() {
 fn transport_absent_stays_none() {
     let cfg = cross_vm_config::from_toml_str(&chain_of_kind("evm", ""), &no_vars).unwrap();
     assert_eq!(cfg.ext.chain[0].transport, None);
-    assert_eq!(cfg.ext.chain[0].batch_wait_ms, None);
+    assert_eq!(cfg.ext.chain[0].batch_interval_ms, None);
     assert_eq!(cfg.ext.chain[0].batch_max_size, None);
 }
 
@@ -853,24 +853,29 @@ fn transport_absent_stays_none() {
 fn cosmwasm_batch_http_with_both_knobs_accepted() {
     let toml = chain_of_kind(
         "cosmwasm",
-        "transport = \"batch-http\"\nbatch_wait_ms = 10\nbatch_max_size = 50",
+        "transport = \"batch-http\"\nbatch_interval_ms = 10\nbatch_max_size = 50",
     );
     let cfg =
         cross_vm_config::from_toml_str(&toml, &no_vars).expect("cosmwasm batch-http is valid");
     assert_eq!(cfg.ext.chain[0].transport.as_deref(), Some("batch-http"));
-    assert_eq!(cfg.ext.chain[0].batch_wait_ms, Some(10));
+    assert_eq!(cfg.ext.chain[0].batch_interval_ms, Some(10));
     assert_eq!(cfg.ext.chain[0].batch_max_size, Some(50));
 }
 
 #[test]
 fn unknown_transport_value_is_a_config_error() {
-    let err =
-        cross_vm_config::from_toml_str(&chain_of_kind("cosmwasm", r#"transport = "grpc""#), &no_vars)
-            .unwrap_err();
+    let err = cross_vm_config::from_toml_str(
+        &chain_of_kind("cosmwasm", r#"transport = "grpc""#),
+        &no_vars,
+    )
+    .unwrap_err();
     assert!(matches!(err, ConfigError::Domain(_)), "unexpected: {err}");
     let message = err.to_string();
     assert!(message.contains("transport"), "unexpected: {message}");
-    assert!(message.contains("grpc"), "message should echo value: {message}");
+    assert!(
+        message.contains("grpc"),
+        "message should echo value: {message}"
+    );
     // House style lists the valid values.
     assert!(
         message.contains("\"http\"") && message.contains("\"batch-http\""),
@@ -881,9 +886,11 @@ fn unknown_transport_value_is_a_config_error() {
 #[test]
 fn batch_http_on_evm_is_a_config_error() {
     // EVM ships http only; batch-http has no cosmos-style batching there.
-    let err =
-        cross_vm_config::from_toml_str(&chain_of_kind("evm", r#"transport = "batch-http""#), &no_vars)
-            .unwrap_err();
+    let err = cross_vm_config::from_toml_str(
+        &chain_of_kind("evm", r#"transport = "batch-http""#),
+        &no_vars,
+    )
+    .unwrap_err();
     assert!(matches!(err, ConfigError::Domain(_)), "unexpected: {err}");
     let message = err.to_string();
     assert!(message.contains("transport"), "unexpected: {message}");
@@ -894,16 +901,19 @@ fn batch_http_on_evm_is_a_config_error() {
 }
 
 #[test]
-fn batch_wait_ms_without_batch_http_is_a_config_error() {
+fn batch_interval_ms_without_batch_http_is_a_config_error() {
     // The knob is meaningless without the batch transport, so it is rejected, not ignored.
     let err = cross_vm_config::from_toml_str(
-        &chain_of_kind("cosmwasm", "transport = \"http\"\nbatch_wait_ms = 10"),
+        &chain_of_kind("cosmwasm", "transport = \"http\"\nbatch_interval_ms = 10"),
         &no_vars,
     )
     .unwrap_err();
     assert!(matches!(err, ConfigError::Domain(_)), "unexpected: {err}");
     let message = err.to_string();
-    assert!(message.contains("batch_wait_ms"), "unexpected: {message}");
+    assert!(
+        message.contains("batch_interval_ms"),
+        "unexpected: {message}"
+    );
     assert!(
         message.contains("batch-http"),
         "message should name the required transport: {message}"
@@ -913,11 +923,9 @@ fn batch_wait_ms_without_batch_http_is_a_config_error() {
 #[test]
 fn batch_max_size_without_transport_is_a_config_error() {
     // Even with transport absent (plain http default), the batch knob is rejected.
-    let err = cross_vm_config::from_toml_str(
-        &chain_of_kind("cosmwasm", "batch_max_size = 50"),
-        &no_vars,
-    )
-    .unwrap_err();
+    let err =
+        cross_vm_config::from_toml_str(&chain_of_kind("cosmwasm", "batch_max_size = 50"), &no_vars)
+            .unwrap_err();
     assert!(matches!(err, ConfigError::Domain(_)), "unexpected: {err}");
     assert!(
         err.to_string().contains("batch_max_size"),

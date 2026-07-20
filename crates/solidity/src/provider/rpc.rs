@@ -110,7 +110,8 @@ impl EvmRpcProvider {
     /// Current block number. Inherent fallible variant of the trait's infallible
     /// [`ChainProvider::block_height`].
     pub async fn try_block_height(&self) -> Result<u64, EvmError> {
-        self.provider().await?
+        self.provider()
+            .await?
             .get_block_number()
             .await
             .map_err(|e| EvmError::Rpc(e.to_string()))
@@ -350,7 +351,8 @@ impl EvmRpcProvider {
         let tx = TransactionRequest::default()
             .to(*to)
             .input(Bytes::copy_from_slice(calldata.as_ref()).into());
-        self.provider().await?
+        self.provider()
+            .await?
             .call(tx)
             .await
             .map_err(|e| EvmError::Query(e.to_string()))
@@ -358,7 +360,8 @@ impl EvmRpcProvider {
 
     /// Read the raw storage value at `slot` for `addr` (`eth_getStorageAt`).
     pub async fn get_storage_at(&self, addr: &Address, slot: U256) -> Result<U256, EvmError> {
-        self.provider().await?
+        self.provider()
+            .await?
             .get_storage_at(*addr, slot)
             .await
             .map_err(|e| EvmError::Query(e.to_string()))
@@ -367,7 +370,8 @@ impl EvmRpcProvider {
     /// Read the deployed runtime bytecode at `address` (`eth_getCode`); empty for an EOA or an
     /// undeployed address.
     pub async fn get_code(&self, address: &Address) -> Result<Bytes, EvmError> {
-        self.provider().await?
+        self.provider()
+            .await?
             .get_code_at(*address)
             .await
             .map_err(|e| EvmError::Query(e.to_string()))
@@ -380,7 +384,8 @@ impl EvmRpcProvider {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, EvmError> {
-        self.provider().await?
+        self.provider()
+            .await?
             .raw_request(method.to_string().into(), params)
             .await
             .map_err(|e| EvmError::Rpc(e.to_string()))
@@ -448,7 +453,8 @@ impl ChainProvider for EvmRpcProvider {
     }
 
     async fn balance(&self, addr: &Address) -> Result<U256, EvmError> {
-        self.provider().await?
+        self.provider()
+            .await?
             .get_balance(*addr)
             .await
             .map_err(|e| EvmError::Balance(e.to_string()))

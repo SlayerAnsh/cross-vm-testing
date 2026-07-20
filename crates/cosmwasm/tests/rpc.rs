@@ -32,19 +32,19 @@ async fn live_block_height_is_nonzero() {
 #[tokio::test]
 #[ignore = "requires network access to osmo-test-5"]
 async fn live_batched_transport_coalesces_concurrent_reads() {
-    // A `BatchHttpTransport` with a debounce window wide enough that concurrent calls pile on
-    // before the leader flushes, so they merge into one CometBFT JSON-RPC batch POST. The point
-    // is to prove that array-body batching works against a real node: several reads issued at
-    // once must all come back correctly routed by JSON-RPC id.
+    // A `BatchHttpTransport` with a tick interval wide enough that concurrent calls pile on
+    // before the leader's first tick, so they merge into one CometBFT JSON-RPC batch POST. The
+    // point is to prove that array-body batching works against a real node: several reads
+    // issued at once must all come back correctly routed by JSON-RPC id.
     let chain = OSMOSIS_TESTNET.rpc_batched(
         empty_wallets(),
         BatchConfig {
-            wait: Duration::from_millis(20),
+            interval: Duration::from_millis(20),
             ..BatchConfig::default()
         },
     );
 
-    // Five concurrent status reads: awaited together, they enqueue within the same window and
+    // Five concurrent status reads: awaited together, they enqueue before the first tick and
     // ride a single batch request. Distinct JSON-RPC ids exercise id-based response routing.
     let (h1, h2, h3, h4, h5) = tokio::join!(
         chain.try_block_height(),
@@ -66,7 +66,7 @@ async fn live_batched_transport_coalesces_concurrent_reads() {
         assert!(height > 0, "expected a nonzero block height, got {height}");
     }
 
-    // All reads hit the same node within a debounce window, so the tip should barely move; a
+    // All reads hit the same node within one tick interval, so the tip should barely move; a
     // few blocks of slack covers a boundary crossing without letting a misrouted response pass.
     let min = heights.iter().min().copied().unwrap();
     let max = heights.iter().max().copied().unwrap();
