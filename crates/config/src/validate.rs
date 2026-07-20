@@ -35,6 +35,7 @@ pub(crate) fn validate_chains(cfg: &RunConfig) -> Result<(), String> {
         validate_chain_kind_non_empty(decl)?;
         validate_chain_fields(decl)?;
         validate_gas_adjustment(decl)?;
+        validate_transport(decl)?;
     }
 
     for (name, profile) in &cfg.profiles {
@@ -109,6 +110,57 @@ fn validate_gas_adjustment(decl: &ChainDecl) -> Result<(), String> {
         )),
         _ => Ok(()),
     }
+}
+
+/// `transport` names a transport the chain's kind can build, and the batch knobs are only set
+/// when that transport is the batching one.
+///
+/// The transport is a construction-time choice, not preset data, so this crate only checks the
+/// declared string against the kinds that ship a matching provider transport: CosmWasm has both
+/// `"http"` and `"batch-http"` (the batch transport merges concurrent JSON-RPC calls into one
+/// CometBFT request), EVM has `"http"` only, and every other kind accepts `"http"` alone (absent
+/// always means the plain http default). An unknown value is rejected with the valid set spelled
+/// out, matching the `parse_target_str` style.
+///
+/// `batch_wait_ms` and `batch_max_size` tune the batch transport, so they are meaningless without
+/// it: either set alongside anything but `transport = "batch-http"` is a hard error rather than a
+/// silently ignored field.
+fn validate_transport(decl: &ChainDecl) -> Result<(), String> {
+    let allowed: &[&str] = match decl.kind.as_str() {
+        "cosmwasm" => &["http", "batch-http"],
+        "evm" => &["http"],
+        _ => &["http"],
+    };
+
+    if let Some(transport) = &decl.transport {
+        if !allowed.contains(&transport.as_str()) {
+            let valid = allowed
+                .iter()
+                .map(|v| format!("\"{v}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "chain `{}` (kind `{}`): invalid `transport` value `{}`, expected one of {}",
+                decl.label, decl.kind, transport, valid
+            ));
+        }
+    }
+
+    if decl.transport.as_deref() != Some("batch-http") {
+        for (value, field) in [
+            (decl.batch_wait_ms.is_some(), "batch_wait_ms"),
+            (decl.batch_max_size.is_some(), "batch_max_size"),
+        ] {
+            if value {
+                return Err(format!(
+                    "chain `{}`: `{}` is only valid with `transport = \"batch-http\"`",
+                    decl.label, field
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_env_selection(

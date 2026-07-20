@@ -30,6 +30,7 @@ use crate::chains::EvmChainInfo;
 use crate::error::EvmError;
 use crate::provider::address::address_from_label;
 use crate::provider::{EvmDeploy, EvmExecution, EvmGas, EvmGasLimit};
+use crate::transport::{EvmTransport, HttpTransport};
 
 /// The gas a mined receipt reports: the billed gas, plus the fee it implies. The effective price
 /// already folds in the EIP-1559 base fee and priority tip, so `used * price` is the whole fee.
@@ -47,7 +48,9 @@ fn receipt_gas<R: ReceiptResponse>(receipt: &R) -> EvmGas {
 #[derive(Clone)]
 pub struct EvmRpcProvider {
     info: EvmChainInfo,
-    rpc_url: String,
+    /// Pluggable JSON-RPC transport: a factory over alloy's `RpcClient` seam. Defaults to
+    /// [`HttpTransport`]; a caller can inject any [`EvmTransport`] (custom stack, mock, ...).
+    transport: Rc<dyn EvmTransport>,
     /// Shared wallet roster; empty until the testing env attaches one at setup.
     pub(crate) wallets: Rc<WalletFactory>,
     /// Per-label derived-signer cache (derive once, reuse).
@@ -60,52 +63,54 @@ impl EvmRpcProvider {
     /// Stays infallible so `SEPOLIA.rpc(wallets)` sugar keeps working; a missing or empty `rpc_url`
     /// surfaces as an error at the first network call instead.
     pub fn new(info: EvmChainInfo, wallets: Rc<WalletFactory>) -> Self {
-        let rpc_url = info.rpc_url.unwrap_or("").to_string();
+        let transport = Rc::new(HttpTransport::new(
+            info.rpc_url.map(str::to_string),
+            info.chain_id.to_string(),
+        ));
+        Self::new_with_transport(info, wallets, transport)
+    }
+
+    /// Create an RPC provider bound to a chain's metadata over a caller-supplied [`EvmTransport`].
+    ///
+    /// The transport is the factory for alloy's `RpcClient`; use this to attach a custom HTTP
+    /// stack, an instrumenting wrapper, a websocket transport, or a `RpcClient::mocked` asserter in
+    /// tests. [`new`](Self::new) is the sugar that defaults to [`HttpTransport`].
+    pub fn new_with_transport(
+        info: EvmChainInfo,
+        wallets: Rc<WalletFactory>,
+        transport: Rc<dyn EvmTransport>,
+    ) -> Self {
         Self {
             info,
-            rpc_url,
+            transport,
             wallets,
             signers: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
-    /// Build an alloy HTTP provider that signs and fills (nonce/gas/chain-id) with `signer`.
-    fn signing_provider(&self, signer: &PrivateKeySigner) -> Result<impl Provider, EvmError> {
-        if self.rpc_url.is_empty() {
-            return Err(EvmError::Rpc(format!(
-                "chain '{}' has no rpc_url; use a chain preset with an endpoint",
-                self.info.chain_id
-            )));
-        }
-        let url = self
-            .rpc_url
-            .parse()
-            .map_err(|e| EvmError::Rpc(format!("invalid rpc url: {e}")))?;
+    /// Build an alloy provider that signs and fills (nonce/gas/chain-id) with `signer`.
+    ///
+    /// Async because the transport resolves its `RpcClient` asynchronously (http resolves
+    /// immediately; a future websocket transport connects on first use).
+    async fn signing_provider(&self, signer: &PrivateKeySigner) -> Result<impl Provider, EvmError> {
+        let client = self.transport.rpc_client().await?;
         let wallet = EthereumWallet::from(signer.clone());
-        Ok(ProviderBuilder::new().wallet(wallet).connect_http(url))
+        Ok(ProviderBuilder::new().wallet(wallet).connect_client(client))
     }
 
-    /// Build an alloy HTTP provider for this chain's endpoint.
+    /// Build an alloy provider for this chain's endpoint.
     ///
-    /// Cheap (just a reqwest client, no connection), so callers build per request.
-    fn provider(&self) -> Result<impl Provider, EvmError> {
-        if self.rpc_url.is_empty() {
-            return Err(EvmError::Rpc(format!(
-                "chain '{}' has no rpc_url; use a chain preset with an endpoint",
-                self.info.chain_id
-            )));
-        }
-        let url = self
-            .rpc_url
-            .parse()
-            .map_err(|e| EvmError::Rpc(format!("invalid rpc url: {e}")))?;
-        Ok(ProviderBuilder::new().connect_http(url))
+    /// Cheap (the http transport just builds a reqwest client, no connection), so callers build per
+    /// request. Async for the same reason as [`signing_provider`](Self::signing_provider).
+    async fn provider(&self) -> Result<impl Provider, EvmError> {
+        let client = self.transport.rpc_client().await?;
+        Ok(ProviderBuilder::new().connect_client(client))
     }
 
     /// Current block number. Inherent fallible variant of the trait's infallible
     /// [`ChainProvider::block_height`].
     pub async fn try_block_height(&self) -> Result<u64, EvmError> {
-        self.provider()?
+        self.provider().await?
             .get_block_number()
             .await
             .map_err(|e| EvmError::Rpc(e.to_string()))
@@ -173,7 +178,7 @@ impl EvmRpcProvider {
         };
         let mut initcode = bytecode.to_vec();
         initcode.extend_from_slice(constructor_args.as_ref());
-        let provider = self.signing_provider(signer)?;
+        let provider = self.signing_provider(signer).await?;
         // `with_deploy_code` sets the input and marks the tx kind as Create; setting only the
         // input leaves the recipient ambiguous and the wallet filler rejects it.
         let tx = TransactionRequest::default()
@@ -212,7 +217,7 @@ impl EvmRpcProvider {
         let tx = TransactionRequest::default()
             .with_from(*from)
             .with_deploy_code(Bytes::from(initcode));
-        let provider = self.provider()?;
+        let provider = self.provider().await?;
         let used = provider
             .estimate_gas(tx)
             .await
@@ -250,7 +255,7 @@ impl EvmRpcProvider {
             .to(*to)
             .value(value)
             .input(Bytes::copy_from_slice(calldata.as_ref()).into());
-        let provider = self.provider()?;
+        let provider = self.provider().await?;
         let used = provider
             .estimate_gas(tx)
             .await
@@ -309,7 +314,7 @@ impl EvmRpcProvider {
                 self.info.adjusted_gas_limit(quote.used)
             }
         };
-        let provider = self.signing_provider(signer)?;
+        let provider = self.signing_provider(signer).await?;
         let tx = TransactionRequest::default()
             .to(*to)
             .value(value)
@@ -345,7 +350,7 @@ impl EvmRpcProvider {
         let tx = TransactionRequest::default()
             .to(*to)
             .input(Bytes::copy_from_slice(calldata.as_ref()).into());
-        self.provider()?
+        self.provider().await?
             .call(tx)
             .await
             .map_err(|e| EvmError::Query(e.to_string()))
@@ -353,7 +358,7 @@ impl EvmRpcProvider {
 
     /// Read the raw storage value at `slot` for `addr` (`eth_getStorageAt`).
     pub async fn get_storage_at(&self, addr: &Address, slot: U256) -> Result<U256, EvmError> {
-        self.provider()?
+        self.provider().await?
             .get_storage_at(*addr, slot)
             .await
             .map_err(|e| EvmError::Query(e.to_string()))
@@ -362,7 +367,7 @@ impl EvmRpcProvider {
     /// Read the deployed runtime bytecode at `address` (`eth_getCode`); empty for an EOA or an
     /// undeployed address.
     pub async fn get_code(&self, address: &Address) -> Result<Bytes, EvmError> {
-        self.provider()?
+        self.provider().await?
             .get_code_at(*address)
             .await
             .map_err(|e| EvmError::Query(e.to_string()))
@@ -375,7 +380,7 @@ impl EvmRpcProvider {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, EvmError> {
-        self.provider()?
+        self.provider().await?
             .raw_request(method.to_string().into(), params)
             .await
             .map_err(|e| EvmError::Rpc(e.to_string()))
@@ -391,19 +396,11 @@ impl EvmRpcProvider {
         signer: &PrivateKeySigner,
     ) -> Result<Bytes, EvmError> {
         // `fill` is an inherent method on the concrete signing provider, so it is built here rather
-        // than through `signing_provider`, whose `impl Provider` erases it.
-        if self.rpc_url.is_empty() {
-            return Err(EvmError::Rpc(format!(
-                "chain '{}' has no rpc_url; use a chain preset with an endpoint",
-                self.info.chain_id
-            )));
-        }
-        let url = self
-            .rpc_url
-            .parse()
-            .map_err(|e| EvmError::Rpc(format!("invalid rpc url: {e}")))?;
+        // than through `signing_provider`, whose `impl Provider` erases it. `connect_client` keeps
+        // the provider concrete, so the inherent `fill` survives the transport indirection.
+        let client = self.transport.rpc_client().await?;
         let wallet = EthereumWallet::from(signer.clone());
-        let provider = ProviderBuilder::new().wallet(wallet).connect_http(url);
+        let provider = ProviderBuilder::new().wallet(wallet).connect_client(client);
         match provider
             .fill(tx)
             .await
@@ -421,7 +418,8 @@ impl EvmRpcProvider {
     /// paths, so a caller that sees a hash back knows the transaction was mined.
     pub async fn send_raw_transaction(&self, raw: &[u8]) -> Result<B256, EvmError> {
         let receipt = self
-            .provider()?
+            .provider()
+            .await?
             .send_raw_transaction(raw)
             .await
             .map_err(|e| EvmError::Execute(e.to_string()))?
@@ -450,7 +448,7 @@ impl ChainProvider for EvmRpcProvider {
     }
 
     async fn balance(&self, addr: &Address) -> Result<U256, EvmError> {
-        self.provider()?
+        self.provider().await?
             .get_balance(*addr)
             .await
             .map_err(|e| EvmError::Balance(e.to_string()))

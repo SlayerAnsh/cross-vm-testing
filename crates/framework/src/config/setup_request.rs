@@ -80,6 +80,19 @@ pub struct ChainSpecData {
     /// the Solana arm of [`build_chain`](crate::config::build_chain::build_chain). `None` means the
     /// declaration omitted `commitment`; `build_chain` applies the `finalized` default.
     pub commitment: Option<String>,
+    /// RPC transport selector, carried verbatim from the declaration. `None` or `"http"` (the
+    /// default) means one POST per call; `"batch-http"` (CosmWasm only, validated upstream in the
+    /// config crate) selects the batching transport in the CosmWasm arm of
+    /// [`build_chain`](crate::config::build_chain::build_chain). Every other kind ignores it.
+    pub transport: Option<String>,
+    /// CosmWasm `batch-http` only: the batch debounce window in milliseconds. `None` means the
+    /// transport's own default applies (validated upstream to only appear with
+    /// `transport = "batch-http"`).
+    pub batch_wait_ms: Option<u64>,
+    /// CosmWasm `batch-http` only: the largest batch a single POST carries. `None` means the
+    /// transport's own default applies (validated upstream to only appear with
+    /// `transport = "batch-http"`).
+    pub batch_max_size: Option<usize>,
 }
 
 /// The fully assembled input to a config-driven setup fn.

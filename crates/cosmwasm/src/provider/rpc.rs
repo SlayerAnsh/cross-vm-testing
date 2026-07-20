@@ -42,7 +42,8 @@ use cosmrs::bank::MsgSend;
 use cosmrs::cosmwasm::{
     MsgExecuteContract, MsgInstantiateContract, MsgMigrateContract, MsgStoreCode,
 };
-use cosmrs::rpc::{Client, HttpClient};
+use cosmrs::rpc::endpoint::{abci_query, broadcast::tx_commit, status};
+use cosmrs::rpc::{Request as RpcRequest, Response as _, SimpleRequest};
 use cosmrs::tendermint::abci::Event as TmEvent;
 use cosmrs::tx::{Body, Fee, Msg, SignDoc, SignerInfo};
 use cosmrs::{AccountId, Coin as CosmrsCoin, Denom};
@@ -57,6 +58,7 @@ use crate::chains::CosmosChainInfo;
 use crate::error::CwError;
 use crate::msg::CwSerde;
 use crate::provider::{CwExecution, CwGas, CwGasLimit, CwInstantiate, CwMigrate, CwStoreCode};
+use crate::transport::{CosmosTransport, HttpTransport};
 use crate::wallet::CosmosSigner;
 
 /// A live-RPC CosmWasm provider. Chain-level reads and contract queries hit a real node via
@@ -67,7 +69,10 @@ use crate::wallet::CosmosSigner;
 #[derive(Clone)]
 pub struct CwRpcProvider {
     info: CosmosChainInfo,
-    rpc_url: String,
+    /// The JSON-RPC transport every network call rides. Defaults to [`HttpTransport`] (one POST
+    /// per call); [`Self::new_with_transport`] injects anything else (batching, instrumentation,
+    /// a test fake).
+    transport: Rc<dyn CosmosTransport>,
     /// Shared wallet roster; empty until the testing env attaches one at setup.
     pub(crate) wallets: Rc<WalletFactory>,
     /// Per-label derived-signer cache (derive once, reuse).
@@ -75,40 +80,53 @@ pub struct CwRpcProvider {
 }
 
 impl CwRpcProvider {
-    /// Create an RPC provider bound to a chain's metadata.
+    /// Create an RPC provider bound to a chain's metadata, riding the default [`HttpTransport`].
     ///
     /// Stays infallible so `OSMOSIS_TESTNET.rpc(wallets)` sugar keeps working; a missing or empty
-    /// `rpc_url` surfaces as an error at the first network call instead.
+    /// `rpc_url` surfaces as an error at the first network call instead (the transport raises it).
     pub fn new(info: CosmosChainInfo, wallets: Rc<WalletFactory>) -> Self {
-        let rpc_url = info.rpc_url.unwrap_or("").to_string();
+        let transport = Rc::new(HttpTransport::new(info.rpc_url, info.chain_id));
+        Self::new_with_transport(info, wallets, transport)
+    }
+
+    /// Create an RPC provider riding a caller-supplied [`CosmosTransport`].
+    pub fn new_with_transport(
+        info: CosmosChainInfo,
+        wallets: Rc<WalletFactory>,
+        transport: Rc<dyn CosmosTransport>,
+    ) -> Self {
         Self {
             info,
-            rpc_url,
+            transport,
             wallets,
             signers: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
-    /// Build a Tendermint HTTP client for this chain's endpoint.
-    ///
-    /// Cheap (just constructs a reqwest client, no connection), so callers build per request.
-    fn client(&self) -> Result<HttpClient, CwError> {
-        if self.rpc_url.is_empty() {
-            return Err(CwError::Rpc(format!(
-                "chain '{}' has no rpc_url; use a chain preset with an endpoint",
-                self.info.chain_id
-            )));
-        }
-        HttpClient::new(self.rpc_url.as_str()).map_err(|e| CwError::Rpc(e.to_string()))
+    /// Run one typed Tendermint RPC request over the transport: serialize the request into its
+    /// JSON-RPC envelope, send it, and parse the response envelope back into the request's typed
+    /// output (JSON-RPC error envelopes become typed errors here, in the parser).
+    async fn perform<R>(&self, req: R) -> Result<R::Output, CwError>
+    where
+        R: SimpleRequest,
+    {
+        let resp = self.transport.call(req.into_json()).await?;
+        let parsed = <R as RpcRequest>::Response::from_string(resp)
+            .map_err(|e| CwError::Rpc(e.to_string()))?;
+        Ok(parsed.into())
     }
 
     /// Run a raw ABCI query and return the response bytes.
     async fn abci_query(&self, path: &str, data: Vec<u8>) -> Result<Vec<u8>, CwError> {
-        let client = self.client()?;
-        let res = client
-            .abci_query(Some(path.to_string()), data, None, false)
-            .await
-            .map_err(|e| CwError::Rpc(e.to_string()))?;
+        let res = self
+            .perform(abci_query::Request::new(
+                Some(path.to_string()),
+                data,
+                None,
+                false,
+            ))
+            .await?
+            .response;
         if res.code.is_err() {
             return Err(CwError::Query(format!(
                 "abci_query {path} failed (code {:?}): {}",
@@ -121,11 +139,7 @@ impl CwRpcProvider {
     /// Current block height from the node's sync info. Inherent fallible variant of the
     /// trait's infallible [`ChainProvider::block_height`].
     pub async fn try_block_height(&self) -> Result<u64, CwError> {
-        let client = self.client()?;
-        let status = client
-            .status()
-            .await
-            .map_err(|e| CwError::Rpc(e.to_string()))?;
+        let status = self.perform(status::Request).await?;
         Ok(status.sync_info.latest_block_height.value())
     }
 
@@ -197,7 +211,6 @@ impl CwRpcProvider {
         gas_limit: u64,
         memo: &str,
     ) -> Result<(String, Vec<TmEvent>, CwGas), CwError> {
-        let client = self.client()?;
         let (account_number, sequence) = self.account_info(signer.address.as_str()).await?;
 
         let chain_id = self
@@ -229,10 +242,10 @@ impl CwRpcProvider {
             .sign(signer.key.as_ref())
             .map_err(|e| CwError::Execute(format!("sign: {e}")))?;
 
-        let resp = raw
-            .broadcast_commit(&client)
-            .await
-            .map_err(|e| CwError::Rpc(format!("broadcast: {e}")))?;
+        let tx_bytes = raw
+            .to_bytes()
+            .map_err(|e| CwError::Rpc(format!("encode tx: {e}")))?;
+        let resp = self.perform(tx_commit::Request::new(tx_bytes)).await?;
         if resp.check_tx.code.is_err() {
             return Err(CwError::Execute(format!(
                 "check_tx failed (code {:?}): {}",
@@ -1205,5 +1218,74 @@ mod tests {
         let body = TxBody::decode(raw.body_bytes.as_slice()).unwrap();
         assert_eq!(body.messages.len(), 1);
         assert_eq!(body.messages[0].type_url, "/cosmos.bank.v1beta1.MsgSend");
+    }
+
+    /// A fake [`CosmosTransport`] answering `/status` with a canned node status at a fixed
+    /// height. Proves the whole `perform` path (envelope out, typed parse back) without a node.
+    struct StatusTransport {
+        height: u64,
+    }
+
+    impl CosmosTransport for StatusTransport {
+        fn call(&self, request: String) -> crate::transport::TransportFuture<'_> {
+            Box::pin(async move {
+                let req: serde_json::Value =
+                    serde_json::from_str(&request).expect("request envelope is JSON");
+                assert_eq!(req["method"], "status", "try_block_height sends /status");
+                // The response body a CometBFT 0.38 node returns for /status (trimmed from the
+                // tendermint-rpc kvstore fixture), with the id echoed back per JSON-RPC.
+                Ok(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req["id"],
+                    "result": {
+                        "node_info": {
+                            "channels": "40202122233038606100",
+                            "id": "cf4a66aa29e5123abfdfbdf485da6788bb8e46d1",
+                            "listen_addr": "tcp://0.0.0.0:26656",
+                            "moniker": "fake-node",
+                            "network": "cosmos-testing",
+                            "other": {"rpc_address": "tcp://0.0.0.0:26657", "tx_index": "on"},
+                            "protocol_version": {"app": "1", "block": "11", "p2p": "8"},
+                            "version": "0.38.0"
+                        },
+                        "sync_info": {
+                            "catching_up": false,
+                            "earliest_app_hash": "0000000000000000",
+                            "earliest_block_hash":
+                                "6CD5CF4E23A49D9BC073D6F305D29D1B8B5193B534C237696D42FEA5AFBCD520",
+                            "earliest_block_height": "1",
+                            "earliest_block_time": "2023-05-17T14:12:48.347696215Z",
+                            "latest_app_hash": "0600000000000000",
+                            "latest_block_hash":
+                                "B647CF507155BADAC86FADD00E38B065C63A84953A847AA9FA99DB1CEE6C4DA9",
+                            "latest_block_height": self.height.to_string(),
+                            "latest_block_time": "2023-05-17T14:14:48.530153458Z"
+                        },
+                        "validator_info": {
+                            "address": "2DD9F44FD9067555C322243C3C913BA7B51D2BE0",
+                            "pub_key": {
+                                "type": "tendermint/PubKeyEd25519",
+                                "value": "bNNlGls5R25wC3Sd8720F/3+7IZBhXcD22MNFtPk/v0="
+                            },
+                            "voting_power": "10"
+                        }
+                    }
+                })
+                .to_string())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn try_block_height_rides_an_injected_transport() {
+        let wallets = Rc::new(WalletFactory::from_roster(&[]).expect("empty roster"));
+        let provider = CwRpcProvider::new_with_transport(
+            crate::chains::LOCAL,
+            wallets,
+            Rc::new(StatusTransport { height: 4242 }),
+        );
+
+        let height = provider.try_block_height().await.expect("status parses");
+        assert_eq!(height, 4242);
     }
 }

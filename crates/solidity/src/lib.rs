@@ -20,6 +20,7 @@ mod chain;
 pub mod chains;
 mod error;
 mod provider;
+pub mod transport;
 mod wallet;
 
 #[cfg(test)]
@@ -34,3 +35,4 @@ pub use provider::{
     EvmDeploy, EvmExecution, EvmGas, EvmGasLimit, EvmInner, EvmMockProvider, EvmRpcProvider,
     DEFAULT_FUNDING_WEI,
 };
+pub use transport::{EvmClientFuture, EvmTransport, HttpTransport};

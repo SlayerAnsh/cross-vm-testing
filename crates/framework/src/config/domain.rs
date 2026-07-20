@@ -213,6 +213,9 @@ fn resolve_chains(
             spec_id,
             ws_url: decl.ws_url.clone(),
             commitment,
+            transport: decl.transport.clone(),
+            batch_wait_ms: decl.batch_wait_ms,
+            batch_max_size: decl.batch_max_size,
         });
     }
 

@@ -141,7 +141,7 @@ fn build_cosmwasm(
     spec: &ChainSpecData,
     wallets: Rc<WalletFactory>,
 ) -> Result<AnyChain, HarnessError> {
-    use cross_vm_cosmwasm::CosmosChainInfo;
+    use cross_vm_cosmwasm::{BatchConfig, CosmosChainInfo};
 
     let bech32_prefix = spec.bech32_prefix.as_deref().unwrap_or_default();
     let native_denom = spec.native_denom.as_deref().unwrap_or_default();
@@ -159,7 +159,25 @@ fn build_cosmwasm(
     };
     Ok(match spec.target {
         Target::Mock => info.mock(wallets).into(),
-        Target::Rpc => info.rpc(wallets).into(),
+        // The transport selector only matters on the live path. `"batch-http"` (validated
+        // upstream as CosmWasm-only) swaps the default per-call `HttpTransport` for the
+        // coalescing `BatchHttpTransport`; absent or `"http"` keeps the plain `rpc()` behavior
+        // (identical to before this seam existed). The `batch_*` knobs, when absent, fall back to
+        // `BatchConfig`'s own defaults field by field.
+        Target::Rpc => match spec.transport.as_deref() {
+            Some("batch-http") => {
+                let defaults = BatchConfig::default();
+                let cfg = BatchConfig {
+                    wait: spec
+                        .batch_wait_ms
+                        .map(std::time::Duration::from_millis)
+                        .unwrap_or(defaults.wait),
+                    max_size: spec.batch_max_size.unwrap_or(defaults.max_size),
+                };
+                info.rpc_batched(wallets, cfg).into()
+            }
+            _ => info.rpc(wallets).into(),
+        },
     })
 }
 
@@ -296,6 +314,9 @@ mod tests {
             spec_id: Some("cancun".to_string()),
             ws_url: Some("ws://localhost:8900".to_string()),
             commitment: Some("finalized".to_string()),
+            transport: None,
+            batch_wait_ms: None,
+            batch_max_size: None,
         }
     }
 
@@ -314,6 +335,50 @@ mod tests {
         spec.target = Target::Rpc;
         let chain = build_chain(&spec, wallets()).expect("build_chain");
         assert!(matches!(chain, AnyChain::CosmWasm(_)));
+    }
+
+    /// `transport = "batch-http"` (with its knobs) still materializes a live CosmWasm RPC chain:
+    /// the selector swaps the underlying transport, not the chain kind or target. Construction is
+    /// infallible (the transport errors lazily at the first call), so building alone proves the
+    /// batch arm wires without touching a node.
+    #[cfg(feature = "cw")]
+    #[test]
+    fn build_cosmwasm_batch_http_builds_rpc_chain() {
+        let mut spec = base_spec(ChainKind::CosmWasm);
+        spec.target = Target::Rpc;
+        spec.transport = Some("batch-http".to_string());
+        spec.batch_wait_ms = Some(12);
+        spec.batch_max_size = Some(7);
+        let chain = build_chain(&spec, wallets()).expect("build_chain");
+        assert!(matches!(chain, AnyChain::CosmWasm(_)));
+    }
+
+    /// A `batch-http` selection with no `batch_*` knobs must still build (the transport falls back
+    /// to `BatchConfig`'s own field defaults), so absent knobs are never a build-time error.
+    #[cfg(feature = "cw")]
+    #[test]
+    fn build_cosmwasm_batch_http_defaults_knobs_when_absent() {
+        let mut spec = base_spec(ChainKind::CosmWasm);
+        spec.target = Target::Rpc;
+        spec.transport = Some("batch-http".to_string());
+        spec.batch_wait_ms = None;
+        spec.batch_max_size = None;
+        let chain = build_chain(&spec, wallets()).expect("build_chain");
+        assert!(matches!(chain, AnyChain::CosmWasm(_)));
+    }
+
+    /// Absent transport (and an explicit `"http"`) are identical to the behavior before the seam:
+    /// a plain live RPC chain, byte-for-byte the same `rpc()` path the default has always taken.
+    #[cfg(feature = "cw")]
+    #[test]
+    fn build_cosmwasm_absent_transport_is_plain_rpc() {
+        for selector in [None, Some("http".to_string())] {
+            let mut spec = base_spec(ChainKind::CosmWasm);
+            spec.target = Target::Rpc;
+            spec.transport = selector;
+            let chain = build_chain(&spec, wallets()).expect("build_chain");
+            assert!(matches!(chain, AnyChain::CosmWasm(_)));
+        }
     }
 
     #[cfg(feature = "evm")]

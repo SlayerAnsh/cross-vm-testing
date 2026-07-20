@@ -25,6 +25,8 @@ bip39.workspace = true
 hex.workspace = true
 # Async mutex for the per-wallet broadcast lock (held across await on a current-thread rt).
 tokio.workspace = true
+# Raw JSON-RPC POSTs for the transport layer (HttpTransport / BatchHttpTransport).
+reqwest.workspace = true
 
 [features]
 # Opt-in, default-off. Enables the concrete public/well-known chain preset instances
@@ -34,7 +36,8 @@ tokio.workspace = true
 presets = []
 
 [dev-dependencies]
-tokio.workspace = true
+# `test-util` adds the paused clock the batch-transport window tests drive.
+tokio = { workspace = true, features = ["test-util"] }
 cross-vm-macros.workspace = true
 # Self dev-dependency to force-enable `presets` for this crate's own tests, doctests, and
 # examples without leaking the feature into a downstream default build.
